@@ -56,10 +56,10 @@
 
 ### Task 5: Curvature Post-check
 
-- [ ] Write failing tests for straight path, gentle path, and sharp-turn violation.
-- [ ] Implement discrete curvature report.
-- [ ] Verify curvature tests pass.
-- [ ] Commit with `feat: add curvature post-check`.
+- [x] Write failing tests for straight path, gentle path, and sharp-turn violation.
+- [x] Implement discrete curvature report.
+- [x] Verify curvature tests pass.
+- [x] Commit with `feat: add curvature post-check`.
 
 ### Task 6: Pipeline, JSON, CLI, Diagnostics
 
