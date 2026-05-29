@@ -9,9 +9,12 @@ from .models import (
     PostprocessResult,
     SmoothedPathResult,
 )
+from .smoothing import has_line_of_sight, smooth_path
 
 __all__ = [
     "build_corridor",
+    "has_line_of_sight",
+    "smooth_path",
     "CorridorResult",
     "CorridorSection",
     "CurvatureReport",

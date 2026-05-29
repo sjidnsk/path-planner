@@ -49,10 +49,10 @@
 
 ### Task 4: Line-of-sight Smoothing
 
-- [ ] Write failing tests for shortcut success, obstacle-blocked shortcut, and invalid path fallback.
-- [ ] Implement grid line-of-sight and shortcut smoothing.
-- [ ] Verify smoothing tests pass.
-- [ ] Commit with `feat: add path smoothing shortcut`.
+- [x] Write failing tests for shortcut success, obstacle-blocked shortcut, and invalid path fallback.
+- [x] Implement grid line-of-sight and shortcut smoothing.
+- [x] Verify smoothing tests pass.
+- [x] Commit with `feat: add path smoothing shortcut`.
 
 ### Task 5: Curvature Post-check
 
