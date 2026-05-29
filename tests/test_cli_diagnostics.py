@@ -1,3 +1,7 @@
+import json
+import subprocess
+import sys
+
 import numpy as np
 
 from path_planner.core import Cell, CostGrid, GridSpec, PlanRequest
@@ -20,3 +24,33 @@ def test_render_diagnostics_writes_png_and_html(tmp_path):
     assert "Cost + Path" in html
     assert "trajectory_kind" in html
     assert "geometric_path" in html
+
+
+def test_cli_demo_writes_json_png_and_html(tmp_path):
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "path-planner-route/v1"
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert (output_dir / "diagnostics.png").exists()
+    assert (output_dir / "diagnostics.html").exists()
+    assert "reachable" in completed.stdout
