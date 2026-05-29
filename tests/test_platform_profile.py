@@ -14,6 +14,7 @@ def test_load_planner_platform_profile_reads_yutu2_from_dev_platform_constraints
     assert profile.body_length_m == pytest.approx(1.5)
     assert profile.body_width_m == pytest.approx(1.1)
     assert profile.footprint_radius_m == pytest.approx(math.hypot(1.5, 1.1) / 2.0 + 0.1)
+    assert profile.speed_max_mps == pytest.approx(200.0 / 3600.0)
     assert profile.effective_min_turning_radius_m is None
     assert "min_turning_radius" in profile.parameter_sources
     assert any("min_turning_radius" in warning for warning in profile.constraint_warnings)

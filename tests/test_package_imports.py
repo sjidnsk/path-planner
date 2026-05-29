@@ -24,12 +24,16 @@ def test_dependency_metadata_caps_numpy_before_windows_matplotlib_crash_range():
     assert '"numpy>=1.26,<2.3"' in content
 
 
-def test_readme_describes_phase3_platform_aware_search_scope_and_non_goals():
+def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     from pathlib import Path
 
     readme = Path(__file__).resolve().parents[1] / "README.md"
     content = readme.read_text(encoding="utf-8")
 
+    assert "Phase 4" in content
+    assert "trackable_path" in content
+    assert "TrackingSafetyReport" in content
+    assert "speed_profile" in content
     assert "Phase 3" in content
     assert "platform-aware A*" in content
     assert "PlanningGrid" in content

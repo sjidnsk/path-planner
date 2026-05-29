@@ -40,9 +40,17 @@ Phase 3 moves platform constraints into the search stage:
 - diagnostics record `search_mode`, `passable_source`, platform key, footprint radius, and original versus inflated blocked counts;
 - structured search terrain layers are reserved for slope, roughness, illumination, and confidence inputs from future lunar maps.
 
+Phase 4 adds a trackable-path interface and execution feasibility diagnostics:
+
+- `trackable_path` converts the selected raw or smoothed path into waypoint records for a path tracker;
+- each waypoint includes heading, segment length, turn angle, curvature, turning radius, and recommended speed;
+- `speed_profile` is a conservative recommendation derived from platform speed, local cost, and curvature;
+- `TrackingSafetyReport` checks whether a configured tracking-error tube remains inside the platform-aware safe region;
+- diagnostics visualize trackable waypoints, heading arrows, and tracking-safety violations.
+
 This project does not implement GCS, IRIS, Ackermann trajectory optimization, Drake integration, exploration target selection, observation updates, or an online planning service.
 
-The planner returns a platform-filtered `geometric_path` plus feasibility diagnostics, not a vehicle-executable trajectory.
+The planner returns a platform-filtered `geometric_path` plus a trackable-path interface and feasibility diagnostics, not a closed-loop controller command stream.
 
 ## Development Environment
 
@@ -78,6 +86,7 @@ Optional platform arguments:
 ```powershell
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform yutu2 --safety-margin-m 0.1
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform-config D:\codex\project\lunar-path-planning\dev-platform-constraints\configs\platforms\yutu2.json
+python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --tracking-error-bound-m 0.1 --min-speed-mps 0.01
 ```
 
 Expected outputs:
@@ -88,7 +97,8 @@ Expected outputs:
 
 The route JSON preserves Phase 1 fields and adds a `postprocess` object with
 `platform_profile`, `constraint_warnings`, `corridor_report`, `raw_path`,
-`corridor`, `smoothed_path`, `curvature_report`, and `fallback_status`.
+`corridor`, `smoothed_path`, `curvature_report`, `trackable_path`,
+`tracking_safety_report`, and `fallback_status`.
 The top-level `diagnostics` object also records whether A* used
 `platform_aware_astar` and `inflated_passable_mask`.
 

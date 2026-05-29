@@ -5,6 +5,7 @@ from typing import Any
 
 from path_planner.core import Cell, WorldPoint
 from path_planner.platform import PlannerPlatformProfile
+from path_planner.trajectory import TrackablePath, TrackingSafetyReport
 
 
 def _cells_to_lists(cells: tuple[Cell, ...]) -> list[list[int]]:
@@ -138,6 +139,8 @@ class PostprocessResult:
     fallback_status: FallbackStatus
     platform_profile: PlannerPlatformProfile | None = None
     constraint_warnings: tuple[str, ...] = ()
+    trackable_path: TrackablePath | None = None
+    tracking_safety_report: TrackingSafetyReport | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -159,5 +162,9 @@ class PostprocessResult:
             "corridor": self.corridor.to_dict(),
             "smoothed_path": self.smoothed_path.to_dict(),
             "curvature_report": self.curvature_report.to_dict(),
+            "trackable_path": self.trackable_path.to_dict() if self.trackable_path is not None else None,
+            "tracking_safety_report": (
+                self.tracking_safety_report.to_dict() if self.tracking_safety_report is not None else None
+            ),
             "fallback_status": self.fallback_status.to_dict(),
         }

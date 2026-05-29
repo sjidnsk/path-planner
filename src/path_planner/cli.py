@@ -33,6 +33,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=3.0,
         help="Maximum cell cost allowed inside a smoothing shortcut",
     )
+    parser.add_argument(
+        "--max-speed-mps",
+        type=float,
+        default=None,
+        help="Maximum recommended trackable-path speed in m/s; defaults to platform speed_max when available",
+    )
+    parser.add_argument(
+        "--min-speed-mps",
+        type=float,
+        default=0.01,
+        help="Minimum recommended trackable-path speed in m/s",
+    )
+    parser.add_argument(
+        "--tracking-error-bound-m",
+        type=float,
+        default=0.0,
+        help="Lateral tracking error bound used for conservative safety-tube diagnostics",
+    )
     return parser
 
 
@@ -47,6 +65,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     planning_grid = build_planning_grid(grid, platform_profile=platform_profile)
     result = AStarPlanner().plan(planning_grid, request)
+    max_speed_mps = (
+        args.max_speed_mps
+        if args.max_speed_mps is not None
+        else platform_profile.speed_max_mps
+        if platform_profile.speed_max_mps is not None
+        else 0.2
+    )
     postprocess = run_postprocess(
         grid,
         result,
@@ -54,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
         max_curvature=args.max_curvature,
         max_shortcut_cost=args.max_shortcut_cost,
         platform_profile=platform_profile,
+        max_speed_mps=max_speed_mps,
+        min_speed_mps=args.min_speed_mps,
+        tracking_error_bound_m=args.tracking_error_bound_m,
     )
 
     output_json = Path(args.output_json)
@@ -77,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
                 "failure_reason": payload["failure_reason"],
                 "platform": platform_profile.platform_key,
                 "search_mode": result.diagnostics.search_mode,
+                "trackable_waypoints": len(postprocess.trackable_path.waypoints) if postprocess.trackable_path else 0,
                 "constraint_warnings": len(platform_profile.constraint_warnings),
             },
             ensure_ascii=False,

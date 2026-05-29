@@ -89,12 +89,20 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert payload["postprocess"]["raw_path"]["cells"] == payload["geometric_path"]["cells"]
     assert "curvature_report" in payload["postprocess"]
     assert "samples" in payload["postprocess"]["curvature_report"]
+    assert "trackable_path" in payload["postprocess"]
+    assert payload["postprocess"]["trackable_path"]["source_path"] == "smoothed_path"
+    assert payload["postprocess"]["trackable_path"]["waypoints"]
+    assert "speed_profile" in payload["postprocess"]["trackable_path"]
+    assert "tracking_safety_report" in payload["postprocess"]
+    assert "is_safe" in payload["postprocess"]["tracking_safety_report"]
     assert (output_dir / "diagnostics.png").exists()
     assert (output_dir / "diagnostics.html").exists()
     html = (output_dir / "diagnostics.html").read_text(encoding="utf-8")
     assert "Search Constraints" in html
     assert "platform_aware_astar" in html
     assert "inflated_passable_mask" in html
+    assert "Trackable Path" in html
+    assert "Tracking Safety Summary" in html
     assert "Rover Footprint Scale" in html
     assert "rover body length/width and footprint radius are drawn from platform_profile" in html
     assert "reachable" in completed.stdout

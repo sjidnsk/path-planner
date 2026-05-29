@@ -27,6 +27,7 @@ class PlannerPlatformProfile:
     parameter_sources: dict[str, dict[str, Any]]
     constraint_sources: dict[str, str]
     constraint_warnings: tuple[str, ...]
+    speed_max_mps: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +44,7 @@ class PlannerPlatformProfile:
                 "ground_clearance_m": self.ground_clearance_m,
                 "raw_min_turning_radius_m": self.raw_min_turning_radius_m,
                 "effective_min_turning_radius_m": self.effective_min_turning_radius_m,
+                "speed_max_mps": self.speed_max_mps,
             },
             "derived_constraints": {
                 "safety_margin_m": self.safety_margin_m,
@@ -147,6 +149,7 @@ def planner_profile_from_platform_parameters(
         parameter_sources=parameter_sources,
         constraint_sources=constraint_sources,
         constraint_warnings=tuple(warnings),
+        speed_max_mps=_optional_speed_mps(platform_parameters, "speed_max"),
     )
 
 
@@ -160,6 +163,19 @@ def _optional_raw_value(platform_parameters: Any, key: str) -> Any | None:
     if key not in platform_parameters.parameters:
         return None
     return platform_parameters.parameters[key].value
+
+
+def _optional_speed_mps(platform_parameters: Any, key: str) -> float | None:
+    if key not in platform_parameters.parameters:
+        return None
+    parameter = platform_parameters.parameters[key]
+    value = float(platform_parameters.float_value(key))
+    unit = str(parameter.unit).lower()
+    if unit in {"m/s", "mps"}:
+        return value
+    if unit in {"m/h", "m/hr", "m/hour"}:
+        return value / 3600.0
+    return value
 
 
 def _parameter_to_source(parameter: Any) -> dict[str, Any]:

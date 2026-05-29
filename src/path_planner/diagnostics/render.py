@@ -29,6 +29,7 @@ DIAGNOSTIC_COLORS = {
     "raw_path": "#ffffff",
     "raw_path_outline": "#111827",
     "smoothed_path": "#06b6d4",
+    "trackable_path": "#a855f7",
     "start": "#16a34a",
     "goal": "#dc2626",
     "violation": "#dc2626",
@@ -80,6 +81,7 @@ def render_diagnostics(
                 "<li>Safety Corridor</li>",
                 "<li>Vehicle-inflated Blocked Cells</li>",
                 "<li>Smoothed Path</li>",
+                "<li>Trackable Path</li>",
                 "<li>Blocked Cells</li>",
                 "<li>Passable Mask</li>",
                 "<li>Expanded Nodes</li>",
@@ -90,7 +92,9 @@ def render_diagnostics(
                 "Cost + Path legend is placed outside the plot area; "
                 "blue outlines mark the Safety Corridor; amber diagonal hatching marks vehicle-inflated blocked cells; "
                 "black filled cells are blocked by passable_mask; white line with dark outline is raw A* path; "
-                "cyan dashed line is smoothed path; red X markers are curvature or turning-radius violations; "
+                "cyan dashed line is smoothed path; purple markers/arrows are trackable waypoints; "
+                "red X markers are curvature or turning-radius violations; "
+                "red square markers are tracking-safety violations; "
                 "green dot is start; red dot is goal.</p>",
                 "<p>In Expanded Nodes, light cells are unexpanded passable space; "
                 "blue filled cells are A* expanded nodes; black filled cells are blocked cells.</p>",
@@ -102,6 +106,10 @@ def render_diagnostics(
                 _html_platform_summary(postprocess),
                 "<h2>Postprocess Summary</h2>",
                 postprocess_summary,
+                "<h2>Trackable Path</h2>",
+                _html_trackable_path_summary(postprocess),
+                "<h2>Tracking Safety Summary</h2>",
+                _html_tracking_safety_summary(postprocess),
                 "<h2>Route JSON</h2>",
                 f"<pre>{summary}</pre>",
                 "</body></html>",
@@ -195,6 +203,33 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
                 path_effects.Normal(),
             ],
         )
+    if postprocess is not None and postprocess.trackable_path is not None and postprocess.trackable_path.waypoints:
+        waypoints = postprocess.trackable_path.waypoints
+        xs = [waypoint.cell.x for waypoint in waypoints]
+        ys = [waypoint.cell.y for waypoint in waypoints]
+        ax.scatter(
+            xs,
+            ys,
+            c=DIAGNOSTIC_COLORS["trackable_path"],
+            edgecolors=DIAGNOSTIC_COLORS["raw_path"],
+            linewidths=0.7,
+            s=28,
+            marker="D",
+            label="Trackable Waypoint",
+            zorder=5.0,
+        )
+        ax.quiver(
+            xs,
+            ys,
+            [np.cos(waypoint.heading_rad) for waypoint in waypoints],
+            [np.sin(waypoint.heading_rad) for waypoint in waypoints],
+            color=DIAGNOSTIC_COLORS["trackable_path"],
+            angles="xy",
+            scale_units="xy",
+            scale=3.0,
+            width=0.006,
+            zorder=5.1,
+        )
     if postprocess is not None and postprocess.curvature_report.violation_indices:
         curvature_cells = (
             postprocess.smoothed_path.cells
@@ -215,6 +250,30 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
                 s=82,
                 linewidths=2.2,
                 label="Curvature Violation",
+            )
+    if (
+        postprocess is not None
+        and postprocess.trackable_path is not None
+        and postprocess.tracking_safety_report is not None
+        and postprocess.tracking_safety_report.violation_indices
+    ):
+        waypoints = postprocess.trackable_path.waypoints
+        violation_waypoints = [
+            waypoints[index]
+            for index in postprocess.tracking_safety_report.violation_indices
+            if 0 <= index < len(waypoints)
+        ]
+        if violation_waypoints:
+            ax.scatter(
+                [waypoint.cell.x for waypoint in violation_waypoints],
+                [waypoint.cell.y for waypoint in violation_waypoints],
+                c=DIAGNOSTIC_COLORS["violation"],
+                marker="s",
+                s=78,
+                linewidths=1.2,
+                edgecolors=DIAGNOSTIC_COLORS["raw_path"],
+                label="Tracking Safety Violation",
+                zorder=5.3,
             )
     handles, labels = _cost_path_legend_handles(grid, result, postprocess)
     if handles:
@@ -257,6 +316,18 @@ def _cost_path_legend_handles(
     if postprocess is not None and postprocess.smoothed_path.cells:
         handles.append(Line2D([0], [0], color=DIAGNOSTIC_COLORS["smoothed_path"], linewidth=1.7, linestyle="--"))
         labels.append("Smoothed Path")
+    if postprocess is not None and postprocess.trackable_path is not None and postprocess.trackable_path.waypoints:
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="D",
+                color="none",
+                markerfacecolor=DIAGNOSTIC_COLORS["trackable_path"],
+                markersize=6,
+            )
+        )
+        labels.append("Trackable Path")
     if postprocess is not None and postprocess.corridor.sections:
         handles.append(Patch(facecolor="none", edgecolor=DIAGNOSTIC_COLORS["corridor"], linestyle="--", linewidth=1.3))
         labels.append("Safety Corridor")
@@ -270,6 +341,15 @@ def _cost_path_legend_handles(
             Line2D([0], [0], marker="x", color=DIAGNOSTIC_COLORS["violation"], linestyle="none", markersize=8)
         )
         labels.append("Curvature Violation")
+    if (
+        postprocess is not None
+        and postprocess.tracking_safety_report is not None
+        and postprocess.tracking_safety_report.violation_indices
+    ):
+        handles.append(
+            Line2D([0], [0], marker="s", color=DIAGNOSTIC_COLORS["violation"], linestyle="none", markersize=7)
+        )
+        labels.append("Tracking Safety Violation")
     if np.any(~grid.passable_mask):
         handles.append(Patch(facecolor=DIAGNOSTIC_COLORS["blocked"], alpha=0.94))
         labels.append("Blocked Cells")
@@ -518,6 +598,7 @@ def _html_postprocess_summary(postprocess: PostprocessResult | None) -> str:
             f"<li>curvature_report: {html.escape(report.summary)}</li>",
             f"<li>constraint_min_turning_radius: {html.escape(str(report.constraint_min_turning_radius))}</li>",
             f"<li>curvature_samples: {len(report.samples)}</li>",
+            f"<li>trackable_waypoints: {0 if postprocess.trackable_path is None else len(postprocess.trackable_path.waypoints)}</li>",
             "</ul>",
             _html_warnings(postprocess),
             _html_curvature_table(postprocess),
@@ -546,6 +627,65 @@ def _html_platform_summary(postprocess: PostprocessResult | None) -> str:
         "</table>",
     ]
     return "\n".join(rows)
+
+
+def _html_trackable_path_summary(postprocess: PostprocessResult | None) -> str:
+    if postprocess is None or postprocess.trackable_path is None:
+        return "<p>trackable_path: not generated</p>"
+    path = postprocess.trackable_path
+    rows = [
+        "<ul>",
+        f"<li>source_path: {html.escape(path.source_path)}</li>",
+        f"<li>waypoint_count: {len(path.waypoints)}</li>",
+        f"<li>length_m: {path.length_m:.3f}</li>",
+        f"<li>max_curvature: {path.max_curvature:.6f}</li>",
+        f"<li>min_turning_radius_m: {html.escape(str(path.min_turning_radius_m))}</li>",
+        f"<li>speed_profile: {html.escape(str([round(value, 4) for value in path.speed_profile]))}</li>",
+        "</ul>",
+        "<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">",
+        "<thead><tr>",
+        "<th>index</th>",
+        "<th>cell</th>",
+        "<th>heading_rad</th>",
+        "<th>turn_angle_deg</th>",
+        "<th>curvature</th>",
+        "<th>speed_mps</th>",
+        "</tr></thead>",
+        "<tbody>",
+    ]
+    for waypoint in path.waypoints:
+        rows.append(
+            "<tr>"
+            f"<td>{waypoint.index}</td>"
+            f"<td>{html.escape(str(waypoint.cell.to_list()))}</td>"
+            f"<td>{waypoint.heading_rad:.3f}</td>"
+            f"<td>{waypoint.turn_angle_deg:.3f}</td>"
+            f"<td>{waypoint.curvature:.6f}</td>"
+            f"<td>{waypoint.recommended_speed_mps:.4f}</td>"
+            "</tr>"
+        )
+    if not path.waypoints:
+        rows.append("<tr><td colspan=\"6\">no trackable waypoints</td></tr>")
+    rows.extend(["</tbody>", "</table>"])
+    return "\n".join(rows)
+
+
+def _html_tracking_safety_summary(postprocess: PostprocessResult | None) -> str:
+    if postprocess is None or postprocess.tracking_safety_report is None:
+        return "<p>tracking_safety_report: not generated</p>"
+    report = postprocess.tracking_safety_report
+    return "\n".join(
+        [
+            "<ul>",
+            f"<li>is_safe: {report.is_safe}</li>",
+            f"<li>tracking_error_bound_m: {report.tracking_error_bound_m}</li>",
+            f"<li>checked_radius_m: {report.checked_radius_m}</li>",
+            f"<li>min_clearance_m: {html.escape(str(report.min_clearance_m))}</li>",
+            f"<li>violation_indices: {html.escape(str(list(report.violation_indices)))}</li>",
+            f"<li>summary: {html.escape(report.summary)}</li>",
+            "</ul>",
+        ]
+    )
 
 
 def _html_search_summary(result: PlanResult) -> str:
