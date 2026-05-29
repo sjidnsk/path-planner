@@ -6,14 +6,17 @@ from pathlib import Path
 
 from path_planner.adapters import load_plan_input, route_result_to_json_dict
 from path_planner.diagnostics import render_diagnostics
+from path_planner.postprocess import run_postprocess
 from path_planner.search import AStarPlanner
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run Phase 1 path planner demo")
+    parser = argparse.ArgumentParser(description="Run Phase 2 path planner demo")
     parser.add_argument("--input", required=True, help="Path to path-planner-request/v1 JSON")
     parser.add_argument("--output-json", required=True, help="Path to write route JSON")
     parser.add_argument("--output-dir", required=True, help="Directory for diagnostics.png and diagnostics.html")
+    parser.add_argument("--corridor-radius-cells", type=int, default=1, help="Corridor radius in grid cells")
+    parser.add_argument("--max-curvature", type=float, default=1.0, help="Maximum allowed discrete curvature")
     return parser
 
 
@@ -21,16 +24,23 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     grid, request = load_plan_input(args.input)
     result = AStarPlanner().plan(grid, request)
+    postprocess = run_postprocess(
+        grid,
+        result,
+        corridor_radius_cells=args.corridor_radius_cells,
+        max_curvature=args.max_curvature,
+    )
 
     output_json = Path(args.output_json)
     output_json.parent.mkdir(parents=True, exist_ok=True)
-    payload = route_result_to_json_dict(result, grid.spec)
+    payload = route_result_to_json_dict(result, grid.spec, postprocess=postprocess)
     output_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     output_dir = Path(args.output_dir)
     render_diagnostics(
         grid,
         result,
+        postprocess=postprocess,
         png_path=output_dir / "diagnostics.png",
         html_path=output_dir / "diagnostics.html",
     )

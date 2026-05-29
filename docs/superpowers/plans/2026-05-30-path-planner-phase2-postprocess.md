@@ -63,12 +63,12 @@
 
 ### Task 6: Pipeline, JSON, CLI, Diagnostics
 
-- [ ] Write failing pipeline and CLI tests for the `postprocess` JSON payload.
-- [ ] Implement postprocess pipeline and route serialization extension.
-- [ ] Update CLI to run postprocess after A* success.
-- [ ] Update diagnostics to overlay raw and smoothed paths and include curvature/fallback summary.
-- [ ] Verify updated tests pass.
-- [ ] Commit with `feat: expose postprocess outputs`.
+- [x] Write failing pipeline and CLI tests for the `postprocess` JSON payload.
+- [x] Implement postprocess pipeline and route serialization extension.
+- [x] Update CLI to run postprocess after A* success.
+- [x] Update diagnostics to overlay raw and smoothed paths and include curvature/fallback summary.
+- [x] Verify updated tests pass.
+- [x] Commit with `feat: expose postprocess outputs`.
 
 ### Task 7: Final Verification And README
 

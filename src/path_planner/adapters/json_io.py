@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from path_planner.core import Cell, CostGrid, GridSpec, PlanRequest, PlanResult
+from path_planner.postprocess import PostprocessResult
 
 REQUEST_SCHEMA_VERSION = "path-planner-request/v1"
 
@@ -38,5 +39,13 @@ def load_plan_input(path: str | Path) -> tuple[CostGrid, PlanRequest]:
     return grid, request
 
 
-def route_result_to_json_dict(result: PlanResult, spec: GridSpec) -> dict[str, Any]:
-    return result.to_route_dict(spec)
+def route_result_to_json_dict(
+    result: PlanResult,
+    spec: GridSpec,
+    *,
+    postprocess: PostprocessResult | None = None,
+) -> dict[str, Any]:
+    payload = result.to_route_dict(spec)
+    if postprocess is not None:
+        payload["postprocess"] = postprocess.to_dict()
+    return payload
