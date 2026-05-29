@@ -1,6 +1,6 @@
 # path-planner
 
-Phase 1 lunar path planner rebuilt from scratch. This package does not copy or depend on `a_gcs_ws-2.0.1`; that project is only a reference for problem framing.
+Lunar path planner rebuilt from scratch. This package does not copy or depend on `a_gcs_ws-2.0.1`; that project is only a reference for problem framing.
 
 ## Scope
 
@@ -13,9 +13,17 @@ Phase 1 provides:
 - CLI JSON output;
 - PNG/HTML diagnostics.
 
-Phase 1 does not implement GCS, IRIS, Ackermann trajectory optimization, Drake integration, exploration target selection, observation updates, or an online planning service.
+Phase 2 adds a lightweight postprocess layer:
 
-The planner returns a `geometric_path`, not a vehicle-executable trajectory.
+- conservative `corridor` sections around the raw A* path;
+- line-of-sight shortcut smoothing that outputs `smoothed_path`;
+- discrete curvature post-check that outputs `curvature_report`;
+- `fallback_status` so failed postprocess steps keep the raw A* path available;
+- diagnostics that overlay raw and smoothed paths.
+
+This project does not implement GCS, IRIS, Ackermann trajectory optimization, Drake integration, exploration target selection, observation updates, or an online planning service.
+
+The planner returns a `geometric_path` plus Phase 2 feasibility diagnostics, not a vehicle-executable trajectory.
 
 ## Development Environment
 
@@ -52,6 +60,10 @@ Expected outputs:
 - `outputs/demo/diagnostics.png`
 - `outputs/demo/diagnostics.html`
 
+The route JSON preserves Phase 1 fields and adds a `postprocess` object with
+`raw_path`, `corridor`, `smoothed_path`, `curvature_report`, and
+`fallback_status`.
+
 ## External Interface Direction
 
-`dev-platform-constraints` can provide `cost` and `passable_mask` through `DevPlatformAdapter`. `model-explorer` can consume the route JSON fields `reachable`, `geometric_path`, `path_cost`, `diagnostics`, and `failure_reason`.
+`dev-platform-constraints` can provide `cost` and `passable_mask` through `DevPlatformAdapter`. `model-explorer` can consume the route JSON fields `reachable`, `geometric_path`, `path_cost`, `diagnostics`, `failure_reason`, and the optional `postprocess` object.

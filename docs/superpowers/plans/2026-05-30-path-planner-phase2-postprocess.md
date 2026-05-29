@@ -72,11 +72,11 @@
 
 ### Task 7: Final Verification And README
 
-- [ ] Update README with Phase 2 capabilities, environment, commands, and non-goals.
-- [ ] Run `python -m pytest`.
-- [ ] Run CLI demo and inspect generated route JSON fields.
-- [ ] Check `git status --short --ignored`.
-- [ ] Commit docs with `docs: describe phase 2 postprocess workflow`.
+- [x] Update README with Phase 2 capabilities, environment, commands, and non-goals.
+- [x] Run `python -m pytest`.
+- [x] Run CLI demo and inspect generated route JSON fields.
+- [x] Check `git status --short --ignored`.
+- [x] Commit docs with `docs: describe phase 2 postprocess workflow`.
 
 ## Self-Review
 

@@ -22,3 +22,16 @@ def test_dependency_metadata_caps_numpy_before_windows_matplotlib_crash_range():
     content = pyproject.read_text(encoding="utf-8")
 
     assert '"numpy>=1.26,<2.3"' in content
+
+
+def test_readme_describes_phase2_postprocess_scope_and_non_goals():
+    from pathlib import Path
+
+    readme = Path(__file__).resolve().parents[1] / "README.md"
+    content = readme.read_text(encoding="utf-8")
+
+    assert "Phase 2" in content
+    assert "corridor" in content
+    assert "smoothed_path" in content
+    assert "curvature_report" in content
+    assert "does not implement GCS, IRIS, Ackermann trajectory optimization, Drake" in content
