@@ -1,0 +1,9 @@
+.superpowers/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+htmlcov/
+.coverage
+dist/
+build/
+*.egg-info/
