@@ -16,6 +16,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from path_planner.core import CostGrid, PlanResult
+from path_planner.optimization import (
+    TrajectoryOptimizationResult,
+    build_tracking_metric_comparison,
+    merge_tracking_comparison,
+)
 from path_planner.postprocess import PostprocessResult
 from path_planner.postprocess.footprint import build_footprint_safe_mask
 from path_planner.tracking import TrackingSimulationResult
@@ -32,6 +37,7 @@ DIAGNOSTIC_COLORS = {
     "smoothed_path": "#06b6d4",
     "trackable_path": "#a855f7",
     "simulated_path": "#f97316",
+    "optimized_path": "#22c55e",
     "start": "#16a34a",
     "goal": "#dc2626",
     "violation": "#dc2626",
@@ -50,6 +56,8 @@ def render_diagnostics(
     *,
     postprocess: PostprocessResult | None = None,
     tracking_simulation: TrackingSimulationResult | None = None,
+    trajectory_optimization: TrajectoryOptimizationResult | None = None,
+    optimized_tracking_simulation: TrackingSimulationResult | None = None,
     png_path: str | Path,
     html_path: str | Path,
 ) -> None:
@@ -59,7 +67,7 @@ def render_diagnostics(
     page.parent.mkdir(parents=True, exist_ok=True)
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.8), constrained_layout=True)
-    _plot_cost_path(axes[0, 0], grid, result, postprocess, tracking_simulation)
+    _plot_cost_path(axes[0, 0], grid, result, postprocess, tracking_simulation, trajectory_optimization)
     _plot_mask(axes[0, 1], grid)
     _plot_expanded(axes[1, 0], grid, result)
     _plot_metrics(axes[1, 1], result, postprocess)
@@ -71,6 +79,14 @@ def render_diagnostics(
         route["postprocess"] = postprocess.to_dict()
     if tracking_simulation is not None:
         route["tracking_simulation_report"] = tracking_simulation.to_dict()
+    if trajectory_optimization is not None:
+        route["trajectory_optimization_report"] = merge_tracking_comparison(
+            trajectory_optimization.to_dict(),
+            tracking_simulation,
+            optimized_tracking_simulation,
+        )
+    if optimized_tracking_simulation is not None:
+        route["optimized_tracking_simulation_report"] = optimized_tracking_simulation.to_dict()
     summary = html.escape(json.dumps(route, ensure_ascii=False, indent=2))
     postprocess_summary = _html_postprocess_summary(postprocess)
     page.write_text(
@@ -88,6 +104,7 @@ def render_diagnostics(
                 "<li>Smoothed Path</li>",
                 "<li>Trackable Path</li>",
                 "<li>Simulated Tracking Path</li>",
+                "<li>Optimized Path</li>",
                 "<li>Blocked Cells</li>",
                 "<li>Passable Mask</li>",
                 "<li>Expanded Nodes</li>",
@@ -100,6 +117,7 @@ def render_diagnostics(
                 "black filled cells are blocked by passable_mask; white line with dark outline is raw A* path; "
                 "cyan dashed line is smoothed path; purple markers/arrows are trackable waypoints; "
                 "orange line is simulated tracking path; "
+                "green line is optimized path; "
                 "red X markers are curvature or turning-radius violations; "
                 "red square markers are tracking-safety violations; "
                 "green dot is start; red dot is goal.</p>",
@@ -119,6 +137,12 @@ def render_diagnostics(
                 _html_tracking_safety_summary(postprocess),
                 "<h2>Tracking Simulation Summary</h2>",
                 _html_tracking_simulation_summary(tracking_simulation),
+                "<h2>Trajectory Optimization Summary</h2>",
+                _html_trajectory_optimization_summary(
+                    trajectory_optimization,
+                    tracking_simulation,
+                    optimized_tracking_simulation,
+                ),
                 "<h2>Route JSON</h2>",
                 f"<pre>{summary}</pre>",
                 "</body></html>",
@@ -134,6 +158,7 @@ def _plot_cost_path(
     result: PlanResult,
     postprocess: PostprocessResult | None,
     tracking_simulation: TrackingSimulationResult | None,
+    trajectory_optimization: TrajectoryOptimizationResult | None,
 ) -> None:
     image = ax.imshow(grid.cost, cmap=COST_CMAP, origin="upper")
     colorbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
@@ -260,6 +285,21 @@ def _plot_cost_path(
                 path_effects.Normal(),
             ],
         )
+    if trajectory_optimization is not None and trajectory_optimization.optimized_path:
+        xs = [_world_x_to_grid_x(grid, point.x) for point in trajectory_optimization.optimized_path]
+        ys = [_world_y_to_grid_y(grid, point.y) for point in trajectory_optimization.optimized_path]
+        ax.plot(
+            xs,
+            ys,
+            color=DIAGNOSTIC_COLORS["optimized_path"],
+            linewidth=2.1,
+            label="Optimized Path",
+            zorder=5.25,
+            path_effects=[
+                path_effects.Stroke(linewidth=3.5, foreground=DIAGNOSTIC_COLORS["raw_path_outline"]),
+                path_effects.Normal(),
+            ],
+        )
     if postprocess is not None and postprocess.curvature_report.violation_indices:
         curvature_cells = (
             postprocess.smoothed_path.cells
@@ -327,7 +367,7 @@ def _plot_cost_path(
                 label="Tracking Simulation Violation",
                 zorder=5.4,
             )
-    handles, labels = _cost_path_legend_handles(grid, result, postprocess, tracking_simulation)
+    handles, labels = _cost_path_legend_handles(grid, result, postprocess, tracking_simulation, trajectory_optimization)
     if handles:
         ax.legend(
             handles,
@@ -350,6 +390,7 @@ def _cost_path_legend_handles(
     result: PlanResult,
     postprocess: PostprocessResult | None,
     tracking_simulation: TrackingSimulationResult | None,
+    trajectory_optimization: TrajectoryOptimizationResult | None,
 ) -> tuple[list[object], list[str]]:
     handles: list[object] = []
     labels: list[str] = []
@@ -384,6 +425,9 @@ def _cost_path_legend_handles(
     if tracking_simulation is not None and tracking_simulation.states:
         handles.append(Line2D([0], [0], color=DIAGNOSTIC_COLORS["simulated_path"], linewidth=1.8))
         labels.append("Simulated Tracking Path")
+    if trajectory_optimization is not None and trajectory_optimization.optimized_path:
+        handles.append(Line2D([0], [0], color=DIAGNOSTIC_COLORS["optimized_path"], linewidth=2.1))
+        labels.append("Optimized Path")
     if postprocess is not None and postprocess.corridor.sections:
         handles.append(Patch(facecolor="none", edgecolor=DIAGNOSTIC_COLORS["corridor"], linestyle="--", linewidth=1.3))
         labels.append("Safety Corridor")
@@ -782,6 +826,54 @@ def _html_tracking_simulation_summary(tracking_simulation: TrackingSimulationRes
             "</ul>",
         ]
     )
+
+
+def _html_trajectory_optimization_summary(
+    trajectory_optimization: TrajectoryOptimizationResult | None,
+    tracking_simulation: TrackingSimulationResult | None,
+    optimized_tracking_simulation: TrackingSimulationResult | None,
+) -> str:
+    if trajectory_optimization is None:
+        return "<p>trajectory_optimization_report: not run</p>"
+    metrics = trajectory_optimization.metrics
+    fallback = trajectory_optimization.fallback_status
+    comparison = build_tracking_metric_comparison(tracking_simulation, optimized_tracking_simulation)
+    rows = [
+        "<ul>",
+        f"<li>solver_status: {html.escape(trajectory_optimization.solver_status)}</li>",
+        f"<li>fallback_status: {html.escape(str(fallback.to_dict()))}</li>",
+        f"<li>optimized_waypoints: {len(trajectory_optimization.optimized_path)}</li>",
+        f"<li>reference_path_length_m: {metrics.reference_path_length_m:.3f}</li>",
+        f"<li>optimized_path_length_m: {metrics.optimized_path_length_m:.3f}</li>",
+        f"<li>length_delta_m: {metrics.length_delta_m:.3f}</li>",
+        f"<li>reference_high_cost_exposure: {metrics.reference_high_cost_exposure:.3f}</li>",
+        f"<li>optimized_high_cost_exposure: {metrics.optimized_high_cost_exposure:.3f}</li>",
+        f"<li>high_cost_exposure_delta: {metrics.high_cost_exposure_delta:.3f}</li>",
+        f"<li>curvature_violation_count: {metrics.curvature_violation_count}</li>",
+        f"<li>objective_initial: {metrics.objective_initial:.6f}</li>",
+        f"<li>objective_final: {metrics.objective_final:.6f}</li>",
+        f"<li>solver_iterations: {metrics.solver_iterations}</li>",
+        f"<li>is_within_corridor: {metrics.is_within_corridor}</li>",
+        "</ul>",
+        "<h3>baseline_vs_optimized</h3>",
+    ]
+    if comparison:
+        rows.extend(["<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">", "<thead><tr>"])
+        rows.extend(["<th>metric</th>", "<th>baseline</th>", "<th>optimized</th>", "<th>delta</th>"])
+        rows.extend(["</tr></thead>", "<tbody>"])
+        for metric, values in comparison.items():
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(metric)}</td>"
+                f"<td>{html.escape(str(values['baseline']))}</td>"
+                f"<td>{html.escape(str(values['optimized']))}</td>"
+                f"<td>{html.escape(str(values['delta']))}</td>"
+                "</tr>"
+            )
+        rows.extend(["</tbody>", "</table>"])
+    else:
+        rows.append(f"<pre>{html.escape(json.dumps(metrics.baseline_vs_optimized, ensure_ascii=False, indent=2))}</pre>")
+    return "\n".join(rows)
 
 
 def _html_search_summary(result: PlanResult) -> str:

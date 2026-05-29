@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from path_planner.core import Cell, CostGrid, GridSpec, PlanRequest, PlanResult
+from path_planner.optimization import TrajectoryOptimizationResult, merge_tracking_comparison
 from path_planner.postprocess import PostprocessResult
 from path_planner.tracking import TrackingSimulationResult
 
@@ -46,10 +47,20 @@ def route_result_to_json_dict(
     *,
     postprocess: PostprocessResult | None = None,
     tracking_simulation: TrackingSimulationResult | None = None,
+    trajectory_optimization: TrajectoryOptimizationResult | None = None,
+    optimized_tracking_simulation: TrackingSimulationResult | None = None,
 ) -> dict[str, Any]:
     payload = result.to_route_dict(spec)
     if postprocess is not None:
         payload["postprocess"] = postprocess.to_dict()
     if tracking_simulation is not None:
         payload["tracking_simulation_report"] = tracking_simulation.to_dict()
+    if trajectory_optimization is not None:
+        payload["trajectory_optimization_report"] = merge_tracking_comparison(
+            trajectory_optimization.to_dict(),
+            tracking_simulation,
+            optimized_tracking_simulation,
+        )
+    if optimized_tracking_simulation is not None:
+        payload["optimized_tracking_simulation_report"] = optimized_tracking_simulation.to_dict()
     return payload

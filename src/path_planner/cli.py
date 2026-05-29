@@ -6,6 +6,7 @@ from pathlib import Path
 
 from path_planner.adapters import load_plan_input, route_result_to_json_dict
 from path_planner.diagnostics import render_diagnostics
+from path_planner.optimization import TrajectoryOptimizationConfig, optimize_trajectory
 from path_planner.platform import DEFAULT_PLATFORM_KEY, load_planner_platform_profile
 from path_planner.postprocess import run_postprocess
 from path_planner.search import AStarPlanner, build_planning_grid
@@ -60,6 +61,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lookahead-m", type=float, default=0.75, help="Pure-pursuit lookahead distance in meters")
     parser.add_argument("--time-step-s", type=float, default=0.2, help="Tracking simulation time step in seconds")
     parser.add_argument("--max-sim-time-s", type=float, default=600.0, help="Maximum tracking simulation time in seconds")
+    parser.add_argument(
+        "--optimize-trajectory",
+        action="store_true",
+        help="Run fixed-corridor continuous trajectory optimization prototype",
+    )
+    parser.add_argument("--optimization-weight-smoothness", type=float, default=2.0)
+    parser.add_argument("--optimization-weight-cost", type=float, default=2.0)
+    parser.add_argument("--optimization-weight-reference", type=float, default=1.0)
+    parser.add_argument("--max-optimization-iter", type=int, default=40)
     return parser
 
 
@@ -104,6 +114,32 @@ def main(argv: list[str] | None = None) -> int:
                 max_sim_time_s=args.max_sim_time_s,
             ),
         )
+    trajectory_optimization = None
+    optimized_tracking_simulation = None
+    if args.optimize_trajectory and postprocess.trackable_path is not None:
+        trajectory_optimization = optimize_trajectory(
+            grid,
+            postprocess.trackable_path,
+            postprocess.corridor,
+            platform_profile=platform_profile,
+            config=TrajectoryOptimizationConfig(
+                weight_smoothness=args.optimization_weight_smoothness,
+                weight_cost=args.optimization_weight_cost,
+                weight_reference=args.optimization_weight_reference,
+                max_iterations=args.max_optimization_iter,
+            ),
+        )
+        if args.simulate_tracking:
+            optimized_tracking_simulation = simulate_tracking(
+                grid,
+                trajectory_optimization.optimized_trackable_path,
+                platform_profile=platform_profile,
+                config=TrackingSimulationConfig(
+                    lookahead_m=args.lookahead_m,
+                    time_step_s=args.time_step_s,
+                    max_sim_time_s=args.max_sim_time_s,
+                ),
+            )
 
     output_json = Path(args.output_json)
     output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         grid.spec,
         postprocess=postprocess,
         tracking_simulation=tracking_simulation,
+        trajectory_optimization=trajectory_optimization,
+        optimized_tracking_simulation=optimized_tracking_simulation,
     )
     output_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -121,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
         result,
         postprocess=postprocess,
         tracking_simulation=tracking_simulation,
+        trajectory_optimization=trajectory_optimization,
+        optimized_tracking_simulation=optimized_tracking_simulation,
         png_path=output_dir / "diagnostics.png",
         html_path=output_dir / "diagnostics.html",
     )
@@ -134,6 +174,10 @@ def main(argv: list[str] | None = None) -> int:
                 "search_mode": result.diagnostics.search_mode,
                 "trackable_waypoints": len(postprocess.trackable_path.waypoints) if postprocess.trackable_path else 0,
                 "tracking_simulation": tracking_simulation is not None,
+                "trajectory_optimization": trajectory_optimization is not None,
+                "trajectory_optimization_status": (
+                    trajectory_optimization.solver_status if trajectory_optimization is not None else None
+                ),
                 "constraint_warnings": len(platform_profile.constraint_warnings),
             },
             ensure_ascii=False,

@@ -155,6 +155,50 @@ def test_cli_demo_with_tracking_simulation_writes_report(tmp_path):
     assert "Simulated Tracking Path" in html
 
 
+def test_cli_demo_with_trajectory_optimization_writes_report(tmp_path):
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map_corridor.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--simulate-tracking",
+            "--optimize-trajectory",
+            "--max-optimization-iter",
+            "12",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    report = payload["trajectory_optimization_report"]
+
+    assert "optimized_path" in report
+    assert report["optimized_path"]
+    assert "metrics" in report
+    assert "solver_status" in report
+    assert "fallback_status" in report
+    assert "optimized_tracking_simulation_report" in payload
+    assert "baseline_vs_optimized" in report["metrics"]
+    html = (output_dir / "diagnostics.html").read_text(encoding="utf-8")
+    assert "Trajectory Optimization Summary" in html
+    assert "Optimized Path" in html
+    assert "baseline_vs_optimized" in html
+
+
 def test_corridor_demo_map_is_complex_and_keeps_corridor_feasible():
     grid, request = load_plan_input("examples/demo_map_corridor.json")
     result = AStarPlanner().plan(grid, request)

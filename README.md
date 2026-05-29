@@ -56,7 +56,15 @@ Phase 5 adds a lightweight tracking simulation baseline:
 - experiment metrics include `max_cross_track_error_m`, simulated length, minimum clearance, safety violations, mean speed, and high-cost exposure;
 - diagnostics overlay the orange `Simulated Tracking Path` and show a Tracking Simulation Summary.
 
-This project does not implement GCS, IRIS, Ackermann trajectory optimization, Drake integration, exploration target selection, observation updates, or an online planning service.
+Phase 6 adds a fixed-corridor continuous trajectory optimization prototype:
+
+- `trajectory_optimization_report` is generated when the CLI is run with `--optimize-trajectory`;
+- the optimizer projects continuous waypoint updates back into existing safety-corridor boxes;
+- the objective includes path length, second-difference smoothness, reference deviation, high-cost exposure, and a curvature proxy;
+- `optimized_tracking_simulation_report` is generated when `--simulate-tracking` and `--optimize-trajectory` are used together;
+- diagnostics overlay the green `Optimized Path` and show a Trajectory Optimization Summary with `baseline_vs_optimized` metrics.
+
+This project does not implement full GCS graph search, IRIS, Ackermann trajectory optimization, Drake integration, exploration target selection, observation updates, or an online planning service.
 
 The planner returns a platform-filtered `geometric_path` plus a trackable-path interface and feasibility diagnostics, not a closed-loop controller command stream.
 
@@ -96,6 +104,7 @@ python -m path_planner.cli --input examples/demo_map_corridor.json --output-json
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform-config D:\codex\project\lunar-path-planning\dev-platform-constraints\configs\platforms\yutu2.json
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --tracking-error-bound-m 0.1 --min-speed-mps 0.01
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --lookahead-m 0.75 --time-step-s 0.2
+python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --optimize-trajectory
 ```
 
 Expected outputs:
@@ -113,6 +122,11 @@ The top-level `diagnostics` object also records whether A* used
 When `--simulate-tracking` is enabled, the route JSON also includes a top-level
 `tracking_simulation_report` object with `simulated_path`, `config`, `metrics`,
 and `safety_report`.
+When `--optimize-trajectory` is enabled, the route JSON also includes a top-level
+`trajectory_optimization_report` object with `optimized_path`, `corridor_boxes`,
+`solver_status`, `fallback_status`, and `metrics`. When optimization and
+tracking simulation are both enabled, `optimized_tracking_simulation_report`
+and `baseline_vs_optimized` comparison metrics are also emitted.
 
 By default, shortcut smoothing only accepts cells with `cost <= 3.0`; adjust
 this with `--max-shortcut-cost` when a map uses a different cost scale. The

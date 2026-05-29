@@ -38,6 +38,10 @@ def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     assert "tracking_simulation_report" in content
     assert "Simulated Tracking Path" in content
     assert "max_cross_track_error_m" in content
+    assert "Phase 6" in content
+    assert "trajectory_optimization_report" in content
+    assert "Optimized Path" in content
+    assert "fixed-corridor continuous trajectory optimization" in content
     assert "Phase 3" in content
     assert "platform-aware A*" in content
     assert "PlanningGrid" in content
@@ -47,4 +51,4 @@ def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     assert "corridor" in content
     assert "smoothed_path" in content
     assert "curvature_report" in content
-    assert "does not implement GCS, IRIS, Ackermann trajectory optimization, Drake" in content
+    assert "does not implement full GCS graph search, IRIS, Ackermann trajectory optimization, Drake" in content
