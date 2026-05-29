@@ -36,3 +36,49 @@ def test_astar_prefers_lower_weighted_route():
     assert result.success is True
     assert Cell(1, 0) not in result.path_cells
     assert result.path_cells[-1] == Cell(2, 0)
+
+
+def test_astar_prevents_diagonal_corner_cutting():
+    mask = np.array(
+        [
+            [True, False],
+            [False, True],
+        ]
+    )
+    grid = grid_from(np.ones((2, 2)), mask)
+    result = AStarPlanner().plan(grid, PlanRequest(start=Cell(0, 0), goal=Cell(1, 1)))
+
+    assert result.success is False
+    assert result.failure_reason is FailureReason.UNREACHABLE
+
+
+def test_astar_reports_blocked_start_and_goal():
+    mask = np.array([[False, True], [True, False]])
+    grid = grid_from(np.ones((2, 2)), mask)
+
+    start_blocked = AStarPlanner().plan(grid, PlanRequest(start=Cell(0, 0), goal=Cell(1, 0)))
+    goal_blocked = AStarPlanner().plan(grid, PlanRequest(start=Cell(1, 0), goal=Cell(1, 1)))
+
+    assert start_blocked.failure_reason is FailureReason.START_BLOCKED
+    assert goal_blocked.failure_reason is FailureReason.GOAL_BLOCKED
+
+
+def test_astar_reports_out_of_bounds():
+    grid = grid_from(np.ones((2, 2)))
+
+    result = AStarPlanner().plan(grid, PlanRequest(start=Cell(-1, 0), goal=Cell(1, 1)))
+
+    assert result.success is False
+    assert result.failure_reason is FailureReason.START_OUT_OF_BOUNDS
+
+
+def test_astar_reports_max_iterations():
+    grid = grid_from(np.ones((5, 5)))
+    result = AStarPlanner().plan(
+        grid,
+        PlanRequest(start=Cell(0, 0), goal=Cell(4, 4), max_iterations=1),
+    )
+
+    assert result.success is False
+    assert result.failure_reason is FailureReason.MAX_ITERATIONS
+    assert result.expanded_count == 1
