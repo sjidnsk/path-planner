@@ -7,15 +7,38 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.colors import ListedColormap
 from matplotlib.lines import Line2D
-from matplotlib.patches import Patch
+from matplotlib.patches import Circle, Patch, Rectangle
+import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import numpy as np
 
 from path_planner.core import CostGrid, PlanResult
 from path_planner.postprocess import PostprocessResult
 from path_planner.postprocess.footprint import build_footprint_safe_mask
+
+DIAGNOSTIC_COLORS = {
+    "surface": "#f8fafc",
+    "cost_low": "#f8fafc",
+    "cost_high": "#64748b",
+    "corridor": "#2563eb",
+    "inflated": "#d97706",
+    "blocked": "#020617",
+    "raw_path": "#ffffff",
+    "raw_path_outline": "#111827",
+    "smoothed_path": "#06b6d4",
+    "start": "#16a34a",
+    "goal": "#dc2626",
+    "violation": "#dc2626",
+    "expanded": "#2563eb",
+}
+
+COST_CMAP = LinearSegmentedColormap.from_list(
+    "lunar_cost_neutral",
+    [DIAGNOSTIC_COLORS["cost_low"], DIAGNOSTIC_COLORS["cost_high"]],
+)
 
 
 def render_diagnostics(
@@ -31,11 +54,11 @@ def render_diagnostics(
     png.parent.mkdir(parents=True, exist_ok=True)
     page.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
+    fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.8), constrained_layout=True)
     _plot_cost_path(axes[0, 0], grid, result, postprocess)
     _plot_mask(axes[0, 1], grid)
     _plot_expanded(axes[1, 0], grid, result)
-    _plot_metrics(axes[1, 1], result)
+    _plot_metrics(axes[1, 1], result, postprocess)
     fig.savefig(png, dpi=140)
     plt.close(fig)
 
@@ -61,13 +84,18 @@ def render_diagnostics(
                 "<li>Passable Mask</li>",
                 "<li>Expanded Nodes</li>",
                 "<li>Summary Metrics</li>",
+                "<li>Rover Footprint Scale</li>",
                 "</ul>",
-                "<p>In Cost + Path, dark/purple cells are lower cost and yellow cells are high cost; "
-                "magenta cells mark the Safety Corridor; black cells are blocked by passable_mask; "
-                "orange cells are vehicle-inflated blocked cells from the platform footprint; "
-                "white line is raw A* path; cyan dashed line is smoothed path; "
-                "orange X markers are curvature or turning-radius violations; green dot is start; red dot is goal.</p>",
+                "<p>In Cost + Path, Cost values use the grayscale colorbar labeled Cost; "
+                "Cost + Path legend is placed outside the plot area; "
+                "blue outlines mark the Safety Corridor; amber diagonal hatching marks vehicle-inflated blocked cells; "
+                "black filled cells are blocked by passable_mask; white line with dark outline is raw A* path; "
+                "cyan dashed line is smoothed path; red X markers are curvature or turning-radius violations; "
+                "green dot is start; red dot is goal.</p>",
+                "<p>In Expanded Nodes, light cells are unexpanded passable space; "
+                "blue filled cells are A* expanded nodes; black filled cells are blocked cells.</p>",
                 f'<img src="{html.escape(png.name)}" alt="diagnostics" style="max-width:100%;height:auto">',
+                _html_rover_scale_note(postprocess),
                 "<h2>Platform Constraints</h2>",
                 _html_platform_summary(postprocess),
                 "<h2>Postprocess Summary</h2>",
@@ -82,32 +110,89 @@ def render_diagnostics(
 
 
 def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: PostprocessResult | None) -> None:
-    ax.imshow(grid.cost, cmap="viridis", origin="upper")
+    image = ax.imshow(grid.cost, cmap=COST_CMAP, origin="upper")
+    colorbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
+    colorbar.set_label("Cost", rotation=90)
     if postprocess is not None and postprocess.corridor.sections:
         corridor = np.zeros(grid.spec.shape, dtype=float)
         for section in postprocess.corridor.sections:
             for cell in section.cells:
                 if grid.spec.in_bounds(cell):
                     corridor[cell.y, cell.x] = 1.0
-        corridor_mask = np.ma.masked_where(corridor == 0.0, corridor)
-        ax.imshow(corridor_mask, cmap=ListedColormap(["magenta"]), origin="upper", alpha=0.28)
+        _draw_cell_outline(
+            ax,
+            corridor.astype(bool),
+            edgecolor=DIAGNOSTIC_COLORS["corridor"],
+            linewidth=1.3,
+            linestyle="--",
+            zorder=2.0,
+        )
     if postprocess is not None and postprocess.platform_profile is not None:
         footprint = build_footprint_safe_mask(grid, postprocess.platform_profile)
         inflated_only = np.logical_and(grid.passable_mask, ~footprint.safe_mask)
-        inflated = np.ma.masked_where(~inflated_only, np.ones(grid.spec.shape, dtype=float))
-        ax.imshow(inflated, cmap=ListedColormap(["orange"]), origin="upper", alpha=0.45)
-    blocked = np.ma.masked_where(grid.passable_mask, np.ones(grid.spec.shape, dtype=float))
-    ax.imshow(blocked, cmap=ListedColormap(["black"]), origin="upper", alpha=0.9)
+        _draw_cell_hatch(
+            ax,
+            inflated_only,
+            edgecolor=DIAGNOSTIC_COLORS["inflated"],
+            hatch="////",
+            linewidth=0.7,
+            zorder=2.5,
+        )
+    _draw_cell_fill(
+        ax,
+        ~grid.passable_mask,
+        facecolor=DIAGNOSTIC_COLORS["blocked"],
+        edgecolor="#ffffff",
+        linewidth=0.25,
+        zorder=3.0,
+    )
     if result.path_cells:
         xs = [cell.x for cell in result.path_cells]
         ys = [cell.y for cell in result.path_cells]
-        ax.plot(xs, ys, color="white", linewidth=2, label="Raw Path")
-        ax.scatter(xs[0], ys[0], c="lime", s=36, label="Start")
-        ax.scatter(xs[-1], ys[-1], c="red", s=36, label="Goal")
+        ax.plot(
+            xs,
+            ys,
+            color=DIAGNOSTIC_COLORS["raw_path"],
+            linewidth=2,
+            label="Raw Path",
+            path_effects=[
+                path_effects.Stroke(linewidth=4, foreground=DIAGNOSTIC_COLORS["raw_path_outline"]),
+                path_effects.Normal(),
+            ],
+        )
+        ax.scatter(
+            xs[0],
+            ys[0],
+            c=DIAGNOSTIC_COLORS["start"],
+            edgecolors=DIAGNOSTIC_COLORS["raw_path"],
+            linewidths=1,
+            s=42,
+            label="Start",
+        )
+        ax.scatter(
+            xs[-1],
+            ys[-1],
+            c=DIAGNOSTIC_COLORS["goal"],
+            edgecolors=DIAGNOSTIC_COLORS["raw_path"],
+            linewidths=1,
+            s=42,
+            label="Goal",
+        )
     if postprocess is not None and postprocess.smoothed_path.cells:
         xs = [cell.x for cell in postprocess.smoothed_path.cells]
         ys = [cell.y for cell in postprocess.smoothed_path.cells]
-        ax.plot(xs, ys, color="cyan", linewidth=1.5, linestyle="--", label="Smoothed Path")
+        ax.plot(
+            xs,
+            ys,
+            color=DIAGNOSTIC_COLORS["smoothed_path"],
+            linewidth=1.7,
+            linestyle="--",
+            label="Smoothed Path",
+            path_effects=[
+                path_effects.Stroke(linewidth=3, foreground=DIAGNOSTIC_COLORS["raw_path_outline"]),
+                path_effects.Normal(),
+            ],
+        )
     if postprocess is not None and postprocess.curvature_report.violation_indices:
         curvature_cells = (
             postprocess.smoothed_path.cells
@@ -123,15 +208,27 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
             ax.scatter(
                 [cell.x for cell in violation_cells],
                 [cell.y for cell in violation_cells],
-                c="orange",
+                c=DIAGNOSTIC_COLORS["violation"],
                 marker="x",
-                s=72,
-                linewidths=2,
+                s=82,
+                linewidths=2.2,
                 label="Curvature Violation",
             )
     handles, labels = _cost_path_legend_handles(grid, result, postprocess)
     if handles:
-        ax.legend(handles, labels, loc="best")
+        ax.legend(
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.14),
+            ncol=3,
+            fontsize=8,
+            frameon=True,
+            facecolor="#ffffff",
+            edgecolor="#cbd5e1",
+            framealpha=0.94,
+            borderaxespad=0.0,
+        )
     ax.set_title("Cost + Path")
 
 
@@ -142,48 +239,150 @@ def _cost_path_legend_handles(
 ) -> tuple[list[object], list[str]]:
     handles: list[object] = []
     labels: list[str] = []
+    handles.append(Patch(facecolor=DIAGNOSTIC_COLORS["cost_high"], alpha=0.45))
+    labels.append("Cost Heatmap")
     if result.path_cells:
-        handles.append(Line2D([0], [0], color="white", linewidth=2))
+        handles.append(Line2D([0], [0], color=DIAGNOSTIC_COLORS["raw_path_outline"], linewidth=3))
         labels.append("Raw Path")
-        handles.append(Line2D([0], [0], marker="o", color="none", markerfacecolor="lime", markersize=6))
+        handles.append(
+            Line2D([0], [0], marker="o", color="none", markerfacecolor=DIAGNOSTIC_COLORS["start"], markersize=6)
+        )
         labels.append("Start")
-        handles.append(Line2D([0], [0], marker="o", color="none", markerfacecolor="red", markersize=6))
+        handles.append(
+            Line2D([0], [0], marker="o", color="none", markerfacecolor=DIAGNOSTIC_COLORS["goal"], markersize=6)
+        )
         labels.append("Goal")
     if postprocess is not None and postprocess.smoothed_path.cells:
-        handles.append(Line2D([0], [0], color="cyan", linewidth=1.5, linestyle="--"))
+        handles.append(Line2D([0], [0], color=DIAGNOSTIC_COLORS["smoothed_path"], linewidth=1.7, linestyle="--"))
         labels.append("Smoothed Path")
     if postprocess is not None and postprocess.corridor.sections:
-        handles.append(Patch(facecolor="magenta", alpha=0.28))
+        handles.append(Patch(facecolor="none", edgecolor=DIAGNOSTIC_COLORS["corridor"], linestyle="--", linewidth=1.3))
         labels.append("Safety Corridor")
     if postprocess is not None and postprocess.platform_profile is not None:
         footprint = build_footprint_safe_mask(grid, postprocess.platform_profile)
         if footprint.inflated_blocked_count > footprint.original_blocked_count:
-            handles.append(Patch(facecolor="orange", alpha=0.45))
+            handles.append(Patch(facecolor="none", edgecolor=DIAGNOSTIC_COLORS["inflated"], hatch="////", linewidth=0.7))
             labels.append("Vehicle-inflated Blocked Cells")
     if postprocess is not None and postprocess.curvature_report.violation_indices:
-        handles.append(Line2D([0], [0], marker="x", color="orange", linestyle="none", markersize=8))
+        handles.append(
+            Line2D([0], [0], marker="x", color=DIAGNOSTIC_COLORS["violation"], linestyle="none", markersize=8)
+        )
         labels.append("Curvature Violation")
     if np.any(~grid.passable_mask):
-        handles.append(Patch(facecolor="black", alpha=0.9))
+        handles.append(Patch(facecolor=DIAGNOSTIC_COLORS["blocked"], alpha=0.94))
         labels.append("Blocked Cells")
     return handles, labels
 
 
+def _draw_cell_fill(ax, mask: np.ndarray, *, facecolor: str, edgecolor: str, linewidth: float, zorder: float) -> None:
+    for y, x in np.argwhere(mask):
+        ax.add_patch(
+            Rectangle(
+                (float(x) - 0.5, float(y) - 0.5),
+                1.0,
+                1.0,
+                facecolor=facecolor,
+                edgecolor=edgecolor,
+                linewidth=linewidth,
+                zorder=zorder,
+            )
+        )
+
+
+def _draw_cell_outline(
+    ax,
+    mask: np.ndarray,
+    *,
+    edgecolor: str,
+    linewidth: float,
+    linestyle: str,
+    zorder: float,
+) -> None:
+    for y, x in np.argwhere(mask):
+        ax.add_patch(
+            Rectangle(
+                (float(x) - 0.5, float(y) - 0.5),
+                1.0,
+                1.0,
+                facecolor="none",
+                edgecolor=edgecolor,
+                linewidth=linewidth,
+                linestyle=linestyle,
+                zorder=zorder,
+            )
+        )
+
+
+def _draw_cell_hatch(
+    ax,
+    mask: np.ndarray,
+    *,
+    edgecolor: str,
+    hatch: str,
+    linewidth: float,
+    zorder: float,
+) -> None:
+    for y, x in np.argwhere(mask):
+        ax.add_patch(
+            Rectangle(
+                (float(x) - 0.5, float(y) - 0.5),
+                1.0,
+                1.0,
+                facecolor="none",
+                edgecolor=edgecolor,
+                hatch=hatch,
+                linewidth=linewidth,
+                zorder=zorder,
+            )
+        )
+
+
 def _plot_mask(ax, grid: CostGrid) -> None:
-    ax.imshow(grid.passable_mask, cmap="gray", origin="upper")
+    ax.imshow(
+        grid.passable_mask,
+        cmap=ListedColormap([DIAGNOSTIC_COLORS["blocked"], DIAGNOSTIC_COLORS["surface"]]),
+        origin="upper",
+    )
     ax.set_title("Passable Mask")
 
 
 def _plot_expanded(ax, grid: CostGrid, result: PlanResult) -> None:
-    expanded = np.zeros(grid.spec.shape, dtype=float)
+    categories = np.zeros(grid.spec.shape, dtype=int)
+    categories[~grid.passable_mask] = 1
     for cell in result.diagnostics.expanded_cells:
-        if grid.spec.in_bounds(cell):
-            expanded[cell.y, cell.x] = 1.0
-    ax.imshow(expanded, cmap="magma", origin="upper")
+        if grid.spec.in_bounds(cell) and grid.is_passable(cell):
+            categories[cell.y, cell.x] = 2
+    ax.imshow(
+        categories,
+        cmap=ListedColormap(
+            [
+                DIAGNOSTIC_COLORS["surface"],
+                DIAGNOSTIC_COLORS["blocked"],
+                DIAGNOSTIC_COLORS["expanded"],
+            ]
+        ),
+        vmin=0,
+        vmax=2,
+        origin="upper",
+        interpolation="nearest",
+    )
+    ax.legend(
+        [
+            Patch(facecolor=DIAGNOSTIC_COLORS["surface"], edgecolor="#cbd5e1"),
+            Patch(facecolor=DIAGNOSTIC_COLORS["expanded"]),
+            Patch(facecolor=DIAGNOSTIC_COLORS["blocked"]),
+        ],
+        ["Unexpanded Passable", "A* Expanded Node", "Blocked Cell"],
+        loc="best",
+        frameon=True,
+        facecolor="#ffffff",
+        edgecolor="#cbd5e1",
+        framealpha=0.92,
+    )
     ax.set_title("Expanded Nodes")
 
 
-def _plot_metrics(ax, result: PlanResult) -> None:
+def _plot_metrics(ax, result: PlanResult, postprocess: PostprocessResult | None) -> None:
     ax.axis("off")
     lines = [
         "Summary Metrics",
@@ -195,6 +394,108 @@ def _plot_metrics(ax, result: PlanResult) -> None:
         f"runtime_ms: {result.diagnostics.runtime_ms:.3f}",
     ]
     ax.text(0.0, 1.0, "\n".join(lines), va="top", ha="left", family="monospace")
+    _draw_rover_footprint_scale(ax, postprocess)
+
+
+def _draw_rover_footprint_scale(ax, postprocess: PostprocessResult | None) -> None:
+    if postprocess is None or postprocess.platform_profile is None:
+        return
+    profile = postprocess.platform_profile
+    if (
+        profile.body_length_m is None
+        or profile.body_width_m is None
+        or profile.body_length_m <= 0.0
+        or profile.body_width_m <= 0.0
+    ):
+        return
+
+    body_length = profile.body_length_m
+    body_width = profile.body_width_m
+    footprint_radius = profile.footprint_radius_m
+    box_width = 0.30
+    box_height = box_width * min(body_width / body_length, 1.0)
+    left = 0.60
+    bottom = 0.28
+    center = (left + box_width / 2.0, bottom + box_height / 2.0)
+    circle_radius = (box_width**2 + box_height**2) ** 0.5 / 2.0
+
+    ax.text(
+        left,
+        bottom + box_height + 0.16,
+        "Rover Footprint Scale",
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=9,
+        fontweight="bold",
+    )
+    ax.add_patch(
+        Circle(
+            center,
+            circle_radius,
+            transform=ax.transAxes,
+            fill=False,
+            linestyle="--",
+            linewidth=1.4,
+            edgecolor=DIAGNOSTIC_COLORS["inflated"],
+        )
+    )
+    ax.add_patch(
+        Rectangle(
+            (left, bottom),
+            box_width,
+            box_height,
+            transform=ax.transAxes,
+            facecolor="#dbeafe",
+            edgecolor=DIAGNOSTIC_COLORS["corridor"],
+            linewidth=1.6,
+            alpha=0.92,
+        )
+    )
+    ax.annotate(
+        "",
+        xy=(left, bottom - 0.055),
+        xytext=(left + box_width, bottom - 0.055),
+        xycoords=ax.transAxes,
+        arrowprops={"arrowstyle": "<->", "color": DIAGNOSTIC_COLORS["raw_path_outline"], "linewidth": 1.0},
+    )
+    ax.text(
+        left + box_width / 2.0,
+        bottom - 0.095,
+        f"{body_length:.2f} m length",
+        transform=ax.transAxes,
+        ha="center",
+        va="top",
+        fontsize=7.5,
+    )
+    ax.annotate(
+        "",
+        xy=(left - 0.045, bottom),
+        xytext=(left - 0.045, bottom + box_height),
+        xycoords=ax.transAxes,
+        arrowprops={"arrowstyle": "<->", "color": DIAGNOSTIC_COLORS["raw_path_outline"], "linewidth": 1.0},
+    )
+    ax.text(
+        left - 0.075,
+        bottom + box_height / 2.0,
+        f"{body_width:.2f} m width",
+        transform=ax.transAxes,
+        ha="right",
+        va="center",
+        rotation=90,
+        fontsize=7.5,
+    )
+    if footprint_radius is not None:
+        ax.text(
+            left,
+            bottom - 0.17,
+            f"footprint radius: {footprint_radius:.2f} m",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=7.5,
+            color=DIAGNOSTIC_COLORS["inflated"],
+        )
 
 
 def _html_postprocess_summary(postprocess: PostprocessResult | None) -> str:
@@ -243,6 +544,15 @@ def _html_platform_summary(postprocess: PostprocessResult | None) -> str:
         "</table>",
     ]
     return "\n".join(rows)
+
+
+def _html_rover_scale_note(postprocess: PostprocessResult | None) -> str:
+    if postprocess is None or postprocess.platform_profile is None:
+        return ""
+    return (
+        "<p><strong>Rover Footprint Scale:</strong> "
+        "rover body length/width and footprint radius are drawn from platform_profile.</p>"
+    )
 
 
 def _html_warnings(postprocess: PostprocessResult) -> str:

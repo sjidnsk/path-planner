@@ -61,14 +61,14 @@ PYTHONPATH=src python -m pytest
 ## Run Demo
 
 ```powershell
-python -m path_planner.cli --input examples/demo_map.json --output-json outputs/demo/route.json --output-dir outputs/demo
+python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo
 ```
 
 Optional platform arguments:
 
 ```powershell
-python -m path_planner.cli --input examples/demo_map.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform yutu2 --safety-margin-m 0.1
-python -m path_planner.cli --input examples/demo_map.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform-config D:\codex\project\lunar-path-planning\dev-platform-constraints\configs\platforms\yutu2.json
+python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform yutu2 --safety-margin-m 0.1
+python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform-config D:\codex\project\lunar-path-planning\dev-platform-constraints\configs\platforms\yutu2.json
 ```
 
 Expected outputs:
@@ -82,10 +82,10 @@ The route JSON preserves Phase 1 fields and adds a `postprocess` object with
 `corridor`, `smoothed_path`, `curvature_report`, and `fallback_status`.
 
 By default, shortcut smoothing only accepts cells with `cost <= 3.0`; adjust
-this with `--max-shortcut-cost` when a map uses a different cost scale. In the
-diagnostic figure, yellow cells are high cost and black cells are blocked by
-`passable_mask`. Orange cells are vehicle-inflated blocked cells derived from
-the platform footprint.
+this with `--max-shortcut-cost` when a map uses a different cost scale. The
+active demo uses `examples/demo_map_corridor.json`, a non-straight corridor case
+that keeps the platform-aware safety corridor feasible while showing irregular
+obstacles and vehicle-inflated blocked cells.
 
 ## External Interface Direction
 

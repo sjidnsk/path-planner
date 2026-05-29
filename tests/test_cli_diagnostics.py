@@ -6,8 +6,10 @@ from pathlib import Path
 
 import numpy as np
 
+from path_planner.adapters import load_plan_input
 from path_planner.core import Cell, CostGrid, GridSpec, PlanRequest
 from path_planner.diagnostics import render_diagnostics
+from path_planner.platform import load_planner_platform_profile
 from path_planner.postprocess import run_postprocess
 from path_planner.search import AStarPlanner
 
@@ -28,8 +30,14 @@ def test_render_diagnostics_writes_png_and_html(tmp_path):
     assert "Cost + Path" in html
     assert "Blocked Cells" in html
     assert "Safety Corridor" in html
-    assert "yellow cells are high cost" in html
-    assert "magenta cells mark the Safety Corridor" in html
+    assert "Cost values use the grayscale colorbar labeled Cost" in html
+    assert "Cost + Path legend is placed outside the plot area" in html
+    assert "blue outlines mark the Safety Corridor" in html
+    assert "amber diagonal hatching marks vehicle-inflated blocked cells" in html
+    assert "black filled cells are blocked by passable_mask" in html
+    assert "In Expanded Nodes, light cells are unexpanded passable space" in html
+    assert "blue filled cells are A* expanded nodes" in html
+    assert "red X markers are curvature or turning-radius violations" in html
     assert "green dot is start; red dot is goal" in html
     assert "Smoothed Path" in html
     assert "curvature_report" in html
@@ -53,7 +61,7 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map.json",
+            "examples/demo_map_corridor.json",
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -79,4 +87,30 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert "samples" in payload["postprocess"]["curvature_report"]
     assert (output_dir / "diagnostics.png").exists()
     assert (output_dir / "diagnostics.html").exists()
+    html = (output_dir / "diagnostics.html").read_text(encoding="utf-8")
+    assert "Rover Footprint Scale" in html
+    assert "rover body length/width and footprint radius are drawn from platform_profile" in html
     assert "reachable" in completed.stdout
+
+
+def test_corridor_demo_map_is_complex_and_keeps_corridor_feasible():
+    grid, request = load_plan_input("examples/demo_map_corridor.json")
+    result = AStarPlanner().plan(grid, request)
+    postprocess = run_postprocess(
+        grid,
+        result,
+        corridor_radius_cells=1,
+        max_curvature=1.0,
+        platform_profile=load_planner_platform_profile(platform="yutu2"),
+    )
+
+    assert grid.spec.frame_id == "demo_map_corridor_complex"
+    assert grid.spec.width >= 18
+    assert grid.spec.height >= 11
+    assert len({cell.y for cell in result.path_cells}) >= 3
+    assert len({cell.y for cell in postprocess.smoothed_path.cells}) >= 3
+    assert postprocess.corridor.status == "ok"
+    assert len(postprocess.corridor.sections) >= 18
+    assert postprocess.corridor.original_blocked_count >= 20
+    assert postprocess.corridor.inflated_blocked_count > postprocess.corridor.original_blocked_count
+    assert postprocess.fallback_status.used_raw_path is False
