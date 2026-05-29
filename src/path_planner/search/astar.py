@@ -16,6 +16,7 @@ from path_planner.core import (
     PlanRequest,
     PlanResult,
 )
+from path_planner.search.planning_grid import STANDARD_GRID_ASTAR, PlanningGrid
 
 
 @dataclass(order=True)
@@ -26,7 +27,7 @@ class _QueueItem:
 
 
 class AStarPlanner:
-    def plan(self, grid: CostGrid, request: PlanRequest) -> PlanResult:
+    def plan(self, grid: CostGrid | PlanningGrid, request: PlanRequest) -> PlanResult:
         started = time.perf_counter()
         early_failure = self._validate_request(grid, request, started)
         if early_failure is not None:
@@ -66,7 +67,7 @@ class AStarPlanner:
 
         return self._failure(grid, request, FailureReason.UNREACHABLE, expanded, max_frontier_size, started)
 
-    def _validate_request(self, grid: CostGrid, request: PlanRequest, started: float) -> PlanResult | None:
+    def _validate_request(self, grid: CostGrid | PlanningGrid, request: PlanRequest, started: float) -> PlanResult | None:
         if not grid.spec.in_bounds(request.start):
             return self._failure(grid, request, FailureReason.START_OUT_OF_BOUNDS, (), 0, started)
         if not grid.spec.in_bounds(request.goal):
@@ -77,7 +78,7 @@ class AStarPlanner:
             return self._failure(grid, request, FailureReason.GOAL_BLOCKED, (), 0, started)
         return None
 
-    def _neighbors(self, grid: CostGrid, request: PlanRequest, cell: Cell) -> list[tuple[Cell, float]]:
+    def _neighbors(self, grid: CostGrid | PlanningGrid, request: PlanRequest, cell: Cell) -> list[tuple[Cell, float]]:
         directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         if request.neighbor_policy is NeighborPolicy.EIGHT:
             directions.extend([(-1, -1), (1, -1), (-1, 1), (1, 1)])
@@ -111,7 +112,7 @@ class AStarPlanner:
 
     def _success(
         self,
-        grid: CostGrid,
+        grid: CostGrid | PlanningGrid,
         request: PlanRequest,
         path: tuple[Cell, ...],
         total_cost: float,
@@ -132,7 +133,7 @@ class AStarPlanner:
 
     def _failure(
         self,
-        grid: CostGrid,
+        grid: CostGrid | PlanningGrid,
         request: PlanRequest,
         reason: FailureReason,
         expanded: list[Cell] | tuple[Cell, ...],
@@ -152,7 +153,7 @@ class AStarPlanner:
 
     def _diagnostics(
         self,
-        grid: CostGrid,
+        grid: CostGrid | PlanningGrid,
         request: PlanRequest,
         path: tuple[Cell, ...],
         expanded: list[Cell] | tuple[Cell, ...],
@@ -161,6 +162,7 @@ class AStarPlanner:
     ) -> PlanDiagnostics:
         passable_cost = grid.cost[grid.passable_mask]
         path_length = self._path_length(path, grid.spec.resolution)
+        search_metadata = self._search_metadata(grid)
         return PlanDiagnostics(
             runtime_ms=(time.perf_counter() - started) * 1000.0,
             max_frontier_size=max_frontier_size,
@@ -171,6 +173,13 @@ class AStarPlanner:
             cost_mean=float(np.mean(passable_cost)) if passable_cost.size else None,
             neighbor_policy=request.neighbor_policy.value,
             prevent_corner_cutting=request.prevent_corner_cutting,
+            search_mode=search_metadata["search_mode"],
+            passable_source=search_metadata["passable_source"],
+            platform_key=search_metadata["platform_key"],
+            original_blocked_count=search_metadata["original_blocked_count"],
+            inflated_blocked_count=search_metadata["inflated_blocked_count"],
+            footprint_radius_m=search_metadata["footprint_radius_m"],
+            terrain_layers=tuple(search_metadata["terrain_layers"]),
         )
 
     def _path_length(self, path: tuple[Cell, ...], resolution: float) -> float:
@@ -180,3 +189,17 @@ class AStarPlanner:
         for a, b in zip(path[:-1], path[1:]):
             total += math.hypot(b.x - a.x, b.y - a.y) * resolution
         return total
+
+    def _search_metadata(self, grid: CostGrid | PlanningGrid) -> dict[str, object]:
+        if isinstance(grid, PlanningGrid):
+            return grid.search_metadata()
+        original_blocked_count = int(np.count_nonzero(~grid.passable_mask))
+        return {
+            "search_mode": STANDARD_GRID_ASTAR,
+            "passable_source": "original_passable_mask",
+            "platform_key": None,
+            "original_blocked_count": original_blocked_count,
+            "inflated_blocked_count": original_blocked_count,
+            "footprint_radius_m": None,
+            "terrain_layers": (),
+        }

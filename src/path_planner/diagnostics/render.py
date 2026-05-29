@@ -96,6 +96,8 @@ def render_diagnostics(
                 "blue filled cells are A* expanded nodes; black filled cells are blocked cells.</p>",
                 f'<img src="{html.escape(png.name)}" alt="diagnostics" style="max-width:100%;height:auto">',
                 _html_rover_scale_note(postprocess),
+                "<h2>Search Constraints</h2>",
+                _html_search_summary(result),
                 "<h2>Platform Constraints</h2>",
                 _html_platform_summary(postprocess),
                 "<h2>Postprocess Summary</h2>",
@@ -540,6 +542,24 @@ def _html_platform_summary(postprocess: PostprocessResult | None) -> str:
         f"<tr><th>max_obstacle_height_m</th><td>{html.escape(str(profile.max_obstacle_height_m))}</td></tr>",
         f"<tr><th>ground_clearance_m</th><td>{html.escape(str(profile.ground_clearance_m))}</td></tr>",
         f"<tr><th>effective_min_turning_radius_m</th><td>{html.escape(str(profile.effective_min_turning_radius_m))}</td></tr>",
+        "</tbody>",
+        "</table>",
+    ]
+    return "\n".join(rows)
+
+
+def _html_search_summary(result: PlanResult) -> str:
+    diagnostics = result.diagnostics
+    rows = [
+        "<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">",
+        "<tbody>",
+        f"<tr><th>search_mode</th><td>{html.escape(diagnostics.search_mode)}</td></tr>",
+        f"<tr><th>passable_source</th><td>{html.escape(diagnostics.passable_source)}</td></tr>",
+        f"<tr><th>platform_key</th><td>{html.escape(str(diagnostics.platform_key))}</td></tr>",
+        f"<tr><th>footprint_radius_m</th><td>{html.escape(str(diagnostics.footprint_radius_m))}</td></tr>",
+        f"<tr><th>original_blocked_count</th><td>{html.escape(str(diagnostics.original_blocked_count))}</td></tr>",
+        f"<tr><th>inflated_blocked_count</th><td>{html.escape(str(diagnostics.inflated_blocked_count))}</td></tr>",
+        f"<tr><th>terrain_layers</th><td>{html.escape(', '.join(diagnostics.terrain_layers))}</td></tr>",
         "</tbody>",
         "</table>",
     ]

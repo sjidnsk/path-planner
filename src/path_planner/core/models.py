@@ -146,6 +146,13 @@ class PlanDiagnostics:
     cost_mean: float | None = None
     neighbor_policy: str = NeighborPolicy.EIGHT.value
     prevent_corner_cutting: bool = True
+    search_mode: str = "standard_grid_astar"
+    passable_source: str = "original_passable_mask"
+    platform_key: str | None = None
+    original_blocked_count: int | None = None
+    inflated_blocked_count: int | None = None
+    footprint_radius_m: float | None = None
+    terrain_layers: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -158,6 +165,13 @@ class PlanDiagnostics:
             "cost_mean": self.cost_mean,
             "neighbor_policy": self.neighbor_policy,
             "prevent_corner_cutting": self.prevent_corner_cutting,
+            "search_mode": self.search_mode,
+            "passable_source": self.passable_source,
+            "platform_key": self.platform_key,
+            "original_blocked_count": self.original_blocked_count,
+            "inflated_blocked_count": self.inflated_blocked_count,
+            "footprint_radius_m": self.footprint_radius_m,
+            "terrain_layers": list(self.terrain_layers),
         }
 
 

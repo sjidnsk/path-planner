@@ -77,6 +77,10 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert payload["schema_version"] == "path-planner-route/v1"
     assert payload["trajectory_kind"] == "geometric_path"
     assert payload["reachable"] is True
+    assert payload["diagnostics"]["search_mode"] == "platform_aware_astar"
+    assert payload["diagnostics"]["passable_source"] == "inflated_passable_mask"
+    assert payload["diagnostics"]["platform_key"] == "yutu2"
+    assert payload["diagnostics"]["inflated_blocked_count"] > payload["diagnostics"]["original_blocked_count"]
     assert "postprocess" in payload
     assert "platform_profile" in payload["postprocess"]
     assert payload["postprocess"]["platform_profile"]["platform_key"] == "yutu2"
@@ -88,6 +92,9 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert (output_dir / "diagnostics.png").exists()
     assert (output_dir / "diagnostics.html").exists()
     html = (output_dir / "diagnostics.html").read_text(encoding="utf-8")
+    assert "Search Constraints" in html
+    assert "platform_aware_astar" in html
+    assert "inflated_passable_mask" in html
     assert "Rover Footprint Scale" in html
     assert "rover body length/width and footprint radius are drawn from platform_profile" in html
     assert "reachable" in completed.stdout

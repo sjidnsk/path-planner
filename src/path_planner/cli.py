@@ -8,7 +8,7 @@ from path_planner.adapters import load_plan_input, route_result_to_json_dict
 from path_planner.diagnostics import render_diagnostics
 from path_planner.platform import DEFAULT_PLATFORM_KEY, load_planner_platform_profile
 from path_planner.postprocess import run_postprocess
-from path_planner.search import AStarPlanner
+from path_planner.search import AStarPlanner, build_planning_grid
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,7 +45,8 @@ def main(argv: list[str] | None = None) -> int:
         safety_margin_m=args.safety_margin_m,
         min_turning_radius_override_m=args.min_turning_radius,
     )
-    result = AStarPlanner().plan(grid, request)
+    planning_grid = build_planning_grid(grid, platform_profile=platform_profile)
+    result = AStarPlanner().plan(planning_grid, request)
     postprocess = run_postprocess(
         grid,
         result,
@@ -75,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
                 "reachable": result.success,
                 "failure_reason": payload["failure_reason"],
                 "platform": platform_profile.platform_key,
+                "search_mode": result.diagnostics.search_mode,
                 "constraint_warnings": len(platform_profile.constraint_warnings),
             },
             ensure_ascii=False,

@@ -31,9 +31,18 @@ Phase 2.5 connects platform constraints from `dev-platform-constraints`:
 - curvature checks use a valid platform `min_turning_radius` or an explicit override;
 - diagnostics expose platform parameters, constraint warnings, inflated obstacles, and curvature violations.
 
+Phase 3 moves platform constraints into the search stage:
+
+- `PlanningGrid` wraps the original `CostGrid` with search-side constraints;
+- `PlanningConstraints` exposes the platform-derived footprint, slope, obstacle, clearance, and turning-radius limits used by search;
+- default CLI planning runs `platform-aware A*`;
+- A* expands cells from `inflated_passable_mask`, so vehicle footprint clearance is enforced before postprocess;
+- diagnostics record `search_mode`, `passable_source`, platform key, footprint radius, and original versus inflated blocked counts;
+- structured search terrain layers are reserved for slope, roughness, illumination, and confidence inputs from future lunar maps.
+
 This project does not implement GCS, IRIS, Ackermann trajectory optimization, Drake integration, exploration target selection, observation updates, or an online planning service.
 
-The planner returns a `geometric_path` plus Phase 2 feasibility diagnostics, not a vehicle-executable trajectory.
+The planner returns a platform-filtered `geometric_path` plus feasibility diagnostics, not a vehicle-executable trajectory.
 
 ## Development Environment
 
@@ -80,6 +89,8 @@ Expected outputs:
 The route JSON preserves Phase 1 fields and adds a `postprocess` object with
 `platform_profile`, `constraint_warnings`, `corridor_report`, `raw_path`,
 `corridor`, `smoothed_path`, `curvature_report`, and `fallback_status`.
+The top-level `diagnostics` object also records whether A* used
+`platform_aware_astar` and `inflated_passable_mask`.
 
 By default, shortcut smoothing only accepts cells with `cost <= 3.0`; adjust
 this with `--max-shortcut-cost` when a map uses a different cost scale. The
