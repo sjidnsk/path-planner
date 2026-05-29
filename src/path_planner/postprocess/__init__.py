@@ -1,5 +1,6 @@
 """Path postprocessing utilities."""
 
+from .corridor import build_corridor
 from .models import (
     CorridorResult,
     CorridorSection,
@@ -10,6 +11,7 @@ from .models import (
 )
 
 __all__ = [
+    "build_corridor",
     "CorridorResult",
     "CorridorSection",
     "CurvatureReport",

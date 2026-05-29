@@ -42,10 +42,10 @@
 
 ### Task 3: Corridor Generation
 
-- [ ] Write failing tests for normal corridor, edge corridor, and blocked path failure.
-- [ ] Implement conservative corridor generation from `CostGrid` and path cells.
-- [ ] Verify corridor tests pass.
-- [ ] Commit with `feat: add path corridor generation`.
+- [x] Write failing tests for normal corridor, edge corridor, and blocked path failure.
+- [x] Implement conservative corridor generation from `CostGrid` and path cells.
+- [x] Verify corridor tests pass.
+- [x] Commit with `feat: add path corridor generation`.
 
 ### Task 4: Line-of-sight Smoothing
 
