@@ -1,6 +1,8 @@
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -29,6 +31,8 @@ def test_render_diagnostics_writes_png_and_html(tmp_path):
 def test_cli_demo_writes_json_png_and_html(tmp_path):
     output_json = tmp_path / "route.json"
     output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
 
     completed = subprocess.run(
         [
@@ -43,6 +47,7 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
             str(output_dir),
         ],
         check=True,
+        env=env,
         text=True,
         capture_output=True,
     )

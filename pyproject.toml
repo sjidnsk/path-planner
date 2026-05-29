@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Phase 1 lunar path planner with costmap-aware A* and diagnostics"
 requires-python = ">=3.12"
 dependencies = [
-  "numpy>=1.26",
+  "numpy>=1.26,<2.3",
   "matplotlib>=3.8",
 ]
 

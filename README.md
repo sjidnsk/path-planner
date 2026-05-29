@@ -17,16 +17,27 @@ Phase 1 does not implement GCS, IRIS, Ackermann trajectory optimization, Drake i
 
 The planner returns a `geometric_path`, not a vehicle-executable trajectory.
 
-## Install For Development
+## Development Environment
 
 ```powershell
-python -m pip install -e ".[dev]"
+conda activate D:\conda_envs\lunar-explorer
+$env:PYTHONPATH='src'
 ```
+
+The shared `lunar-explorer` Conda environment provides Python 3.12, NumPy,
+Matplotlib, and pytest. This project does not need to be installed into that
+environment for local development.
 
 ## Run Tests
 
 ```powershell
 python -m pytest
+```
+
+Linux shell equivalent:
+
+```bash
+PYTHONPATH=src python -m pytest
 ```
 
 ## Run Demo
