@@ -27,9 +27,12 @@ def test_render_diagnostics_writes_png_and_html(tmp_path):
     html = html_path.read_text(encoding="utf-8")
     assert "Cost + Path" in html
     assert "Blocked Cells" in html
+    assert "Safety Corridor" in html
     assert "yellow cells are high cost" in html
     assert "Smoothed Path" in html
     assert "curvature_report" in html
+    assert "turn_angle_deg" in html
+    assert "turning_radius" in html
     assert "trajectory_kind" in html
     assert "geometric_path" in html
 
@@ -65,6 +68,7 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert "postprocess" in payload
     assert payload["postprocess"]["raw_path"]["cells"] == payload["geometric_path"]["cells"]
     assert "curvature_report" in payload["postprocess"]
+    assert "samples" in payload["postprocess"]["curvature_report"]
     assert (output_dir / "diagnostics.png").exists()
     assert (output_dir / "diagnostics.html").exists()
     assert "reachable" in completed.stdout

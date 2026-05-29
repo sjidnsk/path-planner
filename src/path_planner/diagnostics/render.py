@@ -52,6 +52,7 @@ def render_diagnostics(
                 "<h2>Panels</h2>",
                 "<ul>",
                 "<li>Cost + Path</li>",
+                "<li>Safety Corridor</li>",
                 "<li>Smoothed Path</li>",
                 "<li>Blocked Cells</li>",
                 "<li>Passable Mask</li>",
@@ -75,6 +76,14 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
     ax.imshow(grid.cost, cmap="viridis", origin="upper")
     blocked = np.ma.masked_where(grid.passable_mask, np.ones(grid.spec.shape, dtype=float))
     ax.imshow(blocked, cmap=ListedColormap(["black"]), origin="upper", alpha=0.85)
+    if postprocess is not None and postprocess.corridor.sections:
+        corridor = np.zeros(grid.spec.shape, dtype=float)
+        for section in postprocess.corridor.sections:
+            for cell in section.cells:
+                if grid.spec.in_bounds(cell):
+                    corridor[cell.y, cell.x] = 1.0
+        corridor_mask = np.ma.masked_where(corridor == 0.0, corridor)
+        ax.imshow(corridor_mask, cmap=ListedColormap(["orange"]), origin="upper", alpha=0.28)
     if result.path_cells:
         xs = [cell.x for cell in result.path_cells]
         ys = [cell.y for cell in result.path_cells]
@@ -88,6 +97,9 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
     if np.any(~grid.passable_mask):
         handles.append(Patch(facecolor="black", alpha=0.85, label="Blocked Cells"))
         labels.append("Blocked Cells")
+    if postprocess is not None and postprocess.corridor.sections:
+        handles.append(Patch(facecolor="orange", alpha=0.28, label="Safety Corridor"))
+        labels.append("Safety Corridor")
     if handles:
         ax.legend(handles, labels, loc="best")
     ax.set_title("Cost + Path")
@@ -129,9 +141,40 @@ def _html_postprocess_summary(postprocess: PostprocessResult | None) -> str:
         [
             "<ul>",
             f"<li>corridor_status: {html.escape(postprocess.corridor.status)}</li>",
+            f"<li>corridor_sections: {len(postprocess.corridor.sections)}</li>",
             f"<li>smoothed_path_status: {html.escape(postprocess.smoothed_path.status)}</li>",
             f"<li>fallback_reason: {html.escape(str(postprocess.fallback_status.reason))}</li>",
             f"<li>curvature_report: {html.escape(report.summary)}</li>",
+            f"<li>curvature_samples: {len(report.samples)}</li>",
             "</ul>",
+            _html_curvature_table(postprocess),
         ]
     )
+
+
+def _html_curvature_table(postprocess: PostprocessResult) -> str:
+    rows = [
+        "<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">",
+        "<thead><tr>",
+        "<th>point_index</th>",
+        "<th>turn_angle_deg</th>",
+        "<th>curvature</th>",
+        "<th>turning_radius</th>",
+        "<th>violates</th>",
+        "</tr></thead>",
+        "<tbody>",
+    ]
+    for sample in postprocess.curvature_report.samples:
+        rows.append(
+            "<tr>"
+            f"<td>{sample.point_index}</td>"
+            f"<td>{sample.turn_angle_deg:.3f}</td>"
+            f"<td>{sample.curvature:.6f}</td>"
+            f"<td>{'' if sample.turning_radius is None else f'{sample.turning_radius:.3f}'}</td>"
+            f"<td>{sample.violates}</td>"
+            "</tr>"
+        )
+    if not postprocess.curvature_report.samples:
+        rows.append("<tr><td colspan=\"5\">no intermediate path points</td></tr>")
+    rows.extend(["</tbody>", "</table>"])
+    return "\n".join(rows)

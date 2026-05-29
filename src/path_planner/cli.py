@@ -17,6 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True, help="Directory for diagnostics.png and diagnostics.html")
     parser.add_argument("--corridor-radius-cells", type=int, default=1, help="Corridor radius in grid cells")
     parser.add_argument("--max-curvature", type=float, default=1.0, help="Maximum allowed discrete curvature")
+    parser.add_argument("--min-turning-radius", type=float, default=None, help="Minimum allowed turning radius")
     parser.add_argument(
         "--max-shortcut-cost",
         type=float,
@@ -35,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
         result,
         corridor_radius_cells=args.corridor_radius_cells,
         max_curvature=args.max_curvature,
+        min_turning_radius=args.min_turning_radius,
         max_shortcut_cost=args.max_shortcut_cost,
     )
 

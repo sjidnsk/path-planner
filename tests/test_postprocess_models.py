@@ -3,6 +3,7 @@ from path_planner.postprocess import (
     CorridorResult,
     CorridorSection,
     CurvatureReport,
+    CurvatureSample,
     FallbackStatus,
     PostprocessResult,
     SmoothedPathResult,
@@ -33,6 +34,17 @@ def test_postprocess_result_serializes_phase2_contract():
             min_turning_radius=None,
             violation_indices=(),
             summary="path satisfies curvature limit",
+            samples=(
+                CurvatureSample(
+                    point_index=1,
+                    turn_angle_deg=0.0,
+                    curvature=0.0,
+                    turning_radius=None,
+                    violates=False,
+                    violates_curvature=False,
+                    violates_min_turning_radius=False,
+                ),
+            ),
         ),
         fallback_status=FallbackStatus(used_raw_path=False, reason=None),
     )
@@ -44,4 +56,5 @@ def test_postprocess_result_serializes_phase2_contract():
     assert payload["corridor"]["sections"][0]["bounds"] == {"min": [0, 0], "max": [1, 0]}
     assert payload["smoothed_path"]["cells"] == [[0, 0], [2, 0]]
     assert payload["curvature_report"]["is_feasible"] is True
+    assert payload["curvature_report"]["samples"][0]["turn_angle_deg"] == 0.0
     assert payload["fallback_status"] == {"used_raw_path": False, "reason": None}

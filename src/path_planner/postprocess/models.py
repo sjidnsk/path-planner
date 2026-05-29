@@ -66,12 +66,35 @@ class SmoothedPathResult:
 
 
 @dataclass(frozen=True)
+class CurvatureSample:
+    point_index: int
+    turn_angle_deg: float
+    curvature: float
+    turning_radius: float | None
+    violates: bool
+    violates_curvature: bool
+    violates_min_turning_radius: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "point_index": self.point_index,
+            "turn_angle_deg": self.turn_angle_deg,
+            "curvature": self.curvature,
+            "turning_radius": self.turning_radius,
+            "violates": self.violates,
+            "violates_curvature": self.violates_curvature,
+            "violates_min_turning_radius": self.violates_min_turning_radius,
+        }
+
+
+@dataclass(frozen=True)
 class CurvatureReport:
     is_feasible: bool
     max_curvature: float
     min_turning_radius: float | None
     violation_indices: tuple[int, ...]
     summary: str
+    samples: tuple[CurvatureSample, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +103,7 @@ class CurvatureReport:
             "min_turning_radius": self.min_turning_radius,
             "violation_indices": list(self.violation_indices),
             "summary": self.summary,
+            "samples": [sample.to_dict() for sample in self.samples],
         }
 
 
