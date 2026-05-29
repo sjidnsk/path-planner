@@ -70,24 +70,50 @@ def smooth_path(
 
 
 def _cells_on_line(start: Cell, goal: Cell) -> tuple[Cell, ...]:
-    x0, y0 = start.x, start.y
-    x1, y1 = goal.x, goal.y
-    dx = abs(x1 - x0)
-    dy = -abs(y1 - y0)
-    sx = 1 if x0 < x1 else -1
-    sy = 1 if y0 < y1 else -1
-    error = dx + dy
     cells: list[Cell] = []
+    min_x = min(start.x, goal.x)
+    max_x = max(start.x, goal.x)
+    min_y = min(start.y, goal.y)
+    max_y = max(start.y, goal.y)
+    for y in range(min_y, max_y + 1):
+        for x in range(min_x, max_x + 1):
+            cell = Cell(x, y)
+            if _segment_intersects_cell(start, goal, cell):
+                cells.append(cell)
+    return tuple(sorted(cells))
 
-    while True:
-        cells.append(Cell(x0, y0))
-        if x0 == x1 and y0 == y1:
-            break
-        doubled_error = 2 * error
-        if doubled_error >= dy:
-            error += dy
-            x0 += sx
-        if doubled_error <= dx:
-            error += dx
-            y0 += sy
-    return tuple(cells)
+
+def _segment_intersects_cell(start: Cell, goal: Cell, cell: Cell) -> bool:
+    x0, y0 = float(start.x), float(start.y)
+    x1, y1 = float(goal.x), float(goal.y)
+    dx = x1 - x0
+    dy = y1 - y0
+    left = cell.x - 0.5
+    right = cell.x + 0.5
+    bottom = cell.y - 0.5
+    top = cell.y + 0.5
+
+    t0 = 0.0
+    t1 = 1.0
+    for edge_delta, edge_distance in (
+        (-dx, x0 - left),
+        (dx, right - x0),
+        (-dy, y0 - bottom),
+        (dy, top - y0),
+    ):
+        if edge_delta == 0.0:
+            if edge_distance < 0.0:
+                return False
+            continue
+        ratio = edge_distance / edge_delta
+        if edge_delta < 0.0:
+            if ratio > t1:
+                return False
+            if ratio > t0:
+                t0 = ratio
+        else:
+            if ratio < t0:
+                return False
+            if ratio < t1:
+                t1 = ratio
+    return True
