@@ -108,6 +108,53 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert "reachable" in completed.stdout
 
 
+def test_cli_demo_with_tracking_simulation_writes_report(tmp_path):
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map_corridor.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--simulate-tracking",
+            "--lookahead-m",
+            "0.75",
+            "--time-step-s",
+            "0.2",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    report = payload["tracking_simulation_report"]
+
+    assert "simulated_path" in report
+    assert report["simulated_path"]
+    assert "metrics" in report
+    assert "safety_report" in report
+    assert "max_cross_track_error_m" in report["metrics"]
+    assert "min_clearance_m" in report["metrics"]
+    assert "high_cost_exposure" in report["metrics"]
+    assert report["config"]["max_sim_time_s"] == 600.0
+    assert report["simulated_path"][-1]["target_waypoint_index"] == len(payload["postprocess"]["trackable_path"]["waypoints"]) - 1
+    assert report["metrics"]["simulated_length_m"] >= report["metrics"]["path_length_m"] * 0.95
+    html = (output_dir / "diagnostics.html").read_text(encoding="utf-8")
+    assert "Tracking Simulation Summary" in html
+    assert "Simulated Tracking Path" in html
+
+
 def test_corridor_demo_map_is_complex_and_keeps_corridor_feasible():
     grid, request = load_plan_input("examples/demo_map_corridor.json")
     result = AStarPlanner().plan(grid, request)

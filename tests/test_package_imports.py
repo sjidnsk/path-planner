@@ -34,6 +34,10 @@ def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     assert "trackable_path" in content
     assert "TrackingSafetyReport" in content
     assert "speed_profile" in content
+    assert "Phase 5" in content
+    assert "tracking_simulation_report" in content
+    assert "Simulated Tracking Path" in content
+    assert "max_cross_track_error_m" in content
     assert "Phase 3" in content
     assert "platform-aware A*" in content
     assert "PlanningGrid" in content

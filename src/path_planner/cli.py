@@ -9,6 +9,7 @@ from path_planner.diagnostics import render_diagnostics
 from path_planner.platform import DEFAULT_PLATFORM_KEY, load_planner_platform_profile
 from path_planner.postprocess import run_postprocess
 from path_planner.search import AStarPlanner, build_planning_grid
+from path_planner.tracking import TrackingSimulationConfig, simulate_tracking
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Lateral tracking error bound used for conservative safety-tube diagnostics",
     )
+    parser.add_argument(
+        "--simulate-tracking",
+        action="store_true",
+        help="Run a lightweight pure-pursuit tracking simulation for experiment baseline metrics",
+    )
+    parser.add_argument("--lookahead-m", type=float, default=0.75, help="Pure-pursuit lookahead distance in meters")
+    parser.add_argument("--time-step-s", type=float, default=0.2, help="Tracking simulation time step in seconds")
+    parser.add_argument("--max-sim-time-s", type=float, default=600.0, help="Maximum tracking simulation time in seconds")
     return parser
 
 
@@ -83,10 +92,27 @@ def main(argv: list[str] | None = None) -> int:
         min_speed_mps=args.min_speed_mps,
         tracking_error_bound_m=args.tracking_error_bound_m,
     )
+    tracking_simulation = None
+    if args.simulate_tracking and postprocess.trackable_path is not None:
+        tracking_simulation = simulate_tracking(
+            grid,
+            postprocess.trackable_path,
+            platform_profile=platform_profile,
+            config=TrackingSimulationConfig(
+                lookahead_m=args.lookahead_m,
+                time_step_s=args.time_step_s,
+                max_sim_time_s=args.max_sim_time_s,
+            ),
+        )
 
     output_json = Path(args.output_json)
     output_json.parent.mkdir(parents=True, exist_ok=True)
-    payload = route_result_to_json_dict(result, grid.spec, postprocess=postprocess)
+    payload = route_result_to_json_dict(
+        result,
+        grid.spec,
+        postprocess=postprocess,
+        tracking_simulation=tracking_simulation,
+    )
     output_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     output_dir = Path(args.output_dir)
@@ -94,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         grid,
         result,
         postprocess=postprocess,
+        tracking_simulation=tracking_simulation,
         png_path=output_dir / "diagnostics.png",
         html_path=output_dir / "diagnostics.html",
     )
@@ -106,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
                 "platform": platform_profile.platform_key,
                 "search_mode": result.diagnostics.search_mode,
                 "trackable_waypoints": len(postprocess.trackable_path.waypoints) if postprocess.trackable_path else 0,
+                "tracking_simulation": tracking_simulation is not None,
                 "constraint_warnings": len(platform_profile.constraint_warnings),
             },
             ensure_ascii=False,

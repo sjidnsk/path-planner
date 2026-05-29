@@ -18,6 +18,7 @@ import numpy as np
 from path_planner.core import CostGrid, PlanResult
 from path_planner.postprocess import PostprocessResult
 from path_planner.postprocess.footprint import build_footprint_safe_mask
+from path_planner.tracking import TrackingSimulationResult
 
 DIAGNOSTIC_COLORS = {
     "surface": "#f8fafc",
@@ -30,6 +31,7 @@ DIAGNOSTIC_COLORS = {
     "raw_path_outline": "#111827",
     "smoothed_path": "#06b6d4",
     "trackable_path": "#a855f7",
+    "simulated_path": "#f97316",
     "start": "#16a34a",
     "goal": "#dc2626",
     "violation": "#dc2626",
@@ -47,6 +49,7 @@ def render_diagnostics(
     result: PlanResult,
     *,
     postprocess: PostprocessResult | None = None,
+    tracking_simulation: TrackingSimulationResult | None = None,
     png_path: str | Path,
     html_path: str | Path,
 ) -> None:
@@ -56,7 +59,7 @@ def render_diagnostics(
     page.parent.mkdir(parents=True, exist_ok=True)
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.8), constrained_layout=True)
-    _plot_cost_path(axes[0, 0], grid, result, postprocess)
+    _plot_cost_path(axes[0, 0], grid, result, postprocess, tracking_simulation)
     _plot_mask(axes[0, 1], grid)
     _plot_expanded(axes[1, 0], grid, result)
     _plot_metrics(axes[1, 1], result, postprocess)
@@ -66,6 +69,8 @@ def render_diagnostics(
     route = result.to_route_dict(grid.spec)
     if postprocess is not None:
         route["postprocess"] = postprocess.to_dict()
+    if tracking_simulation is not None:
+        route["tracking_simulation_report"] = tracking_simulation.to_dict()
     summary = html.escape(json.dumps(route, ensure_ascii=False, indent=2))
     postprocess_summary = _html_postprocess_summary(postprocess)
     page.write_text(
@@ -82,6 +87,7 @@ def render_diagnostics(
                 "<li>Vehicle-inflated Blocked Cells</li>",
                 "<li>Smoothed Path</li>",
                 "<li>Trackable Path</li>",
+                "<li>Simulated Tracking Path</li>",
                 "<li>Blocked Cells</li>",
                 "<li>Passable Mask</li>",
                 "<li>Expanded Nodes</li>",
@@ -93,6 +99,7 @@ def render_diagnostics(
                 "blue outlines mark the Safety Corridor; amber diagonal hatching marks vehicle-inflated blocked cells; "
                 "black filled cells are blocked by passable_mask; white line with dark outline is raw A* path; "
                 "cyan dashed line is smoothed path; purple markers/arrows are trackable waypoints; "
+                "orange line is simulated tracking path; "
                 "red X markers are curvature or turning-radius violations; "
                 "red square markers are tracking-safety violations; "
                 "green dot is start; red dot is goal.</p>",
@@ -110,6 +117,8 @@ def render_diagnostics(
                 _html_trackable_path_summary(postprocess),
                 "<h2>Tracking Safety Summary</h2>",
                 _html_tracking_safety_summary(postprocess),
+                "<h2>Tracking Simulation Summary</h2>",
+                _html_tracking_simulation_summary(tracking_simulation),
                 "<h2>Route JSON</h2>",
                 f"<pre>{summary}</pre>",
                 "</body></html>",
@@ -119,7 +128,13 @@ def render_diagnostics(
     )
 
 
-def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: PostprocessResult | None) -> None:
+def _plot_cost_path(
+    ax,
+    grid: CostGrid,
+    result: PlanResult,
+    postprocess: PostprocessResult | None,
+    tracking_simulation: TrackingSimulationResult | None,
+) -> None:
     image = ax.imshow(grid.cost, cmap=COST_CMAP, origin="upper")
     colorbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
     colorbar.set_label("Cost", rotation=90)
@@ -230,6 +245,21 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
             width=0.006,
             zorder=5.1,
         )
+    if tracking_simulation is not None and tracking_simulation.states:
+        xs = [_world_x_to_grid_x(grid, state.x) for state in tracking_simulation.states]
+        ys = [_world_y_to_grid_y(grid, state.y) for state in tracking_simulation.states]
+        ax.plot(
+            xs,
+            ys,
+            color=DIAGNOSTIC_COLORS["simulated_path"],
+            linewidth=1.8,
+            label="Simulated Tracking Path",
+            zorder=5.2,
+            path_effects=[
+                path_effects.Stroke(linewidth=3.0, foreground=DIAGNOSTIC_COLORS["raw_path_outline"]),
+                path_effects.Normal(),
+            ],
+        )
     if postprocess is not None and postprocess.curvature_report.violation_indices:
         curvature_cells = (
             postprocess.smoothed_path.cells
@@ -275,7 +305,29 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
                 label="Tracking Safety Violation",
                 zorder=5.3,
             )
-    handles, labels = _cost_path_legend_handles(grid, result, postprocess)
+    if (
+        tracking_simulation is not None
+        and tracking_simulation.safety_report.violation_indices
+        and tracking_simulation.states
+    ):
+        violation_states = [
+            tracking_simulation.states[index]
+            for index in tracking_simulation.safety_report.violation_indices
+            if 0 <= index < len(tracking_simulation.states)
+        ]
+        if violation_states:
+            ax.scatter(
+                [_world_x_to_grid_x(grid, state.x) for state in violation_states],
+                [_world_y_to_grid_y(grid, state.y) for state in violation_states],
+                c=DIAGNOSTIC_COLORS["violation"],
+                marker="P",
+                s=72,
+                linewidths=1.2,
+                edgecolors=DIAGNOSTIC_COLORS["raw_path"],
+                label="Tracking Simulation Violation",
+                zorder=5.4,
+            )
+    handles, labels = _cost_path_legend_handles(grid, result, postprocess, tracking_simulation)
     if handles:
         ax.legend(
             handles,
@@ -297,6 +349,7 @@ def _cost_path_legend_handles(
     grid: CostGrid,
     result: PlanResult,
     postprocess: PostprocessResult | None,
+    tracking_simulation: TrackingSimulationResult | None,
 ) -> tuple[list[object], list[str]]:
     handles: list[object] = []
     labels: list[str] = []
@@ -328,6 +381,9 @@ def _cost_path_legend_handles(
             )
         )
         labels.append("Trackable Path")
+    if tracking_simulation is not None and tracking_simulation.states:
+        handles.append(Line2D([0], [0], color=DIAGNOSTIC_COLORS["simulated_path"], linewidth=1.8))
+        labels.append("Simulated Tracking Path")
     if postprocess is not None and postprocess.corridor.sections:
         handles.append(Patch(facecolor="none", edgecolor=DIAGNOSTIC_COLORS["corridor"], linestyle="--", linewidth=1.3))
         labels.append("Safety Corridor")
@@ -350,6 +406,14 @@ def _cost_path_legend_handles(
             Line2D([0], [0], marker="s", color=DIAGNOSTIC_COLORS["violation"], linestyle="none", markersize=7)
         )
         labels.append("Tracking Safety Violation")
+    if (
+        tracking_simulation is not None
+        and tracking_simulation.safety_report.violation_indices
+    ):
+        handles.append(
+            Line2D([0], [0], marker="P", color=DIAGNOSTIC_COLORS["violation"], linestyle="none", markersize=7)
+        )
+        labels.append("Tracking Simulation Violation")
     if np.any(~grid.passable_mask):
         handles.append(Patch(facecolor=DIAGNOSTIC_COLORS["blocked"], alpha=0.94))
         labels.append("Blocked Cells")
@@ -417,6 +481,14 @@ def _draw_cell_hatch(
                 zorder=zorder,
             )
         )
+
+
+def _world_x_to_grid_x(grid: CostGrid, x: float) -> float:
+    return (x - grid.spec.origin[0]) / grid.spec.resolution
+
+
+def _world_y_to_grid_y(grid: CostGrid, y: float) -> float:
+    return (y - grid.spec.origin[1]) / grid.spec.resolution
 
 
 def _plot_mask(ax, grid: CostGrid) -> None:
@@ -683,6 +755,30 @@ def _html_tracking_safety_summary(postprocess: PostprocessResult | None) -> str:
             f"<li>min_clearance_m: {html.escape(str(report.min_clearance_m))}</li>",
             f"<li>violation_indices: {html.escape(str(list(report.violation_indices)))}</li>",
             f"<li>summary: {html.escape(report.summary)}</li>",
+            "</ul>",
+        ]
+    )
+
+
+def _html_tracking_simulation_summary(tracking_simulation: TrackingSimulationResult | None) -> str:
+    if tracking_simulation is None:
+        return "<p>tracking_simulation_report: not run</p>"
+    metrics = tracking_simulation.metrics
+    safety = tracking_simulation.safety_report
+    return "\n".join(
+        [
+            "<ul>",
+            f"<li>states: {len(tracking_simulation.states)}</li>",
+            f"<li>is_safe: {safety.is_safe}</li>",
+            f"<li>path_length_m: {metrics.path_length_m:.3f}</li>",
+            f"<li>simulated_length_m: {metrics.simulated_length_m:.3f}</li>",
+            f"<li>max_cross_track_error_m: {metrics.max_cross_track_error_m:.6f}</li>",
+            f"<li>min_clearance_m: {html.escape(str(metrics.min_clearance_m))}</li>",
+            f"<li>safety_violation_count: {metrics.safety_violation_count}</li>",
+            f"<li>curvature_violation_count: {metrics.curvature_violation_count}</li>",
+            f"<li>mean_speed_mps: {metrics.mean_speed_mps:.4f}</li>",
+            f"<li>high_cost_exposure: {metrics.high_cost_exposure:.3f}</li>",
+            f"<li>summary: {html.escape(safety.summary)}</li>",
             "</ul>",
         ]
     )

@@ -48,6 +48,14 @@ Phase 4 adds a trackable-path interface and execution feasibility diagnostics:
 - `TrackingSafetyReport` checks whether a configured tracking-error tube remains inside the platform-aware safe region;
 - diagnostics visualize trackable waypoints, heading arrows, and tracking-safety violations.
 
+Phase 5 adds a lightweight tracking simulation baseline:
+
+- `tracking_simulation_report` is generated when the CLI is run with `--simulate-tracking`;
+- the simulator uses a low-speed pure-pursuit geometric approximation, not MPC or vehicle dynamics;
+- simulated states include position, heading, target waypoint, speed, and cross-track error;
+- experiment metrics include `max_cross_track_error_m`, simulated length, minimum clearance, safety violations, mean speed, and high-cost exposure;
+- diagnostics overlay the orange `Simulated Tracking Path` and show a Tracking Simulation Summary.
+
 This project does not implement GCS, IRIS, Ackermann trajectory optimization, Drake integration, exploration target selection, observation updates, or an online planning service.
 
 The planner returns a platform-filtered `geometric_path` plus a trackable-path interface and feasibility diagnostics, not a closed-loop controller command stream.
@@ -87,6 +95,7 @@ Optional platform arguments:
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform yutu2 --safety-margin-m 0.1
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform-config D:\codex\project\lunar-path-planning\dev-platform-constraints\configs\platforms\yutu2.json
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --tracking-error-bound-m 0.1 --min-speed-mps 0.01
+python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --lookahead-m 0.75 --time-step-s 0.2
 ```
 
 Expected outputs:
@@ -101,6 +110,9 @@ The route JSON preserves Phase 1 fields and adds a `postprocess` object with
 `tracking_safety_report`, and `fallback_status`.
 The top-level `diagnostics` object also records whether A* used
 `platform_aware_astar` and `inflated_passable_mask`.
+When `--simulate-tracking` is enabled, the route JSON also includes a top-level
+`tracking_simulation_report` object with `simulated_path`, `config`, `metrics`,
+and `safety_report`.
 
 By default, shortcut smoothing only accepts cells with `cost <= 3.0`; adjust
 this with `--max-shortcut-cost` when a map uses a different cost scale. The

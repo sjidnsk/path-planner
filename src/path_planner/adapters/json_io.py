@@ -8,6 +8,7 @@ import numpy as np
 
 from path_planner.core import Cell, CostGrid, GridSpec, PlanRequest, PlanResult
 from path_planner.postprocess import PostprocessResult
+from path_planner.tracking import TrackingSimulationResult
 
 REQUEST_SCHEMA_VERSION = "path-planner-request/v1"
 
@@ -44,8 +45,11 @@ def route_result_to_json_dict(
     spec: GridSpec,
     *,
     postprocess: PostprocessResult | None = None,
+    tracking_simulation: TrackingSimulationResult | None = None,
 ) -> dict[str, Any]:
     payload = result.to_route_dict(spec)
     if postprocess is not None:
         payload["postprocess"] = postprocess.to_dict()
+    if tracking_simulation is not None:
+        payload["tracking_simulation_report"] = tracking_simulation.to_dict()
     return payload
