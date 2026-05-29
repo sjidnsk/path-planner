@@ -35,10 +35,10 @@
 
 ### Task 2: Postprocess Model Contract
 
-- [ ] Write failing tests for serializable result models.
-- [ ] Implement `models.py` and package exports.
-- [ ] Verify model tests pass.
-- [ ] Commit with `feat: add postprocess result models`.
+- [x] Write failing tests for serializable result models.
+- [x] Implement `models.py` and package exports.
+- [x] Verify model tests pass.
+- [x] Commit with `feat: add postprocess result models`.
 
 ### Task 3: Corridor Generation
 
