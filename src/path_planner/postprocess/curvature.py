@@ -55,6 +55,7 @@ def check_curvature(
         min_turning_radius=min(positive_radii) if positive_radii else None,
         violation_indices=violations,
         summary="path satisfies curvature limit" if not violations else f"curvature violations: {len(violations)}",
+        constraint_min_turning_radius=min_turning_radius,
         samples=tuple(samples),
     )
 

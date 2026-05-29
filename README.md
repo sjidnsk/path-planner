@@ -21,6 +21,16 @@ Phase 2 adds a lightweight postprocess layer:
 - `fallback_status` so failed postprocess steps keep the raw A* path available;
 - diagnostics that overlay raw and smoothed paths.
 
+Phase 2.5 connects platform constraints from `dev-platform-constraints`:
+
+- default platform loading uses `yutu2`;
+- `PlannerPlatformProfile` is a planning-side view derived from external platform parameters;
+- vehicle footprint radius is derived from `body_length`, `body_width`, and optional `--safety-margin-m`;
+- semantic costmap slope and obstacle hard limits are derived from the platform profile instead of internal defaults;
+- corridor and smoothing checks use the vehicle-inflated passable mask;
+- curvature checks use a valid platform `min_turning_radius` or an explicit override;
+- diagnostics expose platform parameters, constraint warnings, inflated obstacles, and curvature violations.
+
 This project does not implement GCS, IRIS, Ackermann trajectory optimization, Drake integration, exploration target selection, observation updates, or an online planning service.
 
 The planner returns a `geometric_path` plus Phase 2 feasibility diagnostics, not a vehicle-executable trajectory.
@@ -54,6 +64,13 @@ PYTHONPATH=src python -m pytest
 python -m path_planner.cli --input examples/demo_map.json --output-json outputs/demo/route.json --output-dir outputs/demo
 ```
 
+Optional platform arguments:
+
+```powershell
+python -m path_planner.cli --input examples/demo_map.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform yutu2 --safety-margin-m 0.1
+python -m path_planner.cli --input examples/demo_map.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform-config D:\codex\project\lunar-path-planning\dev-platform-constraints\configs\platforms\yutu2.json
+```
+
 Expected outputs:
 
 - `outputs/demo/route.json`
@@ -61,14 +78,20 @@ Expected outputs:
 - `outputs/demo/diagnostics.html`
 
 The route JSON preserves Phase 1 fields and adds a `postprocess` object with
-`raw_path`, `corridor`, `smoothed_path`, `curvature_report`, and
-`fallback_status`.
+`platform_profile`, `constraint_warnings`, `corridor_report`, `raw_path`,
+`corridor`, `smoothed_path`, `curvature_report`, and `fallback_status`.
 
 By default, shortcut smoothing only accepts cells with `cost <= 3.0`; adjust
 this with `--max-shortcut-cost` when a map uses a different cost scale. In the
 diagnostic figure, yellow cells are high cost and black cells are blocked by
-`passable_mask`.
+`passable_mask`. Orange cells are vehicle-inflated blocked cells derived from
+the platform footprint.
 
 ## External Interface Direction
 
-`dev-platform-constraints` can provide `cost` and `passable_mask` through `DevPlatformAdapter`. `model-explorer` can consume the route JSON fields `reachable`, `geometric_path`, `path_cost`, `diagnostics`, `failure_reason`, and the optional `postprocess` object.
+`dev-platform-constraints` provides platform and vehicle parameters through its
+platform config loader. `path-planner` does not maintain an independent vehicle
+fact model; it derives `PlannerPlatformProfile` from the external
+`PlatformParameters` object. `model-explorer` can consume the route JSON fields
+`reachable`, `geometric_path`, `path_cost`, `diagnostics`, `failure_reason`, and
+the optional `postprocess` object.

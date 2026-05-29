@@ -33,6 +33,8 @@ def test_render_diagnostics_writes_png_and_html(tmp_path):
     assert "green dot is start; red dot is goal" in html
     assert "Smoothed Path" in html
     assert "curvature_report" in html
+    assert "Platform Constraints" in html
+    assert "vehicle-inflated blocked cells" in html
     assert "turn_angle_deg" in html
     assert "turning_radius" in html
     assert "trajectory_kind" in html
@@ -68,6 +70,10 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert payload["trajectory_kind"] == "geometric_path"
     assert payload["reachable"] is True
     assert "postprocess" in payload
+    assert "platform_profile" in payload["postprocess"]
+    assert payload["postprocess"]["platform_profile"]["platform_key"] == "yutu2"
+    assert "constraint_warnings" in payload["postprocess"]
+    assert "corridor_report" in payload["postprocess"]
     assert payload["postprocess"]["raw_path"]["cells"] == payload["geometric_path"]["cells"]
     assert "curvature_report" in payload["postprocess"]
     assert "samples" in payload["postprocess"]["curvature_report"]

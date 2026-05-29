@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from path_planner.core import Cell, CostGrid
+from path_planner.platform import PlannerPlatformProfile
 
+from .footprint import build_footprint_safe_mask
 from .models import SmoothedPathResult
 
 
@@ -11,11 +13,16 @@ def has_line_of_sight(
     goal: Cell,
     *,
     max_cell_cost: float | None = None,
+    platform_profile: PlannerPlatformProfile | None = None,
+    platform_safe_mask=None,
 ) -> bool:
     if max_cell_cost is not None and max_cell_cost < 0.0:
         raise ValueError("max_cell_cost must be nonnegative")
+    safe_mask = platform_safe_mask
+    if safe_mask is None:
+        safe_mask = build_footprint_safe_mask(grid, platform_profile).safe_mask
     for cell in _cells_on_line(start, goal):
-        if not grid.is_passable(cell):
+        if not grid.spec.in_bounds(cell) or not bool(safe_mask[cell.y, cell.x]):
             return False
         if max_cell_cost is not None and grid.cost_at(cell) > max_cell_cost:
             return False
@@ -27,9 +34,11 @@ def smooth_path(
     path_cells: tuple[Cell, ...],
     *,
     max_shortcut_cost: float | None = None,
+    platform_profile: PlannerPlatformProfile | None = None,
 ) -> SmoothedPathResult:
     if max_shortcut_cost is not None and max_shortcut_cost < 0.0:
         raise ValueError("max_shortcut_cost must be nonnegative")
+    footprint = build_footprint_safe_mask(grid, platform_profile)
     raw_world = tuple(grid.spec.cell_to_world(cell) for cell in path_cells)
     if not path_cells:
         return SmoothedPathResult(status="fallback", cells=path_cells, world=raw_world, fallback_reason="empty_path")
@@ -39,6 +48,13 @@ def smooth_path(
             cells=path_cells,
             world=raw_world,
             fallback_reason="path_cell_blocked",
+        )
+    if any(not bool(footprint.safe_mask[cell.y, cell.x]) for cell in path_cells):
+        return SmoothedPathResult(
+            status="fallback",
+            cells=path_cells,
+            world=raw_world,
+            fallback_reason="path_cell_violates_platform_footprint",
         )
     if len(path_cells) <= 2:
         return SmoothedPathResult(status="unchanged", cells=path_cells, world=raw_world, fallback_reason=None)
@@ -53,6 +69,7 @@ def smooth_path(
                 path_cells[anchor_index],
                 path_cells[candidate_index],
                 max_cell_cost=max_shortcut_cost,
+                platform_safe_mask=footprint.safe_mask,
             ):
                 next_index = candidate_index
                 break

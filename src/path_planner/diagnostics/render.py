@@ -15,6 +15,7 @@ import numpy as np
 
 from path_planner.core import CostGrid, PlanResult
 from path_planner.postprocess import PostprocessResult
+from path_planner.postprocess.footprint import build_footprint_safe_mask
 
 
 def render_diagnostics(
@@ -54,6 +55,7 @@ def render_diagnostics(
                 "<ul>",
                 "<li>Cost + Path</li>",
                 "<li>Safety Corridor</li>",
+                "<li>Vehicle-inflated Blocked Cells</li>",
                 "<li>Smoothed Path</li>",
                 "<li>Blocked Cells</li>",
                 "<li>Passable Mask</li>",
@@ -62,9 +64,12 @@ def render_diagnostics(
                 "</ul>",
                 "<p>In Cost + Path, dark/purple cells are lower cost and yellow cells are high cost; "
                 "magenta cells mark the Safety Corridor; black cells are blocked by passable_mask; "
+                "orange cells are vehicle-inflated blocked cells from the platform footprint; "
                 "white line is raw A* path; cyan dashed line is smoothed path; "
-                "green dot is start; red dot is goal.</p>",
+                "orange X markers are curvature or turning-radius violations; green dot is start; red dot is goal.</p>",
                 f'<img src="{html.escape(png.name)}" alt="diagnostics" style="max-width:100%;height:auto">',
+                "<h2>Platform Constraints</h2>",
+                _html_platform_summary(postprocess),
                 "<h2>Postprocess Summary</h2>",
                 postprocess_summary,
                 "<h2>Route JSON</h2>",
@@ -86,6 +91,11 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
                     corridor[cell.y, cell.x] = 1.0
         corridor_mask = np.ma.masked_where(corridor == 0.0, corridor)
         ax.imshow(corridor_mask, cmap=ListedColormap(["magenta"]), origin="upper", alpha=0.28)
+    if postprocess is not None and postprocess.platform_profile is not None:
+        footprint = build_footprint_safe_mask(grid, postprocess.platform_profile)
+        inflated_only = np.logical_and(grid.passable_mask, ~footprint.safe_mask)
+        inflated = np.ma.masked_where(~inflated_only, np.ones(grid.spec.shape, dtype=float))
+        ax.imshow(inflated, cmap=ListedColormap(["orange"]), origin="upper", alpha=0.45)
     blocked = np.ma.masked_where(grid.passable_mask, np.ones(grid.spec.shape, dtype=float))
     ax.imshow(blocked, cmap=ListedColormap(["black"]), origin="upper", alpha=0.9)
     if result.path_cells:
@@ -98,6 +108,27 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
         xs = [cell.x for cell in postprocess.smoothed_path.cells]
         ys = [cell.y for cell in postprocess.smoothed_path.cells]
         ax.plot(xs, ys, color="cyan", linewidth=1.5, linestyle="--", label="Smoothed Path")
+    if postprocess is not None and postprocess.curvature_report.violation_indices:
+        curvature_cells = (
+            postprocess.smoothed_path.cells
+            if postprocess.smoothed_path.status != "fallback"
+            else postprocess.raw_path_cells
+        )
+        violation_cells = [
+            curvature_cells[index]
+            for index in postprocess.curvature_report.violation_indices
+            if 0 <= index < len(curvature_cells)
+        ]
+        if violation_cells:
+            ax.scatter(
+                [cell.x for cell in violation_cells],
+                [cell.y for cell in violation_cells],
+                c="orange",
+                marker="x",
+                s=72,
+                linewidths=2,
+                label="Curvature Violation",
+            )
     handles, labels = _cost_path_legend_handles(grid, result, postprocess)
     if handles:
         ax.legend(handles, labels, loc="best")
@@ -124,6 +155,14 @@ def _cost_path_legend_handles(
     if postprocess is not None and postprocess.corridor.sections:
         handles.append(Patch(facecolor="magenta", alpha=0.28))
         labels.append("Safety Corridor")
+    if postprocess is not None and postprocess.platform_profile is not None:
+        footprint = build_footprint_safe_mask(grid, postprocess.platform_profile)
+        if footprint.inflated_blocked_count > footprint.original_blocked_count:
+            handles.append(Patch(facecolor="orange", alpha=0.45))
+            labels.append("Vehicle-inflated Blocked Cells")
+    if postprocess is not None and postprocess.curvature_report.violation_indices:
+        handles.append(Line2D([0], [0], marker="x", color="orange", linestyle="none", markersize=8))
+        labels.append("Curvature Violation")
     if np.any(~grid.passable_mask):
         handles.append(Patch(facecolor="black", alpha=0.9))
         labels.append("Blocked Cells")
@@ -162,19 +201,58 @@ def _html_postprocess_summary(postprocess: PostprocessResult | None) -> str:
     if postprocess is None:
         return "<p>postprocess: not run</p>"
     report = postprocess.curvature_report
+    corridor = postprocess.corridor
     return "\n".join(
         [
             "<ul>",
             f"<li>corridor_status: {html.escape(postprocess.corridor.status)}</li>",
             f"<li>corridor_sections: {len(postprocess.corridor.sections)}</li>",
+            f"<li>vehicle-inflated blocked cells: {corridor.inflated_blocked_count}</li>",
+            f"<li>original blocked cells: {corridor.original_blocked_count}</li>",
+            f"<li>footprint_radius_m: {html.escape(str(corridor.footprint_radius_m))}</li>",
             f"<li>smoothed_path_status: {html.escape(postprocess.smoothed_path.status)}</li>",
             f"<li>fallback_reason: {html.escape(str(postprocess.fallback_status.reason))}</li>",
             f"<li>curvature_report: {html.escape(report.summary)}</li>",
+            f"<li>constraint_min_turning_radius: {html.escape(str(report.constraint_min_turning_radius))}</li>",
             f"<li>curvature_samples: {len(report.samples)}</li>",
             "</ul>",
+            _html_warnings(postprocess),
             _html_curvature_table(postprocess),
         ]
     )
+
+
+def _html_platform_summary(postprocess: PostprocessResult | None) -> str:
+    if postprocess is None or postprocess.platform_profile is None:
+        return "<p>platform_profile: not provided</p>"
+    profile = postprocess.platform_profile
+    rows = [
+        "<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">",
+        "<tbody>",
+        f"<tr><th>platform_key</th><td>{html.escape(profile.platform_key)}</td></tr>",
+        f"<tr><th>platform_name</th><td>{html.escape(profile.platform_name)}</td></tr>",
+        f"<tr><th>config_path</th><td>{html.escape(str(profile.config_path))}</td></tr>",
+        f"<tr><th>body_length_m</th><td>{html.escape(str(profile.body_length_m))}</td></tr>",
+        f"<tr><th>body_width_m</th><td>{html.escape(str(profile.body_width_m))}</td></tr>",
+        f"<tr><th>footprint_radius_m</th><td>{html.escape(str(profile.footprint_radius_m))}</td></tr>",
+        f"<tr><th>max_slope_deg</th><td>{html.escape(str(profile.max_slope_deg))}</td></tr>",
+        f"<tr><th>max_obstacle_height_m</th><td>{html.escape(str(profile.max_obstacle_height_m))}</td></tr>",
+        f"<tr><th>ground_clearance_m</th><td>{html.escape(str(profile.ground_clearance_m))}</td></tr>",
+        f"<tr><th>effective_min_turning_radius_m</th><td>{html.escape(str(profile.effective_min_turning_radius_m))}</td></tr>",
+        "</tbody>",
+        "</table>",
+    ]
+    return "\n".join(rows)
+
+
+def _html_warnings(postprocess: PostprocessResult) -> str:
+    if not postprocess.constraint_warnings:
+        return "<p>constraint_warnings: none</p>"
+    rows = ["<h3>Constraint Warnings</h3>", "<ul>"]
+    for warning in postprocess.constraint_warnings:
+        rows.append(f"<li>{html.escape(warning)}</li>")
+    rows.append("</ul>")
+    return "\n".join(rows)
 
 
 def _html_curvature_table(postprocess: PostprocessResult) -> str:

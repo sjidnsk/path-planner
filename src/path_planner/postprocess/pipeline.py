@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from path_planner.core import CostGrid, PlanResult
+from path_planner.platform import PlannerPlatformProfile
 
 from .corridor import build_corridor
 from .curvature import check_curvature
@@ -16,7 +17,16 @@ def run_postprocess(
     max_curvature: float = 1.0,
     min_turning_radius: float | None = None,
     max_shortcut_cost: float | None = 3.0,
+    platform_profile: PlannerPlatformProfile | None = None,
 ) -> PostprocessResult:
+    constraint_warnings = platform_profile.constraint_warnings if platform_profile is not None else ()
+    constraint_min_turning_radius = (
+        min_turning_radius
+        if min_turning_radius is not None
+        else platform_profile.effective_min_turning_radius_m
+        if platform_profile is not None
+        else None
+    )
     if not result.success:
         reason = result.failure_reason.value if result.failure_reason else "planning_failed"
         return PostprocessResult(
@@ -38,19 +48,27 @@ def run_postprocess(
                 is_feasible=False,
                 max_curvature=0.0,
                 min_turning_radius=None,
+                constraint_min_turning_radius=constraint_min_turning_radius,
                 violation_indices=(),
                 summary=f"postprocess skipped: {reason}",
             ),
             fallback_status=FallbackStatus(used_raw_path=True, reason=reason),
+            platform_profile=platform_profile,
+            constraint_warnings=constraint_warnings,
         )
 
-    corridor = build_corridor(grid, result.path_cells, radius_cells=corridor_radius_cells)
-    smoothed = smooth_path(grid, result.path_cells, max_shortcut_cost=max_shortcut_cost)
+    corridor = build_corridor(
+        grid,
+        result.path_cells,
+        radius_cells=corridor_radius_cells,
+        platform_profile=platform_profile,
+    )
+    smoothed = smooth_path(grid, result.path_cells, max_shortcut_cost=max_shortcut_cost, platform_profile=platform_profile)
     curvature_points = smoothed.world if smoothed.status != "fallback" else result.path_world
     curvature = check_curvature(
         curvature_points,
         max_curvature=max_curvature,
-        min_turning_radius=min_turning_radius,
+        min_turning_radius=constraint_min_turning_radius,
     )
 
     fallback_reason = smoothed.fallback_reason or corridor.failure_reason
@@ -61,4 +79,6 @@ def run_postprocess(
         smoothed_path=smoothed,
         curvature_report=curvature,
         fallback_status=FallbackStatus(used_raw_path=fallback_reason is not None, reason=fallback_reason),
+        platform_profile=platform_profile,
+        constraint_warnings=constraint_warnings,
     )

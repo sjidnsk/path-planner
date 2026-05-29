@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from path_planner.core import CostGrid, GridSpec
+from path_planner.platform import PlannerPlatformProfile
 
 
 @dataclass(frozen=True)
@@ -18,8 +19,8 @@ class CostmapWeights:
 
 @dataclass(frozen=True)
 class PlatformLimits:
-    max_slope_deg: float = 30.0
-    obstacle_threshold: float = 0.5
+    max_slope_deg: float
+    obstacle_threshold: float
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,6 @@ def build_cost_grid(
     platform: PlatformLimits | None = None,
     weights: CostmapWeights | None = None,
 ) -> CostGrid:
-    platform = platform or PlatformLimits()
     weights = weights or CostmapWeights()
     shape = spec.shape
 
@@ -69,6 +69,9 @@ def build_cost_grid(
             passable_mask=np.asarray(layers.passable_mask, dtype=bool),
             metadata={"source": "cost_passable_mask"},
         )
+
+    if platform is None:
+        raise ValueError("platform limits are required when building a semantic layer costmap")
 
     slope = _layer_or_default(layers.slope, shape, 0.0)
     roughness = np.clip(_layer_or_default(layers.roughness, shape, 0.0), 0.0, 1.0)
@@ -106,4 +109,18 @@ def build_cost_grid(
             "weights": weights.__dict__,
             "platform": platform.__dict__,
         },
+    )
+
+
+def platform_limits_from_profile(profile: PlannerPlatformProfile) -> PlatformLimits:
+    missing: list[str] = []
+    if profile.max_slope_deg is None:
+        missing.append("max_slope_deg")
+    if profile.max_obstacle_height_m is None:
+        missing.append("max_obstacle_height")
+    if missing:
+        raise ValueError(f"platform profile missing costmap limits: {', '.join(missing)}")
+    return PlatformLimits(
+        max_slope_deg=float(profile.max_slope_deg),
+        obstacle_threshold=float(profile.max_obstacle_height_m),
     )

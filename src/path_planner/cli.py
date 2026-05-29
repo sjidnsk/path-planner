@@ -6,6 +6,7 @@ from pathlib import Path
 
 from path_planner.adapters import load_plan_input, route_result_to_json_dict
 from path_planner.diagnostics import render_diagnostics
+from path_planner.platform import DEFAULT_PLATFORM_KEY, load_planner_platform_profile
 from path_planner.postprocess import run_postprocess
 from path_planner.search import AStarPlanner
 
@@ -17,7 +18,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True, help="Directory for diagnostics.png and diagnostics.html")
     parser.add_argument("--corridor-radius-cells", type=int, default=1, help="Corridor radius in grid cells")
     parser.add_argument("--max-curvature", type=float, default=1.0, help="Maximum allowed discrete curvature")
-    parser.add_argument("--min-turning-radius", type=float, default=None, help="Minimum allowed turning radius")
+    parser.add_argument(
+        "--min-turning-radius",
+        type=float,
+        default=None,
+        help="Override platform minimum turning radius in meters",
+    )
+    parser.add_argument("--platform", default=DEFAULT_PLATFORM_KEY, help="Platform key from dev-platform-constraints")
+    parser.add_argument("--platform-config", default=None, help="Explicit platform config JSON path")
+    parser.add_argument("--safety-margin-m", type=float, default=0.0, help="Extra footprint safety margin in meters")
     parser.add_argument(
         "--max-shortcut-cost",
         type=float,
@@ -30,14 +39,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     grid, request = load_plan_input(args.input)
+    platform_profile = load_planner_platform_profile(
+        platform=args.platform,
+        config_path=args.platform_config,
+        safety_margin_m=args.safety_margin_m,
+        min_turning_radius_override_m=args.min_turning_radius,
+    )
     result = AStarPlanner().plan(grid, request)
     postprocess = run_postprocess(
         grid,
         result,
         corridor_radius_cells=args.corridor_radius_cells,
         max_curvature=args.max_curvature,
-        min_turning_radius=args.min_turning_radius,
         max_shortcut_cost=args.max_shortcut_cost,
+        platform_profile=platform_profile,
     )
 
     output_json = Path(args.output_json)
@@ -54,7 +69,17 @@ def main(argv: list[str] | None = None) -> int:
         html_path=output_dir / "diagnostics.html",
     )
 
-    print(json.dumps({"reachable": result.success, "failure_reason": payload["failure_reason"]}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {
+                "reachable": result.success,
+                "failure_reason": payload["failure_reason"],
+                "platform": platform_profile.platform_key,
+                "constraint_warnings": len(platform_profile.constraint_warnings),
+            },
+            ensure_ascii=False,
+        )
+    )
     return 0
 
 
