@@ -8,6 +8,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 from matplotlib.colors import ListedColormap
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import matplotlib.pyplot as plt
 import numpy as np
@@ -59,7 +60,10 @@ def render_diagnostics(
                 "<li>Expanded Nodes</li>",
                 "<li>Summary Metrics</li>",
                 "</ul>",
-                "<p>In Cost + Path, yellow cells are high cost; black cells are blocked by passable_mask.</p>",
+                "<p>In Cost + Path, dark/purple cells are lower cost and yellow cells are high cost; "
+                "magenta cells mark the Safety Corridor; black cells are blocked by passable_mask; "
+                "white line is raw A* path; cyan dashed line is smoothed path; "
+                "green dot is start; red dot is goal.</p>",
                 f'<img src="{html.escape(png.name)}" alt="diagnostics" style="max-width:100%;height:auto">',
                 "<h2>Postprocess Summary</h2>",
                 postprocess_summary,
@@ -74,8 +78,6 @@ def render_diagnostics(
 
 def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: PostprocessResult | None) -> None:
     ax.imshow(grid.cost, cmap="viridis", origin="upper")
-    blocked = np.ma.masked_where(grid.passable_mask, np.ones(grid.spec.shape, dtype=float))
-    ax.imshow(blocked, cmap=ListedColormap(["black"]), origin="upper", alpha=0.85)
     if postprocess is not None and postprocess.corridor.sections:
         corridor = np.zeros(grid.spec.shape, dtype=float)
         for section in postprocess.corridor.sections:
@@ -83,26 +85,49 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
                 if grid.spec.in_bounds(cell):
                     corridor[cell.y, cell.x] = 1.0
         corridor_mask = np.ma.masked_where(corridor == 0.0, corridor)
-        ax.imshow(corridor_mask, cmap=ListedColormap(["orange"]), origin="upper", alpha=0.28)
+        ax.imshow(corridor_mask, cmap=ListedColormap(["magenta"]), origin="upper", alpha=0.28)
+    blocked = np.ma.masked_where(grid.passable_mask, np.ones(grid.spec.shape, dtype=float))
+    ax.imshow(blocked, cmap=ListedColormap(["black"]), origin="upper", alpha=0.9)
     if result.path_cells:
         xs = [cell.x for cell in result.path_cells]
         ys = [cell.y for cell in result.path_cells]
         ax.plot(xs, ys, color="white", linewidth=2, label="Raw Path")
-        ax.scatter([xs[0], xs[-1]], [ys[0], ys[-1]], c=["lime", "red"], s=36)
+        ax.scatter(xs[0], ys[0], c="lime", s=36, label="Start")
+        ax.scatter(xs[-1], ys[-1], c="red", s=36, label="Goal")
     if postprocess is not None and postprocess.smoothed_path.cells:
         xs = [cell.x for cell in postprocess.smoothed_path.cells]
         ys = [cell.y for cell in postprocess.smoothed_path.cells]
         ax.plot(xs, ys, color="cyan", linewidth=1.5, linestyle="--", label="Smoothed Path")
-    handles, labels = ax.get_legend_handles_labels()
-    if np.any(~grid.passable_mask):
-        handles.append(Patch(facecolor="black", alpha=0.85, label="Blocked Cells"))
-        labels.append("Blocked Cells")
-    if postprocess is not None and postprocess.corridor.sections:
-        handles.append(Patch(facecolor="orange", alpha=0.28, label="Safety Corridor"))
-        labels.append("Safety Corridor")
+    handles, labels = _cost_path_legend_handles(grid, result, postprocess)
     if handles:
         ax.legend(handles, labels, loc="best")
     ax.set_title("Cost + Path")
+
+
+def _cost_path_legend_handles(
+    grid: CostGrid,
+    result: PlanResult,
+    postprocess: PostprocessResult | None,
+) -> tuple[list[object], list[str]]:
+    handles: list[object] = []
+    labels: list[str] = []
+    if result.path_cells:
+        handles.append(Line2D([0], [0], color="white", linewidth=2))
+        labels.append("Raw Path")
+        handles.append(Line2D([0], [0], marker="o", color="none", markerfacecolor="lime", markersize=6))
+        labels.append("Start")
+        handles.append(Line2D([0], [0], marker="o", color="none", markerfacecolor="red", markersize=6))
+        labels.append("Goal")
+    if postprocess is not None and postprocess.smoothed_path.cells:
+        handles.append(Line2D([0], [0], color="cyan", linewidth=1.5, linestyle="--"))
+        labels.append("Smoothed Path")
+    if postprocess is not None and postprocess.corridor.sections:
+        handles.append(Patch(facecolor="magenta", alpha=0.28))
+        labels.append("Safety Corridor")
+    if np.any(~grid.passable_mask):
+        handles.append(Patch(facecolor="black", alpha=0.9))
+        labels.append("Blocked Cells")
+    return handles, labels
 
 
 def _plot_mask(ax, grid: CostGrid) -> None:

@@ -29,6 +29,8 @@ def test_render_diagnostics_writes_png_and_html(tmp_path):
     assert "Blocked Cells" in html
     assert "Safety Corridor" in html
     assert "yellow cells are high cost" in html
+    assert "magenta cells mark the Safety Corridor" in html
+    assert "green dot is start; red dot is goal" in html
     assert "Smoothed Path" in html
     assert "curvature_report" in html
     assert "turn_angle_deg" in html
