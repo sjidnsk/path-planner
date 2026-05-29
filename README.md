@@ -64,6 +64,11 @@ The route JSON preserves Phase 1 fields and adds a `postprocess` object with
 `raw_path`, `corridor`, `smoothed_path`, `curvature_report`, and
 `fallback_status`.
 
+By default, shortcut smoothing only accepts cells with `cost <= 3.0`; adjust
+this with `--max-shortcut-cost` when a map uses a different cost scale. In the
+diagnostic figure, yellow cells are high cost and black cells are blocked by
+`passable_mask`.
+
 ## External Interface Direction
 
 `dev-platform-constraints` can provide `cost` and `passable_mask` through `DevPlatformAdapter`. `model-explorer` can consume the route JSON fields `reachable`, `geometric_path`, `path_cost`, `diagnostics`, `failure_reason`, and the optional `postprocess` object.

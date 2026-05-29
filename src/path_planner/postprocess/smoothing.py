@@ -5,11 +5,31 @@ from path_planner.core import Cell, CostGrid
 from .models import SmoothedPathResult
 
 
-def has_line_of_sight(grid: CostGrid, start: Cell, goal: Cell) -> bool:
-    return all(grid.is_passable(cell) for cell in _cells_on_line(start, goal))
+def has_line_of_sight(
+    grid: CostGrid,
+    start: Cell,
+    goal: Cell,
+    *,
+    max_cell_cost: float | None = None,
+) -> bool:
+    if max_cell_cost is not None and max_cell_cost < 0.0:
+        raise ValueError("max_cell_cost must be nonnegative")
+    for cell in _cells_on_line(start, goal):
+        if not grid.is_passable(cell):
+            return False
+        if max_cell_cost is not None and grid.cost_at(cell) > max_cell_cost:
+            return False
+    return True
 
 
-def smooth_path(grid: CostGrid, path_cells: tuple[Cell, ...]) -> SmoothedPathResult:
+def smooth_path(
+    grid: CostGrid,
+    path_cells: tuple[Cell, ...],
+    *,
+    max_shortcut_cost: float | None = None,
+) -> SmoothedPathResult:
+    if max_shortcut_cost is not None and max_shortcut_cost < 0.0:
+        raise ValueError("max_shortcut_cost must be nonnegative")
     raw_world = tuple(grid.spec.cell_to_world(cell) for cell in path_cells)
     if not path_cells:
         return SmoothedPathResult(status="fallback", cells=path_cells, world=raw_world, fallback_reason="empty_path")
@@ -28,7 +48,12 @@ def smooth_path(grid: CostGrid, path_cells: tuple[Cell, ...]) -> SmoothedPathRes
     while anchor_index < len(path_cells) - 1:
         next_index = anchor_index + 1
         for candidate_index in range(len(path_cells) - 1, anchor_index, -1):
-            if has_line_of_sight(grid, path_cells[anchor_index], path_cells[candidate_index]):
+            if has_line_of_sight(
+                grid,
+                path_cells[anchor_index],
+                path_cells[candidate_index],
+                max_cell_cost=max_shortcut_cost,
+            ):
                 next_index = candidate_index
                 break
         smoothed.append(path_cells[next_index])

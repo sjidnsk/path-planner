@@ -38,6 +38,29 @@ def test_smooth_path_does_not_shortcut_through_obstacle():
     assert result.cells[-1] == Cell(2, 2)
 
 
+def test_smooth_path_does_not_shortcut_through_high_cost_when_limited():
+    cost = np.array(
+        [
+            [1.0, 1.0, 1.0],
+            [1.0, 5.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ]
+    )
+    grid = CostGrid(
+        spec=GridSpec(width=3, height=3, resolution=1.0),
+        cost=cost,
+        passable_mask=np.ones((3, 3), dtype=bool),
+    )
+
+    raw_path = (Cell(0, 0), Cell(0, 1), Cell(0, 2), Cell(1, 2), Cell(2, 2))
+    result = smooth_path(grid, raw_path, max_shortcut_cost=3.0)
+
+    assert has_line_of_sight(grid, Cell(0, 0), Cell(2, 2), max_cell_cost=3.0) is False
+    assert result.cells != (Cell(0, 0), Cell(2, 2))
+    assert Cell(1, 1) not in result.cells
+    assert result.fallback_reason is None
+
+
 def test_smooth_path_falls_back_when_path_contains_blocked_cell():
     grid = make_grid([[True, True], [True, False]])
     raw_path = (Cell(0, 0), Cell(1, 1))

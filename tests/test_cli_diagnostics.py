@@ -26,6 +26,8 @@ def test_render_diagnostics_writes_png_and_html(tmp_path):
     assert png_path.stat().st_size > 0
     html = html_path.read_text(encoding="utf-8")
     assert "Cost + Path" in html
+    assert "Blocked Cells" in html
+    assert "yellow cells are high cost" in html
     assert "Smoothed Path" in html
     assert "curvature_report" in html
     assert "trajectory_kind" in html

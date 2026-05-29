@@ -7,6 +7,8 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+from matplotlib.colors import ListedColormap
+from matplotlib.patches import Patch
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -51,10 +53,12 @@ def render_diagnostics(
                 "<ul>",
                 "<li>Cost + Path</li>",
                 "<li>Smoothed Path</li>",
+                "<li>Blocked Cells</li>",
                 "<li>Passable Mask</li>",
                 "<li>Expanded Nodes</li>",
                 "<li>Summary Metrics</li>",
                 "</ul>",
+                "<p>In Cost + Path, yellow cells are high cost; black cells are blocked by passable_mask.</p>",
                 f'<img src="{html.escape(png.name)}" alt="diagnostics" style="max-width:100%;height:auto">',
                 "<h2>Postprocess Summary</h2>",
                 postprocess_summary,
@@ -69,6 +73,8 @@ def render_diagnostics(
 
 def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: PostprocessResult | None) -> None:
     ax.imshow(grid.cost, cmap="viridis", origin="upper")
+    blocked = np.ma.masked_where(grid.passable_mask, np.ones(grid.spec.shape, dtype=float))
+    ax.imshow(blocked, cmap=ListedColormap(["black"]), origin="upper", alpha=0.85)
     if result.path_cells:
         xs = [cell.x for cell in result.path_cells]
         ys = [cell.y for cell in result.path_cells]
@@ -78,8 +84,12 @@ def _plot_cost_path(ax, grid: CostGrid, result: PlanResult, postprocess: Postpro
         xs = [cell.x for cell in postprocess.smoothed_path.cells]
         ys = [cell.y for cell in postprocess.smoothed_path.cells]
         ax.plot(xs, ys, color="cyan", linewidth=1.5, linestyle="--", label="Smoothed Path")
-    if result.path_cells or (postprocess is not None and postprocess.smoothed_path.cells):
-        ax.legend(loc="best")
+    handles, labels = ax.get_legend_handles_labels()
+    if np.any(~grid.passable_mask):
+        handles.append(Patch(facecolor="black", alpha=0.85, label="Blocked Cells"))
+        labels.append("Blocked Cells")
+    if handles:
+        ax.legend(handles, labels, loc="best")
     ax.set_title("Cost + Path")
 
 

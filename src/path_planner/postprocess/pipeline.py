@@ -14,6 +14,7 @@ def run_postprocess(
     *,
     corridor_radius_cells: int = 1,
     max_curvature: float = 1.0,
+    max_shortcut_cost: float | None = 3.0,
 ) -> PostprocessResult:
     if not result.success:
         reason = result.failure_reason.value if result.failure_reason else "planning_failed"
@@ -43,7 +44,7 @@ def run_postprocess(
         )
 
     corridor = build_corridor(grid, result.path_cells, radius_cells=corridor_radius_cells)
-    smoothed = smooth_path(grid, result.path_cells)
+    smoothed = smooth_path(grid, result.path_cells, max_shortcut_cost=max_shortcut_cost)
     curvature_points = smoothed.world if smoothed.status != "fallback" else result.path_world
     curvature = check_curvature(curvature_points, max_curvature=max_curvature)
 
