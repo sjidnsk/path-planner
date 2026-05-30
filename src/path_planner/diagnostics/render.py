@@ -38,6 +38,7 @@ DIAGNOSTIC_COLORS = {
     "trackable_path": "#a855f7",
     "simulated_path": "#f97316",
     "optimized_path": "#22c55e",
+    "resampled_optimized": "#bef264",
     "start": "#16a34a",
     "goal": "#dc2626",
     "violation": "#dc2626",
@@ -105,6 +106,7 @@ def render_diagnostics(
                 "<li>Trackable Path</li>",
                 "<li>Simulated Tracking Path</li>",
                 "<li>Optimized Path</li>",
+                "<li>Resampled Optimized Waypoints</li>",
                 "<li>Blocked Cells</li>",
                 "<li>Passable Mask</li>",
                 "<li>Expanded Nodes</li>",
@@ -117,7 +119,7 @@ def render_diagnostics(
                 "black filled cells are blocked by passable_mask; white line with dark outline is raw A* path; "
                 "cyan dashed line is smoothed path; purple markers/arrows are trackable waypoints; "
                 "orange line is simulated tracking path; "
-                "green line is optimized path; "
+                "green line is optimized path; light green circles are resampled optimized waypoints; "
                 "red X markers are curvature or turning-radius violations; "
                 "red square markers are tracking-safety violations; "
                 "green dot is start; red dot is goal.</p>",
@@ -143,6 +145,8 @@ def render_diagnostics(
                     tracking_simulation,
                     optimized_tracking_simulation,
                 ),
+                "<h2>Execution-Aware Optimization Summary</h2>",
+                _html_execution_aware_summary(trajectory_optimization),
                 "<h2>Route JSON</h2>",
                 f"<pre>{summary}</pre>",
                 "</body></html>",
@@ -300,6 +304,20 @@ def _plot_cost_path(
                 path_effects.Normal(),
             ],
         )
+    if trajectory_optimization is not None and trajectory_optimization.resampled_optimized_path:
+        xs = [_world_x_to_grid_x(grid, point.x) for point in trajectory_optimization.resampled_optimized_path]
+        ys = [_world_y_to_grid_y(grid, point.y) for point in trajectory_optimization.resampled_optimized_path]
+        ax.scatter(
+            xs,
+            ys,
+            c=DIAGNOSTIC_COLORS["resampled_optimized"],
+            edgecolors=DIAGNOSTIC_COLORS["raw_path_outline"],
+            linewidths=0.5,
+            s=22,
+            marker="o",
+            label="Resampled Optimized Waypoints",
+            zorder=5.35,
+        )
     if postprocess is not None and postprocess.curvature_report.violation_indices:
         curvature_cells = (
             postprocess.smoothed_path.cells
@@ -428,6 +446,19 @@ def _cost_path_legend_handles(
     if trajectory_optimization is not None and trajectory_optimization.optimized_path:
         handles.append(Line2D([0], [0], color=DIAGNOSTIC_COLORS["optimized_path"], linewidth=2.1))
         labels.append("Optimized Path")
+    if trajectory_optimization is not None and trajectory_optimization.resampled_optimized_path:
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                color="none",
+                markerfacecolor=DIAGNOSTIC_COLORS["resampled_optimized"],
+                markeredgecolor=DIAGNOSTIC_COLORS["raw_path_outline"],
+                markersize=6,
+            )
+        )
+        labels.append("Resampled Optimized Waypoints")
     if postprocess is not None and postprocess.corridor.sections:
         handles.append(Patch(facecolor="none", edgecolor=DIAGNOSTIC_COLORS["corridor"], linestyle="--", linewidth=1.3))
         labels.append("Safety Corridor")
@@ -837,12 +868,14 @@ def _html_trajectory_optimization_summary(
         return "<p>trajectory_optimization_report: not run</p>"
     metrics = trajectory_optimization.metrics
     fallback = trajectory_optimization.fallback_status
-    comparison = build_tracking_metric_comparison(tracking_simulation, optimized_tracking_simulation)
+    comparison = dict(metrics.baseline_vs_optimized)
+    comparison.update(build_tracking_metric_comparison(tracking_simulation, optimized_tracking_simulation))
     rows = [
         "<ul>",
         f"<li>solver_status: {html.escape(trajectory_optimization.solver_status)}</li>",
         f"<li>fallback_status: {html.escape(str(fallback.to_dict()))}</li>",
         f"<li>optimized_waypoints: {len(trajectory_optimization.optimized_path)}</li>",
+        f"<li>resampled_optimized_waypoints: {len(trajectory_optimization.resampled_optimized_path)}</li>",
         f"<li>reference_path_length_m: {metrics.reference_path_length_m:.3f}</li>",
         f"<li>optimized_path_length_m: {metrics.optimized_path_length_m:.3f}</li>",
         f"<li>length_delta_m: {metrics.length_delta_m:.3f}</li>",
@@ -850,10 +883,16 @@ def _html_trajectory_optimization_summary(
         f"<li>optimized_high_cost_exposure: {metrics.optimized_high_cost_exposure:.3f}</li>",
         f"<li>high_cost_exposure_delta: {metrics.high_cost_exposure_delta:.3f}</li>",
         f"<li>curvature_violation_count: {metrics.curvature_violation_count}</li>",
+        f"<li>waypoint_spacing_mean_m: {metrics.waypoint_spacing_mean_m:.3f}</li>",
+        f"<li>waypoint_spacing_max_m: {metrics.waypoint_spacing_max_m:.3f}</li>",
+        f"<li>heading_change_max_deg: {metrics.heading_change_max_deg:.3f}</li>",
+        f"<li>tracking_error_proxy: {metrics.tracking_error_proxy:.6f}</li>",
+        f"<li>speed_smoothness_cost: {metrics.speed_smoothness_cost:.6f}</li>",
         f"<li>objective_initial: {metrics.objective_initial:.6f}</li>",
         f"<li>objective_final: {metrics.objective_final:.6f}</li>",
         f"<li>solver_iterations: {metrics.solver_iterations}</li>",
         f"<li>is_within_corridor: {metrics.is_within_corridor}</li>",
+        f"<li>warnings: {html.escape(str(list(trajectory_optimization.warnings)))}</li>",
         "</ul>",
         "<h3>baseline_vs_optimized</h3>",
     ]
@@ -874,6 +913,25 @@ def _html_trajectory_optimization_summary(
     else:
         rows.append(f"<pre>{html.escape(json.dumps(metrics.baseline_vs_optimized, ensure_ascii=False, indent=2))}</pre>")
     return "\n".join(rows)
+
+
+def _html_execution_aware_summary(trajectory_optimization: TrajectoryOptimizationResult | None) -> str:
+    if trajectory_optimization is None:
+        return "<p>execution-aware optimization: not run</p>"
+    metrics = trajectory_optimization.metrics
+    return "\n".join(
+        [
+            "<ul>",
+            f"<li>resampled_optimized_path points: {len(trajectory_optimization.resampled_optimized_path)}</li>",
+            f"<li>waypoint_spacing_mean_m: {metrics.waypoint_spacing_mean_m:.3f}</li>",
+            f"<li>waypoint_spacing_max_m: {metrics.waypoint_spacing_max_m:.3f}</li>",
+            f"<li>heading_change_max_deg: {metrics.heading_change_max_deg:.3f}</li>",
+            f"<li>tracking_error_proxy: {metrics.tracking_error_proxy:.6f}</li>",
+            f"<li>speed_smoothness_cost: {metrics.speed_smoothness_cost:.6f}</li>",
+            f"<li>warnings: {html.escape(str(list(trajectory_optimization.warnings)))}</li>",
+            "</ul>",
+        ]
+    )
 
 
 def _html_search_summary(result: PlanResult) -> str:

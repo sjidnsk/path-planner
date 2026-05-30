@@ -42,6 +42,10 @@ def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     assert "trajectory_optimization_report" in content
     assert "Optimized Path" in content
     assert "fixed-corridor continuous trajectory optimization" in content
+    assert "Phase 7" in content
+    assert "resampled_optimized_path" in content
+    assert "Execution-Aware Optimization Summary" in content
+    assert "tracking_error_proxy" in content
     assert "Phase 3" in content
     assert "platform-aware A*" in content
     assert "PlanningGrid" in content

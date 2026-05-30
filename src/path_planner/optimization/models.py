@@ -14,6 +14,10 @@ class TrajectoryOptimizationConfig:
     weight_reference: float = 1.0
     weight_length: float = 1.0
     weight_curvature_proxy: float = 1.0
+    weight_tracking: float = 1.0
+    weight_spacing: float = 0.5
+    weight_speed_smoothness: float = 0.2
+    resample_spacing_m: float | None = None
     max_iterations: int = 40
     convergence_tolerance: float = 1e-5
     high_cost_threshold: float = 3.0
@@ -25,9 +29,14 @@ class TrajectoryOptimizationConfig:
             "weight_reference",
             "weight_length",
             "weight_curvature_proxy",
+            "weight_tracking",
+            "weight_spacing",
+            "weight_speed_smoothness",
         ):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} must be nonnegative")
+        if self.resample_spacing_m is not None and self.resample_spacing_m <= 0.0:
+            raise ValueError("resample_spacing_m must be positive")
         if self.max_iterations <= 0:
             raise ValueError("max_iterations must be positive")
         if self.convergence_tolerance <= 0.0:
@@ -42,6 +51,10 @@ class TrajectoryOptimizationConfig:
             "weight_reference": self.weight_reference,
             "weight_length": self.weight_length,
             "weight_curvature_proxy": self.weight_curvature_proxy,
+            "weight_tracking": self.weight_tracking,
+            "weight_spacing": self.weight_spacing,
+            "weight_speed_smoothness": self.weight_speed_smoothness,
+            "resample_spacing_m": self.resample_spacing_m,
             "max_iterations": self.max_iterations,
             "convergence_tolerance": self.convergence_tolerance,
             "high_cost_threshold": self.high_cost_threshold,
@@ -92,6 +105,11 @@ class TrajectoryOptimizationMetrics:
     max_curvature: float
     min_turning_radius_m: float | None
     curvature_violation_count: int
+    waypoint_spacing_mean_m: float
+    waypoint_spacing_max_m: float
+    heading_change_max_deg: float
+    tracking_error_proxy: float
+    speed_smoothness_cost: float
     objective_initial: float
     objective_final: float
     solver_iterations: int
@@ -109,6 +127,11 @@ class TrajectoryOptimizationMetrics:
             "max_curvature": self.max_curvature,
             "min_turning_radius_m": self.min_turning_radius_m,
             "curvature_violation_count": self.curvature_violation_count,
+            "waypoint_spacing_mean_m": self.waypoint_spacing_mean_m,
+            "waypoint_spacing_max_m": self.waypoint_spacing_max_m,
+            "heading_change_max_deg": self.heading_change_max_deg,
+            "tracking_error_proxy": self.tracking_error_proxy,
+            "speed_smoothness_cost": self.speed_smoothness_cost,
             "objective_initial": self.objective_initial,
             "objective_final": self.objective_final,
             "solver_iterations": self.solver_iterations,
@@ -123,9 +146,13 @@ class TrajectoryOptimizationResult:
     solver_status: str
     fallback_status: TrajectoryOptimizationFallbackStatus
     optimized_path: tuple[WorldPoint, ...]
+    resampled_optimized_path: tuple[WorldPoint, ...]
     optimized_trackable_path: TrackablePath
+    resampled_trackable_path: TrackablePath
     corridor_boxes: tuple[CorridorBox, ...]
+    resampled_corridor_boxes: tuple[CorridorBox, ...]
     metrics: TrajectoryOptimizationMetrics
+    warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -133,7 +160,11 @@ class TrajectoryOptimizationResult:
             "solver_status": self.solver_status,
             "fallback_status": self.fallback_status.to_dict(),
             "optimized_path": [point.to_list() for point in self.optimized_path],
+            "resampled_optimized_path": [point.to_list() for point in self.resampled_optimized_path],
             "optimized_trackable_path": self.optimized_trackable_path.to_dict(),
+            "resampled_trackable_path": self.resampled_trackable_path.to_dict(),
             "corridor_boxes": [box.to_dict() for box in self.corridor_boxes],
+            "resampled_corridor_boxes": [box.to_dict() for box in self.resampled_corridor_boxes],
             "metrics": self.metrics.to_dict(),
+            "warnings": list(self.warnings),
         }

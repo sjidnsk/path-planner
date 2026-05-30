@@ -174,6 +174,8 @@ def test_cli_demo_with_trajectory_optimization_writes_report(tmp_path):
             str(output_dir),
             "--simulate-tracking",
             "--optimize-trajectory",
+            "--resample-spacing-m",
+            "0.4",
             "--max-optimization-iter",
             "12",
         ],
@@ -188,14 +190,30 @@ def test_cli_demo_with_trajectory_optimization_writes_report(tmp_path):
 
     assert "optimized_path" in report
     assert report["optimized_path"]
+    assert "resampled_optimized_path" in report
+    assert len(report["resampled_optimized_path"]) >= len(report["optimized_path"])
     assert "metrics" in report
     assert "solver_status" in report
     assert "fallback_status" in report
+    assert "warnings" in report
     assert "optimized_tracking_simulation_report" in payload
     assert "baseline_vs_optimized" in report["metrics"]
+    assert "tracking_error_proxy" in report["metrics"]
+    assert "waypoint_spacing_max_m" in report["metrics"]
+    assert report["metrics"]["waypoint_spacing_max_m"] <= 0.400001
+    assert report["metrics"]["is_within_corridor"] is True
+    assert report["metrics"]["optimized_high_cost_exposure"] <= report["metrics"]["reference_high_cost_exposure"] + 1e-3
+    assert report["metrics"]["baseline_vs_optimized"]["high_cost_exposure"]["delta"] <= 1e-9
+    assert len(report["resampled_corridor_boxes"]) == len(report["resampled_optimized_path"])
+    for point, box in zip(report["resampled_optimized_path"], report["resampled_corridor_boxes"]):
+        assert box["min"][0] <= point[0] <= box["max"][0]
+        assert box["min"][1] <= point[1] <= box["max"][1]
+    assert "heading_change_max_deg" in report["metrics"]["baseline_vs_optimized"]
     html = (output_dir / "diagnostics.html").read_text(encoding="utf-8")
     assert "Trajectory Optimization Summary" in html
+    assert "Execution-Aware Optimization Summary" in html
     assert "Optimized Path" in html
+    assert "Resampled Optimized Waypoints" in html
     assert "baseline_vs_optimized" in html
 
 

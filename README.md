@@ -64,6 +64,14 @@ Phase 6 adds a fixed-corridor continuous trajectory optimization prototype:
 - `optimized_tracking_simulation_report` is generated when `--simulate-tracking` and `--optimize-trajectory` are used together;
 - diagnostics overlay the green `Optimized Path` and show a Trajectory Optimization Summary with `baseline_vs_optimized` metrics.
 
+Phase 7 adds execution-aware trajectory optimization v1:
+
+- `resampled_optimized_path` is generated when `--resample-spacing-m` is set;
+- execution-aware metrics include `waypoint_spacing_mean_m`, `waypoint_spacing_max_m`, `heading_change_max_deg`, `tracking_error_proxy`, and `speed_smoothness_cost`;
+- optimization weights include `--optimization-weight-tracking`, `--optimization-weight-spacing`, and `--optimization-weight-speed-smoothness`;
+- diagnostics distinguish the optimized path from Resampled Optimized Waypoints and show an Execution-Aware Optimization Summary;
+- warnings explicitly report when cross-track error or tracking-error proxy does not improve.
+
 This project does not implement full GCS graph search, IRIS, Ackermann trajectory optimization, Drake integration, exploration target selection, observation updates, or an online planning service.
 
 The planner returns a platform-filtered `geometric_path` plus a trackable-path interface and feasibility diagnostics, not a closed-loop controller command stream.
@@ -105,6 +113,7 @@ python -m path_planner.cli --input examples/demo_map_corridor.json --output-json
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --tracking-error-bound-m 0.1 --min-speed-mps 0.01
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --lookahead-m 0.75 --time-step-s 0.2
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --optimize-trajectory
+python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --optimize-trajectory --resample-spacing-m 0.4
 ```
 
 Expected outputs:
@@ -127,6 +136,9 @@ When `--optimize-trajectory` is enabled, the route JSON also includes a top-leve
 `solver_status`, `fallback_status`, and `metrics`. When optimization and
 tracking simulation are both enabled, `optimized_tracking_simulation_report`
 and `baseline_vs_optimized` comparison metrics are also emitted.
+When `--resample-spacing-m` is enabled, `trajectory_optimization_report`
+also includes `resampled_optimized_path`, `resampled_trackable_path`,
+`resampled_corridor_boxes`, execution-aware metrics, and warnings.
 
 By default, shortcut smoothing only accepts cells with `cost <= 3.0`; adjust
 this with `--max-shortcut-cost` when a map uses a different cost scale. The

@@ -6,6 +6,7 @@ from .models import (
     TrajectoryOptimizationMetrics,
     TrajectoryOptimizationResult,
 )
+from .resampling import resample_world_points
 from .solver import optimize_trajectory
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "build_tracking_metric_comparison",
     "merge_tracking_comparison",
     "optimize_trajectory",
+    "resample_world_points",
 ]

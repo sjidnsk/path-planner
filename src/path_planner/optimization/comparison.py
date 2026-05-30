@@ -44,6 +44,12 @@ def merge_tracking_comparison(
     comparison = build_tracking_metric_comparison(baseline, optimized)
     if comparison:
         trajectory_optimization_payload.setdefault("metrics", {}).setdefault("baseline_vs_optimized", {}).update(comparison)
+        cross_track_delta = comparison["max_cross_track_error_m"]["delta"]
+        if cross_track_delta is not None and cross_track_delta >= 0.0:
+            warnings = list(trajectory_optimization_payload.setdefault("warnings", []))
+            if "max_cross_track_error_m_not_improved" not in warnings:
+                warnings.append("max_cross_track_error_m_not_improved")
+            trajectory_optimization_payload["warnings"] = warnings
     return trajectory_optimization_payload
 
 

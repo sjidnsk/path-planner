@@ -69,6 +69,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--optimization-weight-smoothness", type=float, default=2.0)
     parser.add_argument("--optimization-weight-cost", type=float, default=2.0)
     parser.add_argument("--optimization-weight-reference", type=float, default=1.0)
+    parser.add_argument("--optimization-weight-tracking", type=float, default=1.0)
+    parser.add_argument("--optimization-weight-spacing", type=float, default=0.5)
+    parser.add_argument("--optimization-weight-speed-smoothness", type=float, default=0.2)
+    parser.add_argument("--resample-spacing-m", type=float, default=None)
     parser.add_argument("--max-optimization-iter", type=int, default=40)
     return parser
 
@@ -126,13 +130,17 @@ def main(argv: list[str] | None = None) -> int:
                 weight_smoothness=args.optimization_weight_smoothness,
                 weight_cost=args.optimization_weight_cost,
                 weight_reference=args.optimization_weight_reference,
+                weight_tracking=args.optimization_weight_tracking,
+                weight_spacing=args.optimization_weight_spacing,
+                weight_speed_smoothness=args.optimization_weight_speed_smoothness,
+                resample_spacing_m=args.resample_spacing_m,
                 max_iterations=args.max_optimization_iter,
             ),
         )
         if args.simulate_tracking:
             optimized_tracking_simulation = simulate_tracking(
                 grid,
-                trajectory_optimization.optimized_trackable_path,
+                trajectory_optimization.resampled_trackable_path,
                 platform_profile=platform_profile,
                 config=TrackingSimulationConfig(
                     lookahead_m=args.lookahead_m,
