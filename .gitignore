@@ -1,4 +1,5 @@
 .superpowers/
+.understand-anything/
 __pycache__/
 *.py[cod]
 .pytest_cache/
