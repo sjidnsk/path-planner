@@ -90,6 +90,17 @@ This project does not yet implement full GCS graph search, GCS trajectory optimi
 
 The planner returns a platform-filtered `geometric_path` plus a trackable-path interface and feasibility diagnostics, not a closed-loop controller command stream.
 
+At the system level, the next-stage validation uses `path-planner` as the
+execution evaluator inside the `dev-platform-constraints -> model-explorer ->
+path-planner` semi-real JSON loop. The acceptance path is the parent repository
+command `scripts/run_path_feedback_validation.sh --scenario-set all
+--diagnostic-profile all --top-k 3`, which forwards tracking simulation,
+fixed-corridor optimization, and optional workspace IRIS diagnostics. This does
+not change `path-planner-route/v1`: `trajectory_kind` remains `geometric_path`,
+`region_graph_report` and `iris_region_report` remain diagnostics, and
+`--optimize-trajectory` remains the fixed-corridor optimizer rather than a Drake
+GCS backend.
+
 ## Development Environment
 
 ```powershell

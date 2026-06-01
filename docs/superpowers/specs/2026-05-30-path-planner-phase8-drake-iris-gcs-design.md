@@ -415,3 +415,27 @@ Phase 8 Framework First 不做：
 - 默认 `python3 -m pytest` 在没有 pydrake 的环境中通过。
 - `conda run -n lunar-explorer env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -m drake`
   能验证关键 pydrake API 可导入。
+
+## 13. 下一阶段系统闭环验证
+
+Phase 8 后的下一阶段不是直接实现 GCS solver 或 rover motion-feasibility backend，
+而是把 `dev-platform-constraints -> model-explorer -> path-planner` 半真实 JSON
+闭环固化为可信实验入口。
+
+主验收链路：
+
+```bash
+bash scripts/run_path_feedback_validation.sh --scenario-set all --diagnostic-profile all --top-k 3
+```
+
+该链路应确认：
+
+- path feedback summary 使用 sidecar 的真实 `cost` / `passable_mask`，
+  `open_grid_fallback_used = false`；
+- `path-feedback-summary/v1` 保留目标选择变化、路径失败、重规划、安全违规、
+  fixed-corridor optimization fallback、IRIS 状态、region graph 来源/回退/断连和
+  场景组聚合；
+- stress / mixed-stress 场景可以稳定解释失败、绕行和 replan 原因；
+- `path-planner-route/v1` 语义不变，`trajectory_kind` 仍为 `geometric_path`；
+- `region_graph_report` 和 `iris_region_report` 仍为诊断字段，不宣称是 GCS
+  trajectory，也不宣称输出 Ackermann/skid-steer feasible trajectory。
