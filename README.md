@@ -72,7 +72,21 @@ Phase 7 adds execution-aware trajectory optimization v1:
 - diagnostics distinguish the optimized path from Resampled Optimized Waypoints and show an Execution-Aware Optimization Summary;
 - warnings explicitly report when cross-track error or tracking-error proxy does not improve.
 
-This project does not implement full GCS graph search, IRIS, Ackermann trajectory optimization, Drake integration, exploration target selection, observation updates, or an online planning service.
+Phase 8 provides a Drake IRIS/GCS framework prototype:
+
+- Repo Docs now include a pydrake knowledge structure and Phase 8 design/plan;
+- Drake integration remains an optional backend boundary, not a default dependency;
+- Phase 8 prioritizes original 2D workspace `Iris` over convex obstacle primitives, not C-space IRIS or Ackermann guarantees;
+- Phase 8.1 adds a Drake-free `region_graph_report` built from `grid_box` regions and `blocked_cell_box` obstacle primitives;
+- Phase 8.2 adds an optional `workspace_iris` backend that can emit `iris_region_report` when `--drake-iris-regions` is enabled;
+- `iris_region_report` serializes numeric `HPolyhedron` half-space arrays and falls back to `grid_box` regions when Drake is unavailable or validation fails;
+- Phase 8.3 lets `region_graph_report` consume valid IRIS regions as an `iris` graph source and records graph quality metrics and fallback decisions;
+- diagnostics include an IRIS / Region Graph Summary that labels this as a 2D workspace safe-region diagnostic, not a GCS trajectory or vehicle feasibility proof;
+- candidate future reports still include `gcs_trajectory_report`;
+- `--optimize-trajectory` continues to mean the current fixed-corridor optimizer until a separate Drake backend switch is implemented;
+- the required fallback chain is Drake unavailable or infeasible -> current optimizer -> postprocess smoothed path -> raw A* path.
+
+This project does not yet implement full GCS graph search, GCS trajectory optimization, Ackermann trajectory optimization, a production Drake backend, exploration target selection, observation updates, or an online planning service.
 
 The planner returns a platform-filtered `geometric_path` plus a trackable-path interface and feasibility diagnostics, not a closed-loop controller command stream.
 
@@ -99,6 +113,17 @@ Linux shell equivalent:
 PYTHONPATH=src python -m pytest
 ```
 
+Optional Drake API probe in the shared Conda environment:
+
+```bash
+conda run -n lunar-explorer env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -m drake
+```
+
+The default test suite does not require `pydrake`; Drake tests are marked and
+skip automatically when the optional backend is unavailable. The explicit
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` keeps unrelated environment plugins from
+affecting the project probe.
+
 ## Run Demo
 
 ```powershell
@@ -114,6 +139,7 @@ python -m path_planner.cli --input examples/demo_map_corridor.json --output-json
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --lookahead-m 0.75 --time-step-s 0.2
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --optimize-trajectory
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --optimize-trajectory --resample-spacing-m 0.4
+python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --drake-iris-regions
 ```
 
 Expected outputs:
@@ -128,6 +154,24 @@ The route JSON preserves Phase 1 fields and adds a `postprocess` object with
 `tracking_safety_report`, and `fallback_status`.
 The top-level `diagnostics` object also records whether A* used
 `platform_aware_astar` and `inflated_passable_mask`.
+Phase 8.1 adds an optional top-level `region_graph_report` object with
+`status`, `vertex_count`, `edge_count`, `obstacle_count`, `region_source`,
+`obstacle_source`, `motion_feasibility_status`, and serialized region graph
+details. This report is a geometric region-graph diagnostic, not an IRIS, GCS,
+Ackermann, or skid-steer executable trajectory.
+Phase 8.2 adds an optional top-level `iris_region_report` object when
+`--drake-iris-regions` is enabled. The report includes `backend`, `status`,
+`region_count`, `seed_source`, `domain_source`, `obstacle_source`,
+`obstacle_count`, `validation_status`, `failure_status`, `fallback_used`, and
+serialized numeric region details. This report is a 2D workspace safe-region
+prototype, not a GCS trajectory or Ackermann/skid-steer feasibility guarantee.
+Phase 8.3 extends `region_graph_report` with `quality_metrics`, including
+`requested_region_source`, `graph_source`, `iris_region_count`,
+`grid_fallback_region_count`, `invalid_region_count`, `fallback_ratio`,
+`connected_component_count`, and `start_goal_connected`. When
+`--drake-iris-regions` is enabled, valid connected IRIS regions can be used as
+the graph source; otherwise the report falls back to the existing `grid_box`
+graph and records why.
 When `--simulate-tracking` is enabled, the route JSON also includes a top-level
 `tracking_simulation_report` object with `simulated_path`, `config`, `metrics`,
 and `safety_report`.

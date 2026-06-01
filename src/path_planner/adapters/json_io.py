@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from path_planner.core import Cell, CostGrid, GridSpec, PlanRequest, PlanResult
 from path_planner.optimization import TrajectoryOptimizationResult, merge_tracking_comparison
 from path_planner.postprocess import PostprocessResult
+from path_planner.regions import RegionGraphReport
 from path_planner.tracking import TrackingSimulationResult
+
+if TYPE_CHECKING:
+    from path_planner.drake_backend import IrisRegionReport
 
 REQUEST_SCHEMA_VERSION = "path-planner-request/v1"
 
@@ -49,10 +53,16 @@ def route_result_to_json_dict(
     tracking_simulation: TrackingSimulationResult | None = None,
     trajectory_optimization: TrajectoryOptimizationResult | None = None,
     optimized_tracking_simulation: TrackingSimulationResult | None = None,
+    region_graph_report: RegionGraphReport | None = None,
+    iris_region_report: IrisRegionReport | None = None,
 ) -> dict[str, Any]:
     payload = result.to_route_dict(spec)
     if postprocess is not None:
         payload["postprocess"] = postprocess.to_dict()
+    if region_graph_report is not None:
+        payload["region_graph_report"] = region_graph_report.to_dict()
+    if iris_region_report is not None:
+        payload["iris_region_report"] = iris_region_report.to_dict()
     if tracking_simulation is not None:
         payload["tracking_simulation_report"] = tracking_simulation.to_dict()
     if trajectory_optimization is not None:

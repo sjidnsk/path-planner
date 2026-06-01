@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import matplotlib
 
@@ -24,6 +25,10 @@ from path_planner.optimization import (
 from path_planner.postprocess import PostprocessResult
 from path_planner.postprocess.footprint import build_footprint_safe_mask
 from path_planner.tracking import TrackingSimulationResult
+
+if TYPE_CHECKING:
+    from path_planner.drake_backend import IrisRegionReport
+    from path_planner.regions import RegionGraphReport
 
 DIAGNOSTIC_COLORS = {
     "surface": "#f8fafc",
@@ -59,6 +64,8 @@ def render_diagnostics(
     tracking_simulation: TrackingSimulationResult | None = None,
     trajectory_optimization: TrajectoryOptimizationResult | None = None,
     optimized_tracking_simulation: TrackingSimulationResult | None = None,
+    region_graph_report: "RegionGraphReport | None" = None,
+    iris_region_report: "IrisRegionReport | None" = None,
     png_path: str | Path,
     html_path: str | Path,
 ) -> None:
@@ -88,6 +95,10 @@ def render_diagnostics(
         )
     if optimized_tracking_simulation is not None:
         route["optimized_tracking_simulation_report"] = optimized_tracking_simulation.to_dict()
+    if region_graph_report is not None:
+        route["region_graph_report"] = region_graph_report.to_dict()
+    if iris_region_report is not None:
+        route["iris_region_report"] = iris_region_report.to_dict()
     summary = html.escape(json.dumps(route, ensure_ascii=False, indent=2))
     postprocess_summary = _html_postprocess_summary(postprocess)
     page.write_text(
@@ -147,6 +158,8 @@ def render_diagnostics(
                 ),
                 "<h2>Execution-Aware Optimization Summary</h2>",
                 _html_execution_aware_summary(trajectory_optimization),
+                "<h2>IRIS / Region Graph Summary</h2>",
+                _html_region_graph_summary(region_graph_report, iris_region_report),
                 "<h2>Route JSON</h2>",
                 f"<pre>{summary}</pre>",
                 "</body></html>",
@@ -751,6 +764,62 @@ def _html_postprocess_summary(postprocess: PostprocessResult | None) -> str:
             _html_curvature_table(postprocess),
         ]
     )
+
+
+def _html_region_graph_summary(
+    region_graph_report: "RegionGraphReport | None",
+    iris_region_report: "IrisRegionReport | None",
+) -> str:
+    lines = [
+        "<p>IRIS graph is a 2D workspace safe-region diagnostic, not a GCS trajectory, "
+        "and not an Ackermann/skid-steer feasibility proof.</p>",
+    ]
+    if iris_region_report is None:
+        lines.append("<p>iris_region_report: not requested</p>")
+    else:
+        iris_payload = iris_region_report.to_dict()
+        lines.extend(
+            [
+                "<h3>IRIS Region Report</h3>",
+                "<ul>",
+                f"<li>backend: {html.escape(str(iris_payload['backend']))}</li>",
+                f"<li>status: {html.escape(str(iris_payload['status']))}</li>",
+                f"<li>region_count: {html.escape(str(iris_payload['region_count']))}</li>",
+                f"<li>validation_status: {html.escape(str(iris_payload['validation_status']))}</li>",
+                f"<li>failure_status: {html.escape(str(iris_payload['failure_status']))}</li>",
+                f"<li>fallback_used: {html.escape(str(iris_payload['fallback_used']))}</li>",
+                f"<li>failure_reason: {html.escape(str(iris_payload['failure_reason']))}</li>",
+                "</ul>",
+            ]
+        )
+    if region_graph_report is None:
+        lines.append("<p>region_graph_report: not available</p>")
+        return "\n".join(lines)
+
+    graph_payload = region_graph_report.to_dict()
+    quality = graph_payload.get("quality_metrics", {})
+    lines.extend(
+        [
+            "<h3>Region Graph Report</h3>",
+            "<ul>",
+            f"<li>status: {html.escape(str(graph_payload['status']))}</li>",
+            f"<li>region_source: {html.escape(str(graph_payload['region_source']))}</li>",
+            f"<li>vertex_count: {html.escape(str(graph_payload['vertex_count']))}</li>",
+            f"<li>edge_count: {html.escape(str(graph_payload['edge_count']))}</li>",
+            f"<li>fallback_used: {html.escape(str(graph_payload['fallback_used']))}</li>",
+            f"<li>failure_reason: {html.escape(str(graph_payload['failure_reason']))}</li>",
+            f"<li>requested_region_source: {html.escape(str(quality.get('requested_region_source')))}</li>",
+            f"<li>graph_source: {html.escape(str(quality.get('graph_source')))}</li>",
+            f"<li>iris_region_count: {html.escape(str(quality.get('iris_region_count')))}</li>",
+            f"<li>grid_fallback_region_count: {html.escape(str(quality.get('grid_fallback_region_count')))}</li>",
+            f"<li>invalid_region_count: {html.escape(str(quality.get('invalid_region_count')))}</li>",
+            f"<li>fallback_ratio: {html.escape(str(quality.get('fallback_ratio')))}</li>",
+            f"<li>connected_component_count: {html.escape(str(quality.get('connected_component_count')))}</li>",
+            f"<li>start_goal_connected: {html.escape(str(quality.get('start_goal_connected')))}</li>",
+            "</ul>",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _html_platform_summary(postprocess: PostprocessResult | None) -> str:

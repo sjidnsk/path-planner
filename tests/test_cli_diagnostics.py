@@ -95,6 +95,14 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert "speed_profile" in payload["postprocess"]["trackable_path"]
     assert "tracking_safety_report" in payload["postprocess"]
     assert "is_safe" in payload["postprocess"]["tracking_safety_report"]
+    assert "region_graph_report" in payload
+    assert payload["region_graph_report"]["status"] == "ok"
+    assert payload["region_graph_report"]["region_source"] == "grid_box"
+    assert payload["region_graph_report"]["obstacle_source"] == "blocked_cell_box"
+    assert payload["region_graph_report"]["motion_feasibility_status"] == "diagnostic_only"
+    assert payload["region_graph_report"]["quality_metrics"]["graph_source"] == "grid_box"
+    assert payload["region_graph_report"]["quality_metrics"]["start_goal_connected"] is True
+    assert "iris_region_report" not in payload
     assert (output_dir / "diagnostics.png").exists()
     assert (output_dir / "diagnostics.html").exists()
     html = (output_dir / "diagnostics.html").read_text(encoding="utf-8")
@@ -105,6 +113,8 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert "Tracking Safety Summary" in html
     assert "Rover Footprint Scale" in html
     assert "rover body length/width and footprint radius are drawn from platform_profile" in html
+    assert "IRIS / Region Graph Summary" in html
+    assert "2D workspace safe-region diagnostic" in html
     assert "reachable" in completed.stdout
 
 

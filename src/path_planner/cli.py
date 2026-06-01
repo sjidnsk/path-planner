@@ -6,9 +6,11 @@ from pathlib import Path
 
 from path_planner.adapters import load_plan_input, route_result_to_json_dict
 from path_planner.diagnostics import render_diagnostics
+from path_planner.drake_backend import build_workspace_iris_region_report
 from path_planner.optimization import TrajectoryOptimizationConfig, optimize_trajectory
 from path_planner.platform import DEFAULT_PLATFORM_KEY, load_planner_platform_profile
 from path_planner.postprocess import run_postprocess
+from path_planner.regions import build_region_graph_report
 from path_planner.search import AStarPlanner, build_planning_grid
 from path_planner.tracking import TrackingSimulationConfig, simulate_tracking
 
@@ -74,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--optimization-weight-speed-smoothness", type=float, default=0.2)
     parser.add_argument("--resample-spacing-m", type=float, default=None)
     parser.add_argument("--max-optimization-iter", type=int, default=40)
+    parser.add_argument(
+        "--drake-iris-regions",
+        action="store_true",
+        help="Run optional 2D workspace Drake Iris region generation prototype",
+    )
     return parser
 
 
@@ -105,6 +112,19 @@ def main(argv: list[str] | None = None) -> int:
         max_speed_mps=max_speed_mps,
         min_speed_mps=args.min_speed_mps,
         tracking_error_bound_m=args.tracking_error_bound_m,
+    )
+    iris_region_report = None
+    if args.drake_iris_regions:
+        iris_region_report = build_workspace_iris_region_report(
+            grid,
+            postprocess.corridor,
+            platform_profile=platform_profile,
+        )
+    region_graph_report = build_region_graph_report(
+        grid,
+        postprocess.corridor,
+        platform_profile=platform_profile,
+        iris_region_report=iris_region_report,
     )
     tracking_simulation = None
     if args.simulate_tracking and postprocess.trackable_path is not None:
@@ -158,6 +178,8 @@ def main(argv: list[str] | None = None) -> int:
         tracking_simulation=tracking_simulation,
         trajectory_optimization=trajectory_optimization,
         optimized_tracking_simulation=optimized_tracking_simulation,
+        region_graph_report=region_graph_report,
+        iris_region_report=iris_region_report,
     )
     output_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -169,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
         tracking_simulation=tracking_simulation,
         trajectory_optimization=trajectory_optimization,
         optimized_tracking_simulation=optimized_tracking_simulation,
+        region_graph_report=region_graph_report,
+        iris_region_report=iris_region_report,
         png_path=output_dir / "diagnostics.png",
         html_path=output_dir / "diagnostics.html",
     )
@@ -186,6 +210,16 @@ def main(argv: list[str] | None = None) -> int:
                 "trajectory_optimization_status": (
                     trajectory_optimization.solver_status if trajectory_optimization is not None else None
                 ),
+                "region_graph_vertices": region_graph_report.vertex_count,
+                "region_graph_edges": region_graph_report.edge_count,
+                "region_graph_source": region_graph_report.region_source,
+                "region_graph_fallback_used": region_graph_report.fallback_used,
+                "region_graph_start_goal_connected": region_graph_report.quality_metrics.get(
+                    "start_goal_connected"
+                ),
+                "iris_region_report": iris_region_report is not None,
+                "iris_region_status": iris_region_report.status if iris_region_report is not None else None,
+                "iris_region_count": iris_region_report.region_count if iris_region_report is not None else 0,
                 "constraint_warnings": len(platform_profile.constraint_warnings),
             },
             ensure_ascii=False,
