@@ -364,6 +364,35 @@ def test_passable_goal_anchor_unconnected_reports_specific_blocker():
     assert anchoring["goal_anchor_failure_reason"] == "goal_anchor_region_unconnected"
 
 
+def test_platform_anchor_regions_use_bounded_safe_neighborhood_for_connectivity():
+    grid = make_grid([[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]])
+    planning_grid = build_planning_grid(grid, platform_profile=make_profile(footprint_radius_m=1.0))
+    request = PlanRequest(start=Cell(0, 0), goal=Cell(6, 0))
+    baseline = AStarPlanner().plan(planning_grid, request)
+    report = make_report_from_regions(
+        (
+            make_box_region(0, Cell(2, 0), Cell(4, 0), Cell(3, 0), grid),
+        ),
+        (),
+    )
+
+    outcome = RegionGraphGuidedPlanner().plan(
+        planning_grid,
+        request,
+        baseline_result=baseline,
+        region_graph_report=report,
+    )
+
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    anchoring = sampled["start_goal_anchoring"]
+    assert anchoring["region_sequence_found"] is True
+    assert anchoring["start_anchor_region_added"] is True
+    assert anchoring["goal_anchor_region_added"] is True
+    assert anchoring["start_anchor_region_connected"] is True
+    assert anchoring["goal_anchor_region_connected"] is True
+    assert sampled["fallback_reason"] == "execution_tie_break_no_alternative"
+
+
 def test_footprint_unsafe_goal_gets_bounded_terminal_adjustment():
     grid = make_grid(
         [

@@ -1585,19 +1585,33 @@ class RegionGraphGuidedPlanner:
         return f"{label}_not_passable"
 
     def _anchor_region(self, grid: CostGrid | PlanningGrid, region_id: int, cell: Cell) -> ConvexRegion:
-        min_world = grid.spec.cell_to_world(cell)
-        max_world = grid.spec.cell_to_world(Cell(cell.x + 1, cell.y + 1))
+        radius_cells = self._anchor_region_radius_cells(grid)
+        min_cell = Cell(
+            max(0, cell.x - radius_cells),
+            max(0, cell.y - radius_cells),
+        )
+        max_cell = Cell(
+            min(grid.spec.width - 1, cell.x + radius_cells),
+            min(grid.spec.height - 1, cell.y + radius_cells),
+        )
+        min_world = grid.spec.cell_to_world(min_cell)
+        max_world = grid.spec.cell_to_world(Cell(max_cell.x + 1, max_cell.y + 1))
         return ConvexRegion(
             region_id=region_id,
             source="grid_box",
             center_cell=cell,
-            min_cell=cell,
-            max_cell=cell,
+            min_cell=min_cell,
+            max_cell=max_cell,
             min_world=min_world,
             max_world=max_world,
-            cell_count=1,
+            cell_count=(max_cell.x - min_cell.x + 1) * (max_cell.y - min_cell.y + 1),
             fallback_reason="anchor_region",
         )
+
+    def _anchor_region_radius_cells(self, grid: CostGrid | PlanningGrid) -> int:
+        if not isinstance(grid, PlanningGrid):
+            return 0
+        return self._terminal_adjustment_max_radius_cells(grid)
 
     def _connect_anchor_regions(
         self,
