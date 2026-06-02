@@ -255,7 +255,7 @@ def test_region_graph_guided_reports_sampled_path_collision_blocker():
     assert sampled["safety_checks"]["collision_free"] is False
 
 
-def test_region_graph_guided_reports_goal_region_missing_blocker():
+def test_region_graph_guided_reports_goal_anchor_unconnected_blocker():
     grid = make_grid([[1.0, 1.0, 1.0]])
     request = PlanRequest(start=Cell(0, 0), goal=Cell(2, 0))
     baseline = AStarPlanner().plan(grid, request)
@@ -265,11 +265,143 @@ def test_region_graph_guided_reports_goal_region_missing_blocker():
 
     assert outcome.result is baseline
     assert outcome.report.status == "fallback"
-    assert outcome.report.fallback_reason == "goal_region_missing"
+    assert outcome.report.fallback_reason == "goal_anchor_region_unconnected"
     sampled = outcome.report.to_dict()["sampled_region_path_report"]
-    assert sampled["fallback_reason"] == "goal_region_missing"
+    assert sampled["fallback_reason"] == "goal_anchor_region_unconnected"
     assert sampled["start_goal_anchoring"]["start_region_id"] == 0
-    assert sampled["start_goal_anchoring"]["goal_region_id"] is None
+    assert sampled["start_goal_anchoring"]["goal_region_id"] == 1
+    assert sampled["start_goal_anchoring"]["goal_anchor_region_added"] is True
+    assert sampled["start_goal_anchoring"]["goal_anchor_region_connected"] is False
+
+
+def test_passable_goal_outside_region_gets_connected_anchor_region():
+    grid = make_grid([[1.0, 1.0, 1.0]])
+    request = PlanRequest(start=Cell(0, 0), goal=Cell(2, 0))
+    baseline = make_baseline_result(
+        grid,
+        (Cell(0, 0), Cell(1, 0), Cell(2, 0)),
+        total_cost=10.0,
+    )
+    report = make_report_from_regions(
+        (
+            make_region(0, Cell(0, 0), grid),
+            make_region(1, Cell(1, 0), grid),
+        ),
+        ((0, 1),),
+    )
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.report.status == "selected"
+    assert outcome.report.selected_backend == "sampled_region_path"
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["fallback_reason"] is None
+    assert sampled["region_sequence"] == [0, 1, 2]
+    anchoring = sampled["start_goal_anchoring"]
+    assert anchoring["goal_classification"] == "goal_outside_region_coverage"
+    assert anchoring["goal_anchor_region_added"] is True
+    assert anchoring["goal_anchor_region_connected"] is True
+    assert anchoring["goal_anchor_failure_reason"] is None
+    assert anchoring["goal_region_id"] == 2
+
+
+def test_blocked_goal_without_region_reports_goal_not_passable():
+    grid = make_grid([[1.0, 1.0, 1.0]], passable=[[True, True, False]])
+    request = PlanRequest(start=Cell(0, 0), goal=Cell(2, 0))
+    baseline = AStarPlanner().plan(grid, request)
+    report = make_report_from_regions((make_region(0, Cell(0, 0), grid),), ())
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.report.status == "fallback"
+    assert outcome.report.fallback_reason == "goal_not_passable"
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["fallback_reason"] == "goal_not_passable"
+    anchoring = sampled["start_goal_anchoring"]
+    assert anchoring["goal_classification"] == "goal_not_passable"
+    assert anchoring["goal_anchor_region_added"] is False
+    assert anchoring["goal_anchor_failure_reason"] == "goal_not_passable"
+
+
+def test_passable_goal_anchor_unconnected_reports_specific_blocker():
+    grid = make_grid([[1.0, 1.0, 1.0, 1.0, 1.0]])
+    request = PlanRequest(start=Cell(0, 0), goal=Cell(4, 0))
+    baseline = AStarPlanner().plan(grid, request)
+    report = make_report_from_regions((make_region(0, Cell(0, 0), grid),), ())
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.report.status == "fallback"
+    assert outcome.report.fallback_reason == "goal_anchor_region_unconnected"
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["fallback_reason"] == "goal_anchor_region_unconnected"
+    anchoring = sampled["start_goal_anchoring"]
+    assert anchoring["goal_classification"] == "goal_outside_region_coverage"
+    assert anchoring["goal_anchor_region_added"] is True
+    assert anchoring["goal_anchor_region_connected"] is False
+    assert anchoring["goal_anchor_failure_reason"] == "goal_anchor_region_unconnected"
+
+
+def test_cost_aware_connector_selects_lower_cost_route_inside_region_union():
+    grid = make_grid(
+        [
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 9.0, 9.0, 9.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(4, 1), prevent_corner_cutting=False)
+    baseline = make_baseline_result(
+        grid,
+        (Cell(0, 1), Cell(1, 1), Cell(2, 1), Cell(3, 1), Cell(4, 1)),
+        total_cost=28.0,
+    )
+    report = make_report_from_regions(
+        (
+            make_region(0, Cell(0, 1), grid),
+            make_box_region(1, Cell(1, 0), Cell(3, 2), Cell(2, 1), grid),
+            make_region(2, Cell(4, 1), grid),
+        ),
+        ((0, 1), (1, 2)),
+    )
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.report.status == "selected"
+    assert outcome.report.selected_backend == "sampled_region_path"
+    assert Cell(2, 1) not in outcome.result.path_cells
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["candidate_rankings"][0]["strategy"] == "cost_aware_constrained_astar"
+    assert sampled["candidate_rankings"][0]["status"] == "selected"
+    assert sampled["candidate_rankings"][0]["candidate_cost_delta"] < 0.0
+
+
+def test_higher_cost_constrained_connector_falls_back_with_cost_dominated_reason():
+    grid = make_grid(
+        [
+            [1.0, 9.0, 9.0, 9.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(4, 1), prevent_corner_cutting=False)
+    baseline = AStarPlanner().plan(grid, request)
+    report = make_report_from_regions(
+        (
+            make_region(0, Cell(0, 1), grid),
+            make_box_region(1, Cell(1, 0), Cell(3, 0), Cell(2, 0), grid),
+            make_region(2, Cell(4, 1), grid),
+        ),
+        ((0, 1), (1, 2)),
+    )
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.result is baseline
+    assert outcome.report.status == "fallback"
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["fallback_reason"] == "region_sequence_cost_dominated"
+    assert sampled["candidate_rankings"][0]["strategy"] == "cost_aware_constrained_astar"
+    assert sampled["candidate_rankings"][0]["candidate_cost_delta"] > 0.0
 
 
 def test_region_graph_guided_candidate_preserves_request_neighbor_policy_in_diagnostics():

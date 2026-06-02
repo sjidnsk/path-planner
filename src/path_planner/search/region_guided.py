@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from path_planner.core import Cell, CostGrid, PlanDiagnostics, PlanRequest, PlanResult
-from path_planner.regions import RegionGraphReport
+from path_planner.regions import ConvexRegion, RegionEdge, RegionGraphReport
 from path_planner.search.astar import AStarPlanner
 from path_planner.search.planning_grid import PlanningGrid, STANDARD_GRID_ASTAR
 
@@ -154,6 +154,14 @@ class _RegionPathResolution:
     start_region_candidates: tuple[int, ...]
     goal_region_candidates: tuple[int, ...]
     fallback_reason: str | None
+    start_classification: str
+    goal_classification: str
+    start_anchor_region_added: bool = False
+    goal_anchor_region_added: bool = False
+    start_anchor_region_connected: bool = False
+    goal_anchor_region_connected: bool = False
+    start_anchor_failure_reason: str | None = None
+    goal_anchor_failure_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -185,7 +193,7 @@ class RegionGraphGuidedPlanner:
         baseline_result: PlanResult,
         region_graph_report: RegionGraphReport,
     ) -> RegionGraphGuidedPlanOutcome:
-        region_resolution = self._resolve_region_path(request, region_graph_report)
+        region_resolution = self._resolve_region_path(grid, request, region_graph_report)
         anchoring = self._anchoring_payload(request, region_resolution)
         skeleton, fallback_reason = self._build_skeleton(request, region_resolution)
         if fallback_reason is not None:
@@ -312,24 +320,88 @@ class RegionGraphGuidedPlanner:
 
     def _resolve_region_path(
         self,
+        grid: CostGrid | PlanningGrid,
         request: PlanRequest,
         report: RegionGraphReport,
     ) -> _RegionPathResolution:
         graph = report.graph
-        if graph is None or not graph.regions:
-            return _RegionPathResolution(
-                region_path=(),
-                start_region_id=None,
-                goal_region_id=None,
-                start_region_candidates=(),
-                goal_region_candidates=(),
-                fallback_reason=self._missing_region_reason(report.failure_reason),
-            )
-        region_by_id = {region.region_id: region for region in graph.regions}
-        start_regions = tuple(region for region in graph.regions if self._cell_in_region(request.start, region))
-        goal_regions = tuple(region for region in graph.regions if self._cell_in_region(request.goal, region))
+        regions: list[Any] = list(graph.regions) if graph is not None else []
+        edges: list[RegionEdge] = list(graph.edges) if graph is not None else []
+        start_regions = tuple(region for region in regions if self._cell_in_region(request.start, region))
+        goal_regions = tuple(region for region in regions if self._cell_in_region(request.goal, region))
         start_candidates = tuple(region.region_id for region in start_regions)
         goal_candidates = tuple(region.region_id for region in goal_regions)
+
+        next_region_id = max((int(region.region_id) for region in regions), default=-1) + 1
+        start_classification = "covered" if start_regions else self._endpoint_classification(grid, request.start, "start")
+        goal_classification = "covered" if goal_regions else self._endpoint_classification(grid, request.goal, "goal")
+        start_anchor_added = False
+        goal_anchor_added = False
+        start_anchor_connected = False
+        goal_anchor_connected = False
+        start_anchor_failure_reason: str | None = None
+        goal_anchor_failure_reason: str | None = None
+
+        if not start_regions:
+            if start_classification != "start_outside_region_coverage":
+                return _RegionPathResolution(
+                    region_path=(),
+                    start_region_id=None,
+                    goal_region_id=None,
+                    start_region_candidates=(),
+                    goal_region_candidates=goal_candidates,
+                    fallback_reason=start_classification,
+                    start_classification=start_classification,
+                    goal_classification=goal_classification,
+                    start_anchor_failure_reason=start_classification,
+                )
+            start_anchor = self._anchor_region(grid, next_region_id, request.start)
+            next_region_id += 1
+            regions.append(start_anchor)
+            start_regions = (start_anchor,)
+            start_candidates = (start_anchor.region_id,)
+            start_anchor_added = True
+
+        if not goal_regions:
+            if goal_classification != "goal_outside_region_coverage":
+                return _RegionPathResolution(
+                    region_path=(),
+                    start_region_id=(
+                        self._choose_anchor_region(request.start, start_regions).region_id if start_regions else None
+                    ),
+                    goal_region_id=None,
+                    start_region_candidates=start_candidates,
+                    goal_region_candidates=(),
+                    fallback_reason=goal_classification,
+                    start_classification=start_classification,
+                    goal_classification=goal_classification,
+                    start_anchor_region_added=start_anchor_added,
+                    start_anchor_region_connected=start_anchor_connected,
+                    goal_anchor_failure_reason=goal_classification,
+                )
+            goal_anchor = self._anchor_region(grid, next_region_id, request.goal)
+            regions.append(goal_anchor)
+            goal_regions = (goal_anchor,)
+            goal_candidates = (goal_anchor.region_id,)
+            goal_anchor_added = True
+
+        added_anchor_ids = {
+            region.region_id
+            for region in (*start_regions, *goal_regions)
+            if (start_anchor_added and region.center_cell == request.start)
+            or (goal_anchor_added and region.center_cell == request.goal)
+        }
+        edges, anchor_connected = self._connect_anchor_regions(grid, request, tuple(regions), tuple(edges), added_anchor_ids)
+        if start_anchor_added:
+            start_anchor_connected = anchor_connected.get(start_candidates[0], False)
+            if not start_anchor_connected:
+                start_anchor_failure_reason = "start_anchor_region_unconnected"
+        if goal_anchor_added:
+            goal_anchor_connected = anchor_connected.get(goal_candidates[0], False)
+            if not goal_anchor_connected:
+                goal_anchor_failure_reason = "goal_anchor_region_unconnected"
+
+        region_by_id = {region.region_id: region for region in regions}
         if not start_regions:
             goal_region_id = None
             if goal_regions:
@@ -341,6 +413,8 @@ class RegionGraphGuidedPlanner:
                 start_region_candidates=(),
                 goal_region_candidates=goal_candidates,
                 fallback_reason="start_region_missing",
+                start_classification=start_classification,
+                goal_classification=goal_classification,
             )
         if not goal_regions:
             return _RegionPathResolution(
@@ -350,13 +424,15 @@ class RegionGraphGuidedPlanner:
                 start_region_candidates=start_candidates,
                 goal_region_candidates=(),
                 fallback_reason="goal_region_missing",
+                start_classification=start_classification,
+                goal_classification=goal_classification,
             )
         start_region = self._choose_anchor_region(request.start, start_regions)
         goal_region = self._choose_anchor_region(request.goal, goal_regions)
         start_id = start_region.region_id
         goal_id = goal_region.region_id
-        adjacency: dict[int, set[int]] = {region.region_id: set() for region in graph.regions}
-        for edge in graph.edges:
+        adjacency: dict[int, set[int]] = {region.region_id: set() for region in regions}
+        for edge in edges:
             adjacency.setdefault(edge.from_region_id, set()).add(edge.to_region_id)
             adjacency.setdefault(edge.to_region_id, set()).add(edge.from_region_id)
 
@@ -371,13 +447,29 @@ class RegionGraphGuidedPlanner:
                     came_from[neighbor] = current
                     frontier.append(neighbor)
         if goal_id not in came_from:
+            if goal_anchor_added:
+                fallback_reason = "goal_anchor_region_unconnected"
+                goal_anchor_failure_reason = fallback_reason
+            elif start_anchor_added:
+                fallback_reason = "start_anchor_region_unconnected"
+                start_anchor_failure_reason = fallback_reason
+            else:
+                fallback_reason = "region_graph_disconnected"
             return _RegionPathResolution(
                 region_path=(),
                 start_region_id=start_id,
                 goal_region_id=goal_id,
                 start_region_candidates=start_candidates,
                 goal_region_candidates=goal_candidates,
-                fallback_reason="region_graph_disconnected",
+                fallback_reason=fallback_reason,
+                start_classification=start_classification,
+                goal_classification=goal_classification,
+                start_anchor_region_added=start_anchor_added,
+                goal_anchor_region_added=goal_anchor_added,
+                start_anchor_region_connected=start_anchor_connected,
+                goal_anchor_region_connected=goal_anchor_connected,
+                start_anchor_failure_reason=start_anchor_failure_reason,
+                goal_anchor_failure_reason=goal_anchor_failure_reason,
             )
 
         ids: list[int] = [goal_id]
@@ -392,6 +484,14 @@ class RegionGraphGuidedPlanner:
             start_region_candidates=start_candidates,
             goal_region_candidates=goal_candidates,
             fallback_reason=None if region_path else "region_sequence_missing",
+            start_classification=start_classification,
+            goal_classification=goal_classification,
+            start_anchor_region_added=start_anchor_added,
+            goal_anchor_region_added=goal_anchor_added,
+            start_anchor_region_connected=start_anchor_connected,
+            goal_anchor_region_connected=goal_anchor_connected,
+            start_anchor_failure_reason=start_anchor_failure_reason,
+            goal_anchor_failure_reason=goal_anchor_failure_reason,
         )
 
     def _run_segments(
@@ -473,6 +573,7 @@ class RegionGraphGuidedPlanner:
                 self._high_cost_exposure(grid, item.candidate.path_cells),
                 self._tracking_proxy(item.candidate.path_cells),
                 item.candidate.diagnostics.path_length_m,
+                0 if item.strategy == "cost_aware_constrained_astar" else 1,
                 len(item.sample_cells),
                 item.strategy,
             ),
@@ -545,6 +646,21 @@ class RegionGraphGuidedPlanner:
     ) -> tuple[list[_SampledCandidate], list[dict[str, Any]]]:
         candidates: list[_SampledCandidate] = []
         rejected: list[dict[str, Any]] = []
+        cost_aware = self._cost_aware_constrained_candidate(grid, request, region_path=region_path)
+        if cost_aware is None:
+            rejected.append(
+                {
+                    "rank": None,
+                    "strategy": "cost_aware_constrained_astar",
+                    "status": "rejected",
+                    "fallback_reason": "constrained_connector_failed",
+                    "sample_count": 0,
+                    "sample_cells": [],
+                    "edge_transition_count": 0,
+                }
+            )
+        else:
+            candidates.append(cost_aware)
         sample_sequences = self._sample_sequences(grid, request, region_path)
         if len(region_path) > 1 and not any(strategy == "edge_adjacent" for strategy, _ in sample_sequences):
             rejected.append(
@@ -709,7 +825,70 @@ class RegionGraphGuidedPlanner:
                     "to_cell": None if pair is None else pair[1].to_list(),
                 }
             )
+        connector = self._cost_aware_constrained_candidate(grid, request, region_path=region_path)
+        attempts.append(
+            {
+                "kind": "connector_attempt",
+                "strategy": "cost_aware_constrained_astar",
+                "status": "available" if connector is not None else "unavailable",
+                "path_cell_count": 0 if connector is None else len(connector.path_cells),
+            }
+        )
         return tuple(attempts)
+
+    def _cost_aware_constrained_candidate(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        *,
+        region_path: tuple[Any, ...],
+    ) -> _SampledCandidate | None:
+        mask = self._region_sequence_mask(grid, region_path)
+        if mask is None:
+            return None
+        constrained_grid = CostGrid(
+            spec=grid.spec,
+            cost=np.array(grid.cost, dtype=float, copy=True),
+            passable_mask=mask,
+        )
+        result = self._planner.plan(
+            constrained_grid,
+            PlanRequest(
+                start=request.start,
+                goal=request.goal,
+                neighbor_policy=request.neighbor_policy,
+                prevent_corner_cutting=request.prevent_corner_cutting,
+                max_iterations=request.max_iterations,
+            ),
+        )
+        if not result.success:
+            return None
+        candidate = self._candidate_from_sampled_path(grid, request, result.path_cells)
+        return _SampledCandidate(
+            strategy="cost_aware_constrained_astar",
+            sample_cells=result.path_cells,
+            path_cells=result.path_cells,
+            candidate=candidate,
+        )
+
+    def _region_sequence_mask(
+        self,
+        grid: CostGrid | PlanningGrid,
+        region_path: tuple[Any, ...],
+    ) -> np.ndarray | None:
+        if not region_path:
+            return None
+        mask = np.zeros(grid.spec.shape, dtype=bool)
+        for region in region_path:
+            min_x = max(0, int(region.min_cell.x))
+            max_x = min(grid.spec.width - 1, int(region.max_cell.x))
+            min_y = max(0, int(region.min_cell.y))
+            max_y = min(grid.spec.height - 1, int(region.max_cell.y))
+            if min_x > max_x or min_y > max_y:
+                continue
+            mask[min_y : max_y + 1, min_x : max_x + 1] = True
+        mask &= np.asarray(grid.passable_mask, dtype=bool)
+        return mask if np.any(mask) else None
 
     def _sample_region_cell(
         self,
@@ -951,6 +1130,8 @@ class RegionGraphGuidedPlanner:
         if not baseline.success:
             return "sampled_candidate_not_selectable"
         if report.candidate_path_cost > baseline.total_cost + self._improvement_epsilon:
+            if self._best_candidate_strategy(report) == "cost_aware_constrained_astar":
+                return "region_sequence_cost_dominated"
             return "sampled_candidate_higher_cost"
         exposure_delta = _delta(report.candidate_high_cost_exposure, report.baseline_high_cost_exposure)
         tracking_delta = _delta(report.candidate_tracking_proxy, report.baseline_tracking_proxy)
@@ -959,6 +1140,13 @@ class RegionGraphGuidedPlanner:
         if any(delta > self._improvement_epsilon for delta in quality_deltas):
             return "sampled_candidate_quality_regression"
         return "sampled_candidate_equal_cost_no_quality_gain"
+
+    def _best_candidate_strategy(self, report: SampledRegionPathReport) -> str | None:
+        for ranking in report.candidate_rankings:
+            if ranking.get("rank") == 1:
+                strategy = ranking.get("strategy")
+                return str(strategy) if strategy is not None else None
+        return None
 
     def _candidate_rankings(
         self,
@@ -1132,6 +1320,99 @@ class RegionGraphGuidedPlanner:
             ),
         )
 
+    def _endpoint_classification(
+        self,
+        grid: CostGrid | PlanningGrid,
+        cell: Cell,
+        label: str,
+    ) -> str:
+        if not grid.spec.in_bounds(cell):
+            return f"{label}_not_passable"
+        if grid.is_passable(cell):
+            return f"{label}_outside_region_coverage"
+        if isinstance(grid, PlanningGrid):
+            original_safe = bool(grid.original_passable_mask[cell.y, cell.x])
+            inflated_safe = bool(grid.inflated_passable_mask[cell.y, cell.x])
+            if original_safe and not inflated_safe:
+                return f"{label}_footprint_unsafe"
+        return f"{label}_not_passable"
+
+    def _anchor_region(self, grid: CostGrid | PlanningGrid, region_id: int, cell: Cell) -> ConvexRegion:
+        min_world = grid.spec.cell_to_world(cell)
+        max_world = grid.spec.cell_to_world(Cell(cell.x + 1, cell.y + 1))
+        return ConvexRegion(
+            region_id=region_id,
+            source="grid_box",
+            center_cell=cell,
+            min_cell=cell,
+            max_cell=cell,
+            min_world=min_world,
+            max_world=max_world,
+            cell_count=1,
+            fallback_reason="anchor_region",
+        )
+
+    def _connect_anchor_regions(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        regions: tuple[Any, ...],
+        edges: tuple[RegionEdge, ...],
+        anchor_region_ids: set[int],
+    ) -> tuple[list[RegionEdge], dict[int, bool]]:
+        result = list(edges)
+        connected = {region_id: False for region_id in anchor_region_ids}
+        existing_pairs = {
+            tuple(sorted((int(edge.from_region_id), int(edge.to_region_id))))
+            for edge in result
+        }
+        next_edge_id = max((int(edge.edge_id) for edge in result), default=-1) + 1
+        for anchor in regions:
+            if int(anchor.region_id) not in anchor_region_ids:
+                continue
+            for other in regions:
+                if int(other.region_id) == int(anchor.region_id):
+                    continue
+                pair_key = tuple(sorted((int(anchor.region_id), int(other.region_id))))
+                if pair_key in existing_pairs:
+                    connected[int(anchor.region_id)] = True
+                    continue
+                connection_kind = self._anchor_connection_kind(grid, request, anchor, other)
+                if connection_kind is None:
+                    continue
+                result.append(
+                    RegionEdge(
+                        edge_id=next_edge_id,
+                        source="sampled_connectivity",
+                        from_region_id=int(anchor.region_id),
+                        to_region_id=int(other.region_id),
+                        connection_kind=connection_kind,
+                    )
+                )
+                next_edge_id += 1
+                existing_pairs.add(pair_key)
+                connected[int(anchor.region_id)] = True
+                if int(other.region_id) in connected:
+                    connected[int(other.region_id)] = True
+        return result, connected
+
+    def _anchor_connection_kind(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        anchor: Any,
+        other: Any,
+    ) -> str | None:
+        if not anchor.overlaps_or_touches(other):
+            return None
+        for anchor_cell in self._region_passable_cells(grid, anchor):
+            for other_cell in self._region_passable_cells(grid, other):
+                if anchor_cell == other_cell:
+                    return "anchor_region_overlap"
+                if self._transition_is_safe(grid, request, anchor_cell, other_cell):
+                    return "anchor_region_touching"
+        return None
+
     def _missing_region_reason(self, failure_reason: str | None) -> str:
         reason = (failure_reason or "").lower()
         if "goal" in reason:
@@ -1154,6 +1435,14 @@ class RegionGraphGuidedPlanner:
             "goal_region_candidates": list(resolution.goal_region_candidates),
             "region_sequence_found": bool(resolution.region_path),
             "fallback_reason": resolution.fallback_reason,
+            "start_classification": resolution.start_classification,
+            "goal_classification": resolution.goal_classification,
+            "start_anchor_region_added": resolution.start_anchor_region_added,
+            "goal_anchor_region_added": resolution.goal_anchor_region_added,
+            "start_anchor_region_connected": resolution.start_anchor_region_connected,
+            "goal_anchor_region_connected": resolution.goal_anchor_region_connected,
+            "start_anchor_failure_reason": resolution.start_anchor_failure_reason,
+            "goal_anchor_failure_reason": resolution.goal_anchor_failure_reason,
         }
 
     def _sampled_report(
