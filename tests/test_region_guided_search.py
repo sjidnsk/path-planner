@@ -404,6 +404,32 @@ def test_higher_cost_constrained_connector_falls_back_with_cost_dominated_reason
     assert sampled["candidate_rankings"][0]["candidate_cost_delta"] > 0.0
 
 
+def test_failed_constrained_connector_with_higher_cost_region_sequence_is_cost_dominated():
+    grid = make_grid(
+        [
+            [1.0, 9.0, 9.0, 9.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(4, 1))
+    baseline = AStarPlanner().plan(grid, request)
+    report = make_report_from_regions(
+        (
+            make_region(0, Cell(0, 1), grid),
+            make_box_region(1, Cell(1, 0), Cell(3, 0), Cell(2, 0), grid),
+            make_region(2, Cell(4, 1), grid),
+        ),
+        ((0, 1), (1, 2)),
+    )
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["fallback_reason"] == "region_sequence_cost_dominated"
+    assert sampled["candidate_rankings"][0]["strategy"] == "cost_aware_constrained_astar"
+    assert sampled["candidate_rankings"][0]["fallback_reason"] == "constrained_connector_failed"
+
+
 def test_region_graph_guided_candidate_preserves_request_neighbor_policy_in_diagnostics():
     grid = make_grid([[1.0, 1.0, 1.0, 1.0]])
     request = PlanRequest(start=Cell(0, 0), goal=Cell(3, 0), neighbor_policy=NeighborPolicy.FOUR)
@@ -455,4 +481,4 @@ def test_region_graph_guided_falls_back_when_candidate_is_not_better_than_baseli
     assert outcome.report.segment_count == 1
     assert outcome.report.to_dict()["comparison"]["path_changed"] is False
     sampled = outcome.report.to_dict()["sampled_region_path_report"]
-    assert sampled["fallback_reason"] == "sampled_candidate_equal_cost_no_quality_gain"
+    assert sampled["fallback_reason"] == "constrained_connector_not_better"

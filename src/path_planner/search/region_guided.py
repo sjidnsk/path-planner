@@ -1130,7 +1130,7 @@ class RegionGraphGuidedPlanner:
         if not baseline.success:
             return "sampled_candidate_not_selectable"
         if report.candidate_path_cost > baseline.total_cost + self._improvement_epsilon:
-            if self._best_candidate_strategy(report) == "cost_aware_constrained_astar":
+            if self._has_cost_aware_connector_attempt(report):
                 return "region_sequence_cost_dominated"
             return "sampled_candidate_higher_cost"
         exposure_delta = _delta(report.candidate_high_cost_exposure, report.baseline_high_cost_exposure)
@@ -1138,15 +1138,24 @@ class RegionGraphGuidedPlanner:
         length_delta = _delta(report.candidate_path_length_m, report.baseline_path_length_m)
         quality_deltas = tuple(delta for delta in (exposure_delta, tracking_delta, length_delta) if delta is not None)
         if any(delta > self._improvement_epsilon for delta in quality_deltas):
+            if self._has_cost_aware_connector_attempt(report):
+                return "constrained_connector_not_better"
             return "sampled_candidate_quality_regression"
+        if self._has_cost_aware_connector_attempt(report):
+            return "constrained_connector_not_better"
         return "sampled_candidate_equal_cost_no_quality_gain"
 
-    def _best_candidate_strategy(self, report: SampledRegionPathReport) -> str | None:
+    def _has_cost_aware_connector_attempt(self, report: SampledRegionPathReport) -> bool:
         for ranking in report.candidate_rankings:
-            if ranking.get("rank") == 1:
-                strategy = ranking.get("strategy")
-                return str(strategy) if strategy is not None else None
-        return None
+            if ranking.get("strategy") == "cost_aware_constrained_astar":
+                return True
+        for attempt in report.sample_attempts:
+            if (
+                attempt.get("kind") == "connector_attempt"
+                and attempt.get("strategy") == "cost_aware_constrained_astar"
+            ):
+                return True
+        return False
 
     def _candidate_rankings(
         self,
