@@ -16,6 +16,7 @@ ASTAR_BACKEND = "astar"
 REGION_GRAPH_GUIDED_BACKEND = "region_graph_guided"
 SAMPLED_REGION_PATH_BACKEND = "sampled_region_path"
 SAMPLED_REGION_PATH_REPORT_SCHEMA_VERSION = "sampled_region_path_report/v1"
+TERMINAL_ADJUSTMENT_REPORT_SCHEMA_VERSION = "terminal_adjustment_report/v1"
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,11 @@ class SampledRegionPathReport:
     candidate_high_cost_exposure: float | None
     baseline_tracking_proxy: float | None
     candidate_tracking_proxy: float | None
+    baseline_turn_count: int | None
+    candidate_turn_count: int | None
     start_goal_anchoring: dict[str, Any] = field(default_factory=dict)
+    terminal_adjustment_report: dict[str, Any] = field(default_factory=dict)
+    execution_tie_break: dict[str, Any] = field(default_factory=dict)
     sample_attempts: tuple[dict[str, Any], ...] = ()
     candidate_rankings: tuple[dict[str, Any], ...] = ()
 
@@ -55,6 +60,8 @@ class SampledRegionPathReport:
             "path_cells": [cell.to_list() for cell in self.path_cells],
             "edge_transition_count": self.edge_transition_count,
             "start_goal_anchoring": dict(self.start_goal_anchoring),
+            "terminal_adjustment_report": dict(self.terminal_adjustment_report),
+            "execution_tie_break": dict(self.execution_tie_break),
             "sample_attempt_count": len(self.sample_attempts),
             "sample_attempts": [dict(attempt) for attempt in self.sample_attempts],
             "candidate_rankings": [dict(ranking) for ranking in self.candidate_rankings],
@@ -79,6 +86,9 @@ class SampledRegionPathReport:
                 "baseline_tracking_proxy": self.baseline_tracking_proxy,
                 "candidate_tracking_proxy": self.candidate_tracking_proxy,
                 "tracking_proxy_delta": _delta(self.candidate_tracking_proxy, self.baseline_tracking_proxy),
+                "baseline_turn_count": self.baseline_turn_count,
+                "candidate_turn_count": self.candidate_turn_count,
+                "turn_count_delta": _delta_int(self.candidate_turn_count, self.baseline_turn_count),
             },
         }
 
@@ -165,6 +175,12 @@ class _RegionPathResolution:
 
 
 @dataclass(frozen=True)
+class _TerminalAdjustment:
+    request: PlanRequest
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class _SampleOption:
     region_id: int
     cell: Cell
@@ -193,9 +209,23 @@ class RegionGraphGuidedPlanner:
         baseline_result: PlanResult,
         region_graph_report: RegionGraphReport,
     ) -> RegionGraphGuidedPlanOutcome:
-        region_resolution = self._resolve_region_path(grid, request, region_graph_report)
-        anchoring = self._anchoring_payload(request, region_resolution)
-        skeleton, fallback_reason = self._build_skeleton(request, region_resolution)
+        terminal_adjustment = self._terminal_adjustment(grid, request)
+        effective_request = terminal_adjustment.request
+        region_resolution = self._resolve_region_path(grid, effective_request, region_graph_report)
+        anchoring = self._anchoring_payload(
+            request,
+            effective_request,
+            region_resolution,
+            terminal_adjustment_report=terminal_adjustment.report,
+        )
+        skeleton, fallback_reason = self._build_skeleton(effective_request, region_resolution)
+        fallback_reason = self._terminal_adjusted_fallback_reason(
+            fallback_reason,
+            terminal_adjustment.report,
+        )
+        if fallback_reason is not None:
+            anchoring = dict(anchoring)
+            anchoring["fallback_reason"] = fallback_reason
         if fallback_reason is not None:
             sampled_report = self._sampled_report(
                 grid,
@@ -208,6 +238,7 @@ class RegionGraphGuidedPlanner:
                 collision_free=False,
                 candidate=None,
                 anchoring=anchoring,
+                terminal_adjustment_report=terminal_adjustment.report,
             )
             return self._fallback(
                 baseline_result,
@@ -222,10 +253,11 @@ class RegionGraphGuidedPlanner:
 
         sampled_candidate, sampled_report = self._run_sampled_region_path(
             grid,
-            request,
+            effective_request,
             baseline_result=baseline_result,
             region_path=region_resolution.region_path,
             anchoring=anchoring,
+            terminal_adjustment_report=terminal_adjustment.report,
         )
         if sampled_candidate is not None and self._sampled_candidate_is_selectable(sampled_report, baseline_result):
             return RegionGraphGuidedPlanOutcome(
@@ -244,7 +276,7 @@ class RegionGraphGuidedPlanner:
                 ),
             )
 
-        candidate, segment_count, segment_failure = self._run_segments(grid, request, skeleton)
+        candidate, segment_count, segment_failure = self._run_segments(grid, effective_request, skeleton)
         if segment_failure is not None:
             return self._fallback(
                 baseline_result,
@@ -528,6 +560,7 @@ class RegionGraphGuidedPlanner:
         baseline_result: PlanResult,
         region_path: tuple[Any, ...],
         anchoring: dict[str, Any],
+        terminal_adjustment_report: dict[str, Any],
     ) -> tuple[PlanResult | None, SampledRegionPathReport]:
         if not region_path:
             return None, self._sampled_report(
@@ -541,6 +574,7 @@ class RegionGraphGuidedPlanner:
                 collision_free=False,
                 candidate=None,
                 anchoring=anchoring,
+                terminal_adjustment_report=terminal_adjustment_report,
             )
 
         sample_attempts = self._sample_attempts(grid, request, region_path)
@@ -562,6 +596,7 @@ class RegionGraphGuidedPlanner:
                 collision_free=False,
                 candidate=None,
                 anchoring=anchoring,
+                terminal_adjustment_report=terminal_adjustment_report,
                 sample_attempts=sample_attempts,
                 candidate_rankings=tuple(rejected_rankings),
             )
@@ -597,6 +632,7 @@ class RegionGraphGuidedPlanner:
             collision_free=True,
             candidate=best.candidate,
             anchoring=anchoring,
+            terminal_adjustment_report=terminal_adjustment_report,
             sample_attempts=sample_attempts,
             candidate_rankings=ranking_payload,
         )
@@ -619,6 +655,7 @@ class RegionGraphGuidedPlanner:
                 collision_free=True,
                 candidate=best.candidate,
                 anchoring=anchoring,
+                terminal_adjustment_report=terminal_adjustment_report,
                 sample_attempts=sample_attempts,
                 candidate_rankings=selected_ranking_payload,
             )
@@ -633,6 +670,7 @@ class RegionGraphGuidedPlanner:
             collision_free=True,
             candidate=best.candidate,
             anchoring=anchoring,
+            terminal_adjustment_report=terminal_adjustment_report,
             sample_attempts=sample_attempts,
             candidate_rankings=ranking_payload,
         )
@@ -1114,10 +1152,11 @@ class RegionGraphGuidedPlanner:
             return False
         exposure_delta = _delta(report.candidate_high_cost_exposure, report.baseline_high_cost_exposure)
         tracking_delta = _delta(report.candidate_tracking_proxy, report.baseline_tracking_proxy)
+        turn_count_delta = _delta_int(report.candidate_turn_count, report.baseline_turn_count)
         length_delta = _delta(report.candidate_path_length_m, report.baseline_path_length_m)
         return any(
             delta is not None and delta < -self._improvement_epsilon
-            for delta in (exposure_delta, tracking_delta, length_delta)
+            for delta in (exposure_delta, tracking_delta, turn_count_delta, length_delta)
         )
 
     def _sampled_not_better_reason(
@@ -1135,14 +1174,19 @@ class RegionGraphGuidedPlanner:
             return "sampled_candidate_higher_cost"
         exposure_delta = _delta(report.candidate_high_cost_exposure, report.baseline_high_cost_exposure)
         tracking_delta = _delta(report.candidate_tracking_proxy, report.baseline_tracking_proxy)
+        turn_count_delta = _delta_int(report.candidate_turn_count, report.baseline_turn_count)
         length_delta = _delta(report.candidate_path_length_m, report.baseline_path_length_m)
-        quality_deltas = tuple(delta for delta in (exposure_delta, tracking_delta, length_delta) if delta is not None)
+        quality_deltas = tuple(
+            delta
+            for delta in (exposure_delta, tracking_delta, turn_count_delta, length_delta)
+            if delta is not None
+        )
         if any(delta > self._improvement_epsilon for delta in quality_deltas):
             if self._has_cost_aware_connector_attempt(report):
-                return "constrained_connector_not_better"
+                return "execution_tie_break_no_alternative"
             return "sampled_candidate_quality_regression"
         if self._has_cost_aware_connector_attempt(report):
-            return "constrained_connector_not_better"
+            return "execution_tie_break_no_alternative"
         return "sampled_candidate_equal_cost_no_quality_gain"
 
     def _has_cost_aware_connector_attempt(self, report: SampledRegionPathReport) -> bool:
@@ -1171,16 +1215,27 @@ class RegionGraphGuidedPlanner:
         baseline_length = baseline_result.diagnostics.path_length_m if baseline_result.success else None
         baseline_exposure = self._high_cost_exposure(grid, baseline_result.path_cells) if baseline_result.success else None
         baseline_tracking = self._tracking_proxy(baseline_result.path_cells) if baseline_result.success else None
+        baseline_turn_count = self._turn_count(baseline_result.path_cells) if baseline_result.success else None
         for index, item in enumerate(candidates):
             candidate = item.candidate
             high_cost_exposure = self._high_cost_exposure(grid, candidate.path_cells)
             tracking_proxy = self._tracking_proxy(candidate.path_cells)
+            turn_count = self._turn_count(candidate.path_cells)
+            selected = selected_index == index
             rankings.append(
                 {
                     "rank": index + 1,
                     "strategy": item.strategy,
-                    "status": "selected" if selected_index == index else "candidate",
+                    "status": "selected" if selected else "candidate",
                     "fallback_reason": None,
+                    "selection_reason": (
+                        self._candidate_selection_reason(grid, baseline_result, candidate) if selected else None
+                    ),
+                    "execution_tie_break_reason": self._candidate_execution_tie_break_reason(
+                        grid,
+                        baseline_result,
+                        candidate,
+                    ),
                     "sample_count": len(item.sample_cells),
                     "sample_cells": [cell.to_list() for cell in item.sample_cells],
                     "edge_transition_count": max(len(item.sample_cells) - 1, 0),
@@ -1192,6 +1247,8 @@ class RegionGraphGuidedPlanner:
                     "high_cost_exposure_delta": _delta(high_cost_exposure, baseline_exposure),
                     "candidate_tracking_proxy": tracking_proxy,
                     "tracking_proxy_delta": _delta(tracking_proxy, baseline_tracking),
+                    "candidate_turn_count": turn_count,
+                    "turn_count_delta": _delta_int(turn_count, baseline_turn_count),
                 }
             )
         return tuple(rankings)
@@ -1205,6 +1262,187 @@ class RegionGraphGuidedPlanner:
         if reasons:
             return reasons[0]
         return "region_sample_unavailable"
+
+    def _terminal_adjustment(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+    ) -> _TerminalAdjustment:
+        base_report: dict[str, Any] = {
+            "schema_version": TERMINAL_ADJUSTMENT_REPORT_SCHEMA_VERSION,
+            "status": "not_required",
+            "reason": None,
+            "reason_code": "terminal_adjustment_not_required",
+            "target_adjusted": False,
+            "original_goal_cell": request.goal.to_list(),
+            "adjusted_goal_cell": None,
+            "distance_cells": None,
+            "distance_m": None,
+            "max_radius_cells": 0,
+            "candidate_count": 0,
+            "failure_reason": None,
+        }
+        if self._endpoint_classification(grid, request.goal, "goal") != "goal_footprint_unsafe":
+            return _TerminalAdjustment(request=request, report=base_report)
+
+        max_radius_cells = self._terminal_adjustment_max_radius_cells(grid)
+        candidates: list[tuple[float, float, float, int, int, Cell]] = []
+        for dy in range(-max_radius_cells, max_radius_cells + 1):
+            for dx in range(-max_radius_cells, max_radius_cells + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                cell = Cell(request.goal.x + dx, request.goal.y + dy)
+                if not grid.spec.in_bounds(cell) or not grid.is_passable(cell):
+                    continue
+                if isinstance(grid, PlanningGrid) and not bool(grid.original_passable_mask[cell.y, cell.x]):
+                    continue
+                distance_cells = math.hypot(dx, dy)
+                if distance_cells > max_radius_cells:
+                    continue
+                candidates.append(
+                    (
+                        distance_cells,
+                        abs(float(dy)),
+                        float(grid.cost_at(cell)),
+                        cell.y,
+                        cell.x,
+                        cell,
+                    )
+                )
+
+        report = dict(base_report)
+        report["reason"] = "goal_footprint_unsafe"
+        report["max_radius_cells"] = max_radius_cells
+        report["candidate_count"] = len(candidates)
+        if not candidates:
+            report["status"] = "unavailable"
+            report["reason_code"] = "terminal_adjustment_unavailable"
+            report["failure_reason"] = "no_footprint_safe_terminal_within_radius"
+            return _TerminalAdjustment(request=request, report=report)
+
+        distance_cells, _, _, _, _, adjusted_goal = min(candidates)
+        distance_m = distance_cells * grid.spec.resolution
+        report.update(
+            {
+                "status": "selected",
+                "reason_code": "terminal_adjustment_selected",
+                "target_adjusted": True,
+                "adjusted_goal_cell": adjusted_goal.to_list(),
+                "distance_cells": float(distance_cells),
+                "distance_m": float(distance_m),
+                "failure_reason": None,
+            }
+        )
+        return _TerminalAdjustment(
+            request=PlanRequest(
+                start=request.start,
+                goal=adjusted_goal,
+                neighbor_policy=request.neighbor_policy,
+                prevent_corner_cutting=request.prevent_corner_cutting,
+                max_iterations=request.max_iterations,
+            ),
+            report=report,
+        )
+
+    def _terminal_adjustment_max_radius_cells(self, grid: CostGrid | PlanningGrid) -> int:
+        footprint_radius_m = None
+        if isinstance(grid, PlanningGrid):
+            footprint_radius_m = grid.footprint_radius_m
+        if footprint_radius_m is None or footprint_radius_m <= 0.0:
+            return 0
+        return max(1, int(math.ceil(footprint_radius_m / grid.spec.resolution)) + 2)
+
+    def _terminal_adjusted_fallback_reason(
+        self,
+        fallback_reason: str | None,
+        terminal_adjustment_report: dict[str, Any],
+    ) -> str | None:
+        if fallback_reason != "goal_footprint_unsafe":
+            return fallback_reason
+        reason_code = terminal_adjustment_report.get("reason_code")
+        if reason_code == "terminal_adjustment_unavailable":
+            return "terminal_adjustment_unavailable"
+        return "terminal_adjustment_unsafe"
+
+    def _candidate_selection_reason(
+        self,
+        grid: CostGrid | PlanningGrid,
+        baseline_result: PlanResult,
+        candidate: PlanResult,
+    ) -> str:
+        if not baseline_result.success:
+            return "baseline_unreachable"
+        if candidate.total_cost < baseline_result.total_cost - self._improvement_epsilon:
+            return "lower_cost"
+        if candidate.total_cost > baseline_result.total_cost + self._improvement_epsilon:
+            return "execution_tie_break_cost_regression"
+        if self._candidate_has_execution_quality_improvement(grid, baseline_result, candidate):
+            return "execution_tie_break_improved"
+        return "execution_tie_break_no_alternative"
+
+    def _candidate_execution_tie_break_reason(
+        self,
+        grid: CostGrid | PlanningGrid,
+        baseline_result: PlanResult,
+        candidate: PlanResult,
+    ) -> str:
+        if not baseline_result.success:
+            return "baseline_unreachable"
+        if candidate.total_cost < baseline_result.total_cost - self._improvement_epsilon:
+            return "lower_cost"
+        if candidate.total_cost > baseline_result.total_cost + self._improvement_epsilon:
+            return "execution_tie_break_cost_regression"
+        if self._candidate_has_execution_quality_improvement(grid, baseline_result, candidate):
+            return "execution_tie_break_improved"
+        return "execution_tie_break_no_alternative"
+
+    def _candidate_has_execution_quality_improvement(
+        self,
+        grid: CostGrid | PlanningGrid,
+        baseline_result: PlanResult,
+        candidate: PlanResult,
+    ) -> bool:
+        exposure_delta = _delta(
+            self._high_cost_exposure(grid, candidate.path_cells),
+            self._high_cost_exposure(grid, baseline_result.path_cells),
+        )
+        tracking_delta = _delta(
+            self._tracking_proxy(candidate.path_cells),
+            self._tracking_proxy(baseline_result.path_cells),
+        )
+        turn_count_delta = _delta_int(
+            self._turn_count(candidate.path_cells),
+            self._turn_count(baseline_result.path_cells),
+        )
+        length_delta = _delta(candidate.diagnostics.path_length_m, baseline_result.diagnostics.path_length_m)
+        return any(
+            delta is not None and delta < -self._improvement_epsilon
+            for delta in (exposure_delta, tracking_delta, turn_count_delta, length_delta)
+        )
+
+    def _execution_tie_break_payload(
+        self,
+        grid: CostGrid | PlanningGrid,
+        baseline_result: PlanResult,
+        candidate: PlanResult | None,
+    ) -> dict[str, Any]:
+        if candidate is None:
+            return {
+                "status": "not_available",
+                "reason": "candidate_missing",
+            }
+        reason = self._candidate_execution_tie_break_reason(grid, baseline_result, candidate)
+        status_by_reason = {
+            "baseline_unreachable": "not_required",
+            "lower_cost": "not_required",
+            "execution_tie_break_improved": "selected",
+            "execution_tie_break_no_alternative": "fallback",
+            "execution_tie_break_cost_regression": "cost_regression",
+        }
+        return {
+            "status": status_by_reason.get(reason, "unknown"),
+            "reason": reason,
+        }
 
     def _fallback(
         self,
@@ -1432,12 +1670,17 @@ class RegionGraphGuidedPlanner:
 
     def _anchoring_payload(
         self,
-        request: PlanRequest,
+        original_request: PlanRequest,
+        effective_request: PlanRequest,
         resolution: _RegionPathResolution,
+        *,
+        terminal_adjustment_report: dict[str, Any],
     ) -> dict[str, Any]:
         return {
-            "start_cell": request.start.to_list(),
-            "goal_cell": request.goal.to_list(),
+            "start_cell": effective_request.start.to_list(),
+            "goal_cell": effective_request.goal.to_list(),
+            "requested_goal_cell": original_request.goal.to_list(),
+            "target_adjusted": bool(terminal_adjustment_report.get("target_adjusted")),
             "start_region_id": resolution.start_region_id,
             "goal_region_id": resolution.goal_region_id,
             "start_region_candidates": list(resolution.start_region_candidates),
@@ -1467,6 +1710,7 @@ class RegionGraphGuidedPlanner:
         collision_free: bool,
         candidate: PlanResult | None,
         anchoring: dict[str, Any],
+        terminal_adjustment_report: dict[str, Any],
         sample_attempts: tuple[dict[str, Any], ...] = (),
         candidate_rankings: tuple[dict[str, Any], ...] = (),
     ) -> SampledRegionPathReport:
@@ -1474,6 +1718,8 @@ class RegionGraphGuidedPlanner:
         candidate_path_cost = candidate.total_cost if candidate is not None and math.isfinite(candidate.total_cost) else None
         baseline_path_length = baseline_result.diagnostics.path_length_m if baseline_result.success else None
         candidate_path_length = candidate.diagnostics.path_length_m if candidate is not None else None
+        baseline_turn_count = self._turn_count(baseline_result.path_cells) if baseline_result.success else None
+        candidate_turn_count = self._turn_count(candidate.path_cells) if candidate is not None else None
         return SampledRegionPathReport(
             schema_version=SAMPLED_REGION_PATH_REPORT_SCHEMA_VERSION,
             status=status,
@@ -1497,7 +1743,11 @@ class RegionGraphGuidedPlanner:
                 self._tracking_proxy(baseline_result.path_cells) if baseline_result.success else None
             ),
             candidate_tracking_proxy=self._tracking_proxy(candidate.path_cells) if candidate is not None else None,
+            baseline_turn_count=baseline_turn_count,
+            candidate_turn_count=candidate_turn_count,
             start_goal_anchoring=anchoring,
+            terminal_adjustment_report=terminal_adjustment_report,
+            execution_tie_break=self._execution_tie_break_payload(grid, baseline_result, candidate),
             sample_attempts=sample_attempts,
             candidate_rankings=candidate_rankings,
         )
@@ -1527,8 +1777,27 @@ class RegionGraphGuidedPlanner:
             total += delta * delta
         return float(total)
 
+    def _turn_count(self, path: tuple[Cell, ...]) -> int:
+        if len(path) < 3:
+            return 0
+        headings = [
+            math.atan2(current.y - previous.y, current.x - previous.x)
+            for previous, current in zip(path[:-1], path[1:])
+        ]
+        return sum(
+            1
+            for previous, current in zip(headings[:-1], headings[1:])
+            if abs((current - previous + math.pi) % (2.0 * math.pi) - math.pi) > self._improvement_epsilon
+        )
+
 
 def _delta(candidate: float | None, baseline: float | None) -> float | None:
     if candidate is None or baseline is None:
         return None
     return float(candidate - baseline)
+
+
+def _delta_int(candidate: int | None, baseline: int | None) -> int | None:
+    if candidate is None or baseline is None:
+        return None
+    return int(candidate - baseline)

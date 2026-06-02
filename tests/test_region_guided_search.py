@@ -3,8 +3,9 @@ import math
 import numpy as np
 
 from path_planner.core import Cell, CostGrid, GridSpec, NeighborPolicy, PlanDiagnostics, PlanRequest, PlanResult
+from path_planner.platform import PlannerPlatformProfile
 from path_planner.regions import ConvexRegion, RegionEdge, RegionGraph, RegionGraphReport
-from path_planner.search import AStarPlanner, RegionGraphGuidedPlanner
+from path_planner.search import AStarPlanner, RegionGraphGuidedPlanner, build_planning_grid
 
 
 def make_grid(cost, passable=None):
@@ -12,6 +13,27 @@ def make_grid(cost, passable=None):
     passable_mask = np.ones(cost_array.shape, dtype=bool) if passable is None else np.asarray(passable, dtype=bool)
     spec = GridSpec(width=cost_array.shape[1], height=cost_array.shape[0], resolution=1.0)
     return CostGrid(spec=spec, cost=cost_array, passable_mask=passable_mask)
+
+
+def make_profile(*, footprint_radius_m=1.0):
+    return PlannerPlatformProfile(
+        platform_key="test-rover",
+        platform_name="Test Rover",
+        config_path=None,
+        safety_margin_m=0.0,
+        body_length_m=1.6,
+        body_width_m=1.2,
+        footprint_radius_m=footprint_radius_m,
+        max_slope_deg=15.0,
+        max_obstacle_height_m=0.2,
+        ground_clearance_m=0.3,
+        raw_min_turning_radius_m=0.0,
+        effective_min_turning_radius_m=None,
+        energy_model=None,
+        parameter_sources={},
+        constraint_sources={"footprint_radius_m": "derived"},
+        constraint_warnings=(),
+    )
 
 
 def make_region(region_id, cell, grid):
@@ -342,6 +364,58 @@ def test_passable_goal_anchor_unconnected_reports_specific_blocker():
     assert anchoring["goal_anchor_failure_reason"] == "goal_anchor_region_unconnected"
 
 
+def test_footprint_unsafe_goal_gets_bounded_terminal_adjustment():
+    grid = make_grid(
+        [
+            [1.0, 1.0, 1.0, 5.0, 5.0],
+            [1.0, 1.0, 1.0, 5.0, 5.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 5.0, 5.0],
+            [1.0, 1.0, 1.0, 5.0, 5.0],
+        ],
+        passable=[
+            [True, True, True, True, True],
+            [True, True, True, True, True],
+            [True, True, True, True, False],
+            [True, True, True, True, True],
+            [True, True, True, True, True],
+        ],
+    )
+    planning_grid = build_planning_grid(grid, platform_profile=make_profile(footprint_radius_m=1.0))
+    request = PlanRequest(start=Cell(0, 2), goal=Cell(3, 2))
+    baseline = AStarPlanner().plan(planning_grid, request)
+    report = make_report_from_regions(
+        (
+            make_box_region(0, Cell(0, 2), Cell(2, 2), Cell(1, 2), grid),
+        ),
+        (),
+    )
+
+    outcome = RegionGraphGuidedPlanner().plan(
+        planning_grid,
+        request,
+        baseline_result=baseline,
+        region_graph_report=report,
+    )
+
+    assert baseline.success is False
+    assert outcome.report.status == "selected"
+    assert outcome.report.selected_backend == "sampled_region_path"
+    assert outcome.result.path_cells[-1] == Cell(2, 2)
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    terminal = sampled["terminal_adjustment_report"]
+    assert terminal["schema_version"] == "terminal_adjustment_report/v1"
+    assert terminal["status"] == "selected"
+    assert terminal["target_adjusted"] is True
+    assert terminal["reason"] == "goal_footprint_unsafe"
+    assert terminal["original_goal_cell"] == [3, 2]
+    assert terminal["adjusted_goal_cell"] == [2, 2]
+    assert terminal["candidate_count"] > 0
+    assert sampled["start_goal_anchoring"]["goal_cell"] == [2, 2]
+    assert sampled["start_goal_anchoring"]["requested_goal_cell"] == [3, 2]
+    assert sampled["start_goal_anchoring"]["goal_classification"] == "covered"
+
+
 def test_cost_aware_connector_selects_lower_cost_route_inside_region_union():
     grid = make_grid(
         [
@@ -450,6 +524,41 @@ def test_region_graph_guided_candidate_preserves_request_neighbor_policy_in_diag
     assert outcome.result.diagnostics.neighbor_policy == "4-neighbor"
 
 
+def test_equal_cost_connector_selects_execution_quality_tie_break():
+    grid = make_grid([[1.0, 1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0, 1.0]])
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(4, 1), prevent_corner_cutting=False)
+    baseline = make_baseline_result(
+        grid,
+        (
+            Cell(0, 1),
+            Cell(1, 1),
+            Cell(1, 0),
+            Cell(2, 0),
+            Cell(3, 0),
+            Cell(3, 1),
+            Cell(4, 1),
+        ),
+        total_cost=4.0,
+    )
+    report = make_report_from_regions(
+        (
+            make_region(0, Cell(0, 1), grid),
+            make_box_region(1, Cell(1, 1), Cell(3, 1), Cell(2, 1), grid),
+            make_region(2, Cell(4, 1), grid),
+        ),
+        ((0, 1), (1, 2)),
+    )
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.report.status == "selected"
+    assert outcome.report.selected_backend == "sampled_region_path"
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["execution_tie_break"]["reason"] == "execution_tie_break_improved"
+    assert sampled["candidate_comparison"]["turn_count_delta"] < 0
+    assert sampled["candidate_rankings"][0]["selection_reason"] == "execution_tie_break_improved"
+
+
 def test_region_graph_guided_falls_back_when_graph_is_disconnected():
     grid = make_grid([[1.0, 1.0, 1.0]])
     request = PlanRequest(start=Cell(0, 0), goal=Cell(2, 0))
@@ -481,4 +590,5 @@ def test_region_graph_guided_falls_back_when_candidate_is_not_better_than_baseli
     assert outcome.report.segment_count == 1
     assert outcome.report.to_dict()["comparison"]["path_changed"] is False
     sampled = outcome.report.to_dict()["sampled_region_path_report"]
-    assert sampled["fallback_reason"] == "constrained_connector_not_better"
+    assert sampled["fallback_reason"] == "execution_tie_break_no_alternative"
+    assert sampled["execution_tie_break"]["reason"] == "execution_tie_break_no_alternative"
