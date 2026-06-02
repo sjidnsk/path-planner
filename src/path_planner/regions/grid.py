@@ -35,6 +35,47 @@ def build_blocked_cell_obstacles(
     return tuple(obstacles)
 
 
+def build_merged_blocked_cell_obstacles(
+    grid: CostGrid,
+    *,
+    platform_profile: PlannerPlatformProfile | None = None,
+) -> tuple[ObstaclePrimitive, ...]:
+    footprint = build_footprint_safe_mask(grid, platform_profile)
+    unsafe = ~footprint.safe_mask
+    visited = np.zeros(unsafe.shape, dtype=bool)
+    obstacles: list[ObstaclePrimitive] = []
+    for y in range(grid.spec.height):
+        for x in range(grid.spec.width):
+            if visited[y, x] or not bool(unsafe[y, x]):
+                continue
+            max_x = x
+            while max_x + 1 < grid.spec.width and bool(unsafe[y, max_x + 1]) and not bool(visited[y, max_x + 1]):
+                max_x += 1
+            max_y = y
+            while max_y + 1 < grid.spec.height:
+                next_y = max_y + 1
+                if any(visited[next_y, xx] or not bool(unsafe[next_y, xx]) for xx in range(x, max_x + 1)):
+                    break
+                max_y = next_y
+            for yy in range(y, max_y + 1):
+                for xx in range(x, max_x + 1):
+                    visited[yy, xx] = True
+            min_cell = Cell(x, y)
+            max_cell = Cell(max_x, max_y)
+            min_world, max_world = _cell_world_bounds(grid, min_cell, max_cell)
+            obstacles.append(
+                ObstaclePrimitive(
+                    obstacle_id=len(obstacles),
+                    source="merged_blocked_rectangle",
+                    min_cell=min_cell,
+                    max_cell=max_cell,
+                    min_world=min_world,
+                    max_world=max_world,
+                )
+            )
+    return tuple(obstacles)
+
+
 def build_grid_box_regions(grid: CostGrid, corridor: CorridorResult) -> tuple[ConvexRegion, ...]:
     regions: list[ConvexRegion] = []
     for region_id, section in enumerate(corridor.sections):

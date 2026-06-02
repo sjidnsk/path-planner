@@ -80,6 +80,7 @@ Phase 8 provides a Drake IRIS/GCS framework prototype:
 - Phase 8.1 adds a Drake-free `region_graph_report` built from `grid_box` regions and `blocked_cell_box` obstacle primitives;
 - Phase 8.2 adds an optional `workspace_iris` backend that can emit `iris_region_report` when `--drake-iris-regions` is enabled;
 - `iris_region_report` serializes numeric `HPolyhedron` half-space arrays and falls back to `grid_box` regions when Drake is unavailable or validation fails;
+- Workspace IRIS diagnostics use `merged_blocked_rectangle` obstacles when that safely reduces obstacle fragmentation, and successful IRIS regions use `postprocess_corridor_safe_component_box` domains while keeping unsafe cells out of serialized region boxes;
 - Phase 8.3 lets `region_graph_report` consume valid IRIS regions as an `iris` graph source and records graph quality metrics and fallback decisions;
 - diagnostics include an IRIS / Region Graph Summary that labels this as a 2D workspace safe-region diagnostic, not a GCS trajectory or vehicle feasibility proof;
 - candidate future reports still include `gcs_trajectory_report`;

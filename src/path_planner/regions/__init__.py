@@ -3,6 +3,7 @@
 from .grid import (
     build_blocked_cell_obstacles,
     build_grid_box_regions,
+    build_merged_blocked_cell_obstacles,
     build_region_edges,
     build_region_graph_report,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "RegionGraphReport",
     "build_blocked_cell_obstacles",
     "build_grid_box_regions",
+    "build_merged_blocked_cell_obstacles",
     "build_region_edges",
     "build_region_graph_report",
 ]

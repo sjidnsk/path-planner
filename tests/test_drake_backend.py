@@ -10,6 +10,7 @@ from path_planner.adapters import route_result_to_json_dict
 from path_planner.core import Cell, CostGrid, GridSpec, PlanRequest
 from path_planner.drake_backend import build_workspace_iris_region_report
 from path_planner.postprocess import build_corridor
+from path_planner.postprocess.models import CorridorResult, CorridorSection
 from path_planner.search import AStarPlanner
 
 
@@ -70,6 +71,74 @@ def test_iris_region_report_is_optional_route_json_field():
     assert with_report["iris_region_report"]["region_count"] == len(corridor.sections)
 
 
+def test_workspace_iris_cell_bounds_do_not_hide_unsafe_cells(monkeypatch):
+    import path_planner.drake_backend.iris as iris_backend
+
+    class FakeHPolyhedron:
+        @staticmethod
+        def MakeBox(min_bounds, max_bounds):
+            return (tuple(min_bounds), tuple(max_bounds))
+
+    class FakeIrisOptions:
+        require_sample_point_is_contained = False
+
+    class FakeRegion:
+        def IsEmpty(self):
+            return False
+
+        def PointInSet(self, sample, tolerance):
+            x = int(float(sample[0]))
+            y = int(float(sample[1]))
+            return (x, y) in {(0, 0), (1, 0), (2, 0), (0, 1), (0, 2), (2, 2)}
+
+        def A(self):
+            return np.asarray(((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)))
+
+        def b(self):
+            return np.asarray((3.0, 0.0, 3.0, 0.0))
+
+    class FakeGeometryOptimization:
+        HPolyhedron = FakeHPolyhedron
+        IrisOptions = FakeIrisOptions
+
+        @staticmethod
+        def Iris(obstacles, sample, domain, options):
+            return FakeRegion()
+
+    monkeypatch.setattr(iris_backend, "_load_geometry_optimization", lambda: FakeGeometryOptimization)
+    grid = make_grid(
+        [
+            [True, True, True],
+            [True, False, True],
+            [True, True, True],
+        ],
+        resolution=1.0,
+    )
+    corridor = CorridorResult(
+        status="ok",
+        radius_cells=1,
+        sections=(
+            CorridorSection(
+                center=Cell(0, 0),
+                cells=(Cell(0, 0), Cell(1, 0), Cell(2, 0), Cell(0, 1), Cell(0, 2), Cell(2, 2)),
+            ),
+        ),
+        failure_reason=None,
+        original_blocked_count=1,
+        inflated_blocked_count=1,
+    )
+
+    report = build_workspace_iris_region_report(grid, corridor)
+    region = report.to_dict()["regions"][0]
+    bounds = region["cell_bounds"]
+
+    assert report.to_dict()["status"] == "ok"
+    assert not (
+        bounds["min"][0] <= 1 <= bounds["max"][0]
+        and bounds["min"][1] <= 1 <= bounds["max"][1]
+    )
+
+
 def test_cli_drake_iris_regions_writes_optional_report_without_changing_route_semantics(tmp_path):
     output_json = tmp_path / "route.json"
     output_dir = tmp_path / "report"
@@ -105,15 +174,17 @@ def test_cli_drake_iris_regions_writes_optional_report_without_changing_route_se
     assert report["status"] in {"ok", "fallback"}
     assert report["region_count"] > 0
     assert report["seed_source"] == "postprocess_corridor_centers"
-    assert report["domain_source"] == "postprocess_corridor_grid_box"
-    assert report["obstacle_source"] == "blocked_cell_box"
+    assert report["obstacle_source"] in {"blocked_cell_box", "merged_blocked_rectangle"}
     assert graph_report["quality_metrics"]["requested_region_source"] == "iris"
     assert graph_report["quality_metrics"]["graph_source"] in {"iris", "grid_box"}
     assert graph_report["quality_metrics"]["start_goal_connected"] is True
     if report["status"] == "fallback":
+        assert report["domain_source"] == "postprocess_corridor_grid_box"
         assert graph_report["region_source"] == "grid_box"
         assert graph_report["fallback_used"] is True
         assert "iris_region_graph_fallback" in graph_report["failure_reason"]
+    else:
+        assert report["domain_source"] == "postprocess_corridor_safe_component_box"
     html = (output_dir / "diagnostics.html").read_text(encoding="utf-8")
     assert "IRIS / Region Graph Summary" in html
     assert "not a GCS trajectory" in html

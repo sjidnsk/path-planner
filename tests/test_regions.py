@@ -9,6 +9,7 @@ from path_planner.regions import (
     ObstaclePrimitive,
     build_blocked_cell_obstacles,
     build_grid_box_regions,
+    build_merged_blocked_cell_obstacles,
     build_region_graph_report,
 )
 from path_planner.search import AStarPlanner
@@ -53,6 +54,25 @@ def test_build_blocked_cell_obstacles_from_passable_mask():
     assert [obstacle.min_cell.to_list() for obstacle in obstacles] == [[1, 0], [2, 1]]
     assert all(obstacle.source == "blocked_cell_box" for obstacle in obstacles)
     assert obstacles[0].to_dict()["world_bounds"] == {"min": [1.0, 0.0], "max": [2.0, 1.0]}
+
+
+def test_merged_blocked_cell_obstacles_cover_only_unsafe_cells():
+    grid = make_grid(
+        [
+            [True, False, False, True],
+            [True, False, False, True],
+            [True, True, False, False],
+        ],
+        resolution=1.0,
+    )
+
+    obstacles = build_merged_blocked_cell_obstacles(grid)
+    payloads = [obstacle.to_dict() for obstacle in obstacles]
+
+    assert len(obstacles) == 2
+    assert all(obstacle.source == "merged_blocked_rectangle" for obstacle in obstacles)
+    assert payloads[0]["cell_bounds"] == {"min": [1, 0], "max": [2, 1]}
+    assert payloads[1]["cell_bounds"] == {"min": [2, 2], "max": [3, 2]}
 
 
 def test_grid_box_regions_serialize_corridor_sections():

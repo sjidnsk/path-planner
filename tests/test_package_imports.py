@@ -61,6 +61,8 @@ def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     assert "Phase 8.1" in content
     assert "grid_box" in content
     assert "blocked_cell_box" in content
+    assert "merged_blocked_rectangle" in content
+    assert "postprocess_corridor_safe_component_box" in content
     assert "Phase 8.2" in content
     assert "Phase 8.3" in content
     assert "--drake-iris-regions" in content
