@@ -72,7 +72,7 @@ def make_baseline_result(grid, path_cells, total_cost):
     )
 
 
-def test_region_graph_guided_selects_better_segment_astar_candidate():
+def test_region_graph_guided_selects_better_sampled_region_candidate():
     grid = make_grid(
         [
             [1.0, 1.0, 1.0, 1.0],
@@ -97,13 +97,81 @@ def test_region_graph_guided_selects_better_segment_astar_candidate():
     assert outcome.result.path_cells == (Cell(0, 0), Cell(1, 0), Cell(2, 0), Cell(3, 0))
     assert outcome.result.total_cost < baseline.total_cost
     assert outcome.report.status == "selected"
-    assert outcome.report.selected_backend == "region_graph_guided"
+    assert outcome.report.selected_backend == "sampled_region_path"
     assert outcome.report.fallback_reason is None
     assert outcome.report.segment_count == 3
     payload = outcome.report.to_dict()
     assert payload["region_graph_candidate"]["status"] == "selected"
     assert payload["comparison"]["path_changed"] is True
     assert payload["comparison"]["candidate_cost_delta"] < 0.0
+
+
+def test_region_graph_guided_selects_sampled_region_path_candidate():
+    grid = make_grid(
+        [
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 8.0, 8.0, 8.0, 1.0],
+            [1.0, 8.0, 1.0, 8.0, 1.0],
+        ]
+    )
+    request = PlanRequest(start=Cell(0, 0), goal=Cell(4, 0))
+    baseline = make_baseline_result(
+        grid,
+        (
+            Cell(0, 0),
+            Cell(0, 1),
+            Cell(0, 2),
+            Cell(1, 2),
+            Cell(2, 2),
+            Cell(3, 2),
+            Cell(4, 2),
+            Cell(4, 1),
+            Cell(4, 0),
+        ),
+        total_cost=30.0,
+    )
+    report = make_report(
+        grid,
+        (Cell(0, 0), Cell(2, 0), Cell(4, 0)),
+        ((0, 1), (1, 2)),
+    )
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.result.path_cells == (Cell(0, 0), Cell(1, 0), Cell(2, 0), Cell(3, 0), Cell(4, 0))
+    assert outcome.result.total_cost < baseline.total_cost
+    assert outcome.report.status == "selected"
+    assert outcome.report.selected_backend == "sampled_region_path"
+    payload = outcome.report.to_dict()
+    sampled = payload["sampled_region_path_report"]
+    assert sampled["schema_version"] == "sampled_region_path_report/v1"
+    assert sampled["status"] == "selected"
+    assert sampled["fallback_reason"] is None
+    assert sampled["region_sequence"] == [0, 1, 2]
+    assert sampled["sample_count"] == 3
+    assert sampled["safety_checks"]["collision_free"] is True
+    assert sampled["candidate_comparison"]["candidate_cost_delta"] < 0.0
+    assert payload["comparison"]["path_changed"] is True
+
+
+def test_region_graph_guided_reports_sampled_path_collision_blocker():
+    grid = make_grid(
+        [[1.0, 1.0, 1.0]],
+        passable=[[True, False, True]],
+    )
+    request = PlanRequest(start=Cell(0, 0), goal=Cell(2, 0))
+    baseline = make_baseline_result(grid, (Cell(0, 0), Cell(2, 0)), total_cost=10.0)
+    report = make_report(grid, (Cell(0, 0), Cell(2, 0)), ((0, 1),))
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.result is baseline
+    assert outcome.report.status == "fallback"
+    payload = outcome.report.to_dict()
+    sampled = payload["sampled_region_path_report"]
+    assert sampled["status"] == "fallback"
+    assert sampled["fallback_reason"] == "sampled_path_collision"
+    assert sampled["safety_checks"]["collision_free"] is False
 
 
 def test_region_graph_guided_candidate_preserves_request_neighbor_policy_in_diagnostics():

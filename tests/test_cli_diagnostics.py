@@ -152,10 +152,11 @@ def test_cli_region_graph_guided_backend_writes_additive_planning_report(tmp_pat
     assert payload["trajectory_kind"] == "geometric_path"
     assert backend_report["requested_backend"] == "region_graph_guided"
     assert backend_report["status"] in {"selected", "fallback"}
-    assert backend_report["selected_backend"] in {"astar", "region_graph_guided"}
+    assert backend_report["selected_backend"] in {"astar", "region_graph_guided", "sampled_region_path"}
     assert "segment_count" in backend_report
     assert "comparison" in backend_report
     assert "region_graph_candidate" in backend_report
+    assert "sampled_region_path_report" in backend_report
     assert backend_report["region_graph_candidate"]["region_graph_status"] == "ok"
     stdout_payload = json.loads(completed.stdout)
     assert stdout_payload["planning_backend"] == backend_report["selected_backend"]
