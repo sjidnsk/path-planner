@@ -29,8 +29,27 @@ def make_region(region_id, cell, grid):
     )
 
 
+def make_box_region(region_id, min_cell, max_cell, center, grid):
+    min_world = grid.spec.cell_to_world(min_cell)
+    max_world = grid.spec.cell_to_world(Cell(max_cell.x + 1, max_cell.y + 1))
+    return ConvexRegion(
+        region_id=region_id,
+        source="manual",
+        center_cell=center,
+        min_cell=min_cell,
+        max_cell=max_cell,
+        min_world=min_world,
+        max_world=max_world,
+        cell_count=(max_cell.x - min_cell.x + 1) * (max_cell.y - min_cell.y + 1),
+    )
+
+
 def make_report(grid, centers, edges, *, connected=True):
     regions = tuple(make_region(index, center, grid) for index, center in enumerate(centers))
+    return make_report_from_regions(regions, edges, connected=connected)
+
+
+def make_report_from_regions(regions, edges, *, connected=True):
     graph_edges = tuple(
         RegionEdge(
             edge_id=index,
@@ -106,6 +125,68 @@ def test_region_graph_guided_selects_better_sampled_region_candidate():
     assert payload["comparison"]["candidate_cost_delta"] < 0.0
 
 
+def test_region_path_anchors_to_regions_containing_start_and_goal_not_graph_order():
+    grid = make_grid([[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]])
+    request = PlanRequest(start=Cell(0, 0), goal=Cell(4, 0))
+    baseline = make_baseline_result(
+        grid,
+        (Cell(0, 0), Cell(1, 0), Cell(2, 0), Cell(3, 0), Cell(4, 0)),
+        total_cost=20.0,
+    )
+    start_region = make_region(10, Cell(0, 0), grid)
+    middle_region = make_region(20, Cell(2, 0), grid)
+    goal_region = make_region(30, Cell(4, 0), grid)
+    decoy_region = make_region(5, Cell(5, 0), grid)
+    report = make_report_from_regions(
+        (decoy_region, goal_region, middle_region, start_region),
+        ((10, 20), (20, 30)),
+    )
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.report.status == "selected"
+    assert outcome.report.selected_backend == "sampled_region_path"
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["region_sequence"] == [10, 20, 30]
+    assert sampled["start_goal_anchoring"]["start_region_id"] == 10
+    assert sampled["start_goal_anchoring"]["goal_region_id"] == 30
+
+
+def test_sampled_region_path_uses_edge_adjacent_multi_sample_candidate():
+    grid = make_grid(
+        [
+            [1.0, 9.0, 9.0, 9.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    request = PlanRequest(start=Cell(0, 0), goal=Cell(4, 0))
+    baseline = make_baseline_result(
+        grid,
+        (Cell(0, 0), Cell(1, 0), Cell(2, 0), Cell(3, 0), Cell(4, 0)),
+        total_cost=12.0,
+    )
+    report = make_report_from_regions(
+        (
+            make_box_region(0, Cell(0, 0), Cell(0, 1), Cell(0, 0), grid),
+            make_box_region(1, Cell(1, 0), Cell(3, 1), Cell(2, 0), grid),
+            make_box_region(2, Cell(4, 0), Cell(4, 1), Cell(4, 0), grid),
+        ),
+        ((0, 1), (1, 2)),
+    )
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.report.status == "selected"
+    assert outcome.report.selected_backend == "sampled_region_path"
+    assert outcome.result.total_cost < baseline.total_cost
+    assert Cell(1, 1) in outcome.result.path_cells
+    assert Cell(3, 1) in outcome.result.path_cells
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["sample_attempt_count"] > sampled["sample_count"]
+    assert sampled["candidate_rankings"][0]["status"] == "selected"
+    assert sampled["candidate_rankings"][0]["candidate_cost_delta"] < 0.0
+
+
 def test_region_graph_guided_selects_sampled_region_path_candidate():
     grid = make_grid(
         [
@@ -174,6 +255,23 @@ def test_region_graph_guided_reports_sampled_path_collision_blocker():
     assert sampled["safety_checks"]["collision_free"] is False
 
 
+def test_region_graph_guided_reports_goal_region_missing_blocker():
+    grid = make_grid([[1.0, 1.0, 1.0]])
+    request = PlanRequest(start=Cell(0, 0), goal=Cell(2, 0))
+    baseline = AStarPlanner().plan(grid, request)
+    report = make_report_from_regions((make_region(0, Cell(0, 0), grid),), ())
+
+    outcome = RegionGraphGuidedPlanner().plan(grid, request, baseline_result=baseline, region_graph_report=report)
+
+    assert outcome.result is baseline
+    assert outcome.report.status == "fallback"
+    assert outcome.report.fallback_reason == "goal_region_missing"
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["fallback_reason"] == "goal_region_missing"
+    assert sampled["start_goal_anchoring"]["start_region_id"] == 0
+    assert sampled["start_goal_anchoring"]["goal_region_id"] is None
+
+
 def test_region_graph_guided_candidate_preserves_request_neighbor_policy_in_diagnostics():
     grid = make_grid([[1.0, 1.0, 1.0, 1.0]])
     request = PlanRequest(start=Cell(0, 0), goal=Cell(3, 0), neighbor_policy=NeighborPolicy.FOUR)
@@ -224,3 +322,5 @@ def test_region_graph_guided_falls_back_when_candidate_is_not_better_than_baseli
     assert outcome.report.fallback_reason == "region_graph_candidate_not_better"
     assert outcome.report.segment_count == 1
     assert outcome.report.to_dict()["comparison"]["path_changed"] is False
+    sampled = outcome.report.to_dict()["sampled_region_path_report"]
+    assert sampled["fallback_reason"] == "sampled_candidate_equal_cost_no_quality_gain"
