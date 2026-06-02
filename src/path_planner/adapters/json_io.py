@@ -55,8 +55,11 @@ def route_result_to_json_dict(
     optimized_tracking_simulation: TrackingSimulationResult | None = None,
     region_graph_report: RegionGraphReport | None = None,
     iris_region_report: IrisRegionReport | None = None,
+    planning_backend_report: Any | None = None,
 ) -> dict[str, Any]:
     payload = result.to_route_dict(spec)
+    if planning_backend_report is not None:
+        payload["planning_backend_report"] = planning_backend_report.to_dict()
     if postprocess is not None:
         payload["postprocess"] = postprocess.to_dict()
     if region_graph_report is not None:

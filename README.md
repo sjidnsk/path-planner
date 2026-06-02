@@ -86,6 +86,14 @@ Phase 8 provides a Drake IRIS/GCS framework prototype:
 - `--optimize-trajectory` continues to mean the current fixed-corridor optimizer until a separate Drake backend switch is implemented;
 - the required fallback chain is Drake unavailable or infeasible -> current optimizer -> postprocess smoothed path -> raw A* path.
 
+Core Algorithm Stage 1 adds an opt-in `region_graph_guided` planning backend:
+
+- default CLI planning remains `astar`, which runs the existing platform-aware A* path;
+- `--planning-backend region_graph_guided` first builds the baseline A* route and `region_graph_report`, then derives a region-center waypoint skeleton when the graph is connected;
+- segment-level A* plans between skeleton waypoints and stitches a candidate `geometric_path`;
+- the backend falls back to baseline A* with machine-readable reasons such as `region_graph_disconnected`, `segment_astar_failed`, `region_graph_invalid`, or `region_graph_candidate_not_better`;
+- successful opt-in candidates and fallbacks are recorded in additive `planning_backend_report` diagnostics.
+
 This project does not yet implement full GCS graph search, GCS trajectory optimization, Ackermann trajectory optimization, a production Drake backend, exploration target selection, observation updates, or an online planning service.
 
 The planner returns a platform-filtered `geometric_path` plus a trackable-path interface and feasibility diagnostics, not a closed-loop controller command stream.
@@ -183,6 +191,12 @@ Phase 8.3 extends `region_graph_report` with `quality_metrics`, including
 `--drake-iris-regions` is enabled, valid connected IRIS regions can be used as
 the graph source; otherwise the report falls back to the existing `grid_box`
 graph and records why.
+Core Algorithm Stage 1 can add a top-level `planning_backend_report` object when
+`--planning-backend region_graph_guided` is enabled. It records the requested
+and selected backend, fallback reason, segment count, skeleton cells, candidate
+comparison against baseline A*, and region-graph candidate status. This is an
+additive diagnostic; `path-planner-route/v1` and top-level
+`trajectory_kind=geometric_path` are unchanged.
 When `--simulate-tracking` is enabled, the route JSON also includes a top-level
 `tracking_simulation_report` object with `simulated_path`, `config`, `metrics`,
 and `safety_report`.

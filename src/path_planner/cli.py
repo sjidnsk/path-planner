@@ -11,7 +11,8 @@ from path_planner.optimization import TrajectoryOptimizationConfig, optimize_tra
 from path_planner.platform import DEFAULT_PLATFORM_KEY, load_planner_platform_profile
 from path_planner.postprocess import run_postprocess
 from path_planner.regions import build_region_graph_report
-from path_planner.search import AStarPlanner, build_planning_grid
+from path_planner.search import ASTAR_BACKEND, REGION_GRAPH_GUIDED_BACKEND, AStarPlanner, RegionGraphGuidedPlanner
+from path_planner.search import build_planning_grid
 from path_planner.tracking import TrackingSimulationConfig, simulate_tracking
 
 
@@ -81,6 +82,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run optional 2D workspace Drake Iris region generation prototype",
     )
+    parser.add_argument(
+        "--planning-backend",
+        choices=(ASTAR_BACKEND, REGION_GRAPH_GUIDED_BACKEND),
+        default=ASTAR_BACKEND,
+        help="Planning backend to use; region_graph_guided is opt-in and falls back to A* when not better",
+    )
     return parser
 
 
@@ -94,7 +101,8 @@ def main(argv: list[str] | None = None) -> int:
         min_turning_radius_override_m=args.min_turning_radius,
     )
     planning_grid = build_planning_grid(grid, platform_profile=platform_profile)
-    result = AStarPlanner().plan(planning_grid, request)
+    baseline_result = AStarPlanner().plan(planning_grid, request)
+    result = baseline_result
     max_speed_mps = (
         args.max_speed_mps
         if args.max_speed_mps is not None
@@ -104,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     postprocess = run_postprocess(
         grid,
-        result,
+        baseline_result,
         corridor_radius_cells=args.corridor_radius_cells,
         max_curvature=args.max_curvature,
         max_shortcut_cost=args.max_shortcut_cost,
@@ -126,6 +134,41 @@ def main(argv: list[str] | None = None) -> int:
         platform_profile=platform_profile,
         iris_region_report=iris_region_report,
     )
+    planning_backend_report = None
+    if args.planning_backend == REGION_GRAPH_GUIDED_BACKEND:
+        outcome = RegionGraphGuidedPlanner().plan(
+            planning_grid,
+            request,
+            baseline_result=baseline_result,
+            region_graph_report=region_graph_report,
+        )
+        planning_backend_report = outcome.report
+        result = outcome.result
+        if result is not baseline_result:
+            postprocess = run_postprocess(
+                grid,
+                result,
+                corridor_radius_cells=args.corridor_radius_cells,
+                max_curvature=args.max_curvature,
+                max_shortcut_cost=args.max_shortcut_cost,
+                platform_profile=platform_profile,
+                max_speed_mps=max_speed_mps,
+                min_speed_mps=args.min_speed_mps,
+                tracking_error_bound_m=args.tracking_error_bound_m,
+            )
+            iris_region_report = None
+            if args.drake_iris_regions:
+                iris_region_report = build_workspace_iris_region_report(
+                    grid,
+                    postprocess.corridor,
+                    platform_profile=platform_profile,
+                )
+            region_graph_report = build_region_graph_report(
+                grid,
+                postprocess.corridor,
+                platform_profile=platform_profile,
+                iris_region_report=iris_region_report,
+            )
     tracking_simulation = None
     if args.simulate_tracking and postprocess.trackable_path is not None:
         tracking_simulation = simulate_tracking(
@@ -180,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         optimized_tracking_simulation=optimized_tracking_simulation,
         region_graph_report=region_graph_report,
         iris_region_report=iris_region_report,
+        planning_backend_report=planning_backend_report,
     )
     output_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -221,6 +265,12 @@ def main(argv: list[str] | None = None) -> int:
                 "iris_region_status": iris_region_report.status if iris_region_report is not None else None,
                 "iris_region_count": iris_region_report.region_count if iris_region_report is not None else 0,
                 "constraint_warnings": len(platform_profile.constraint_warnings),
+                "planning_backend": (
+                    planning_backend_report.selected_backend if planning_backend_report is not None else ASTAR_BACKEND
+                ),
+                "planning_backend_fallback_reason": (
+                    planning_backend_report.fallback_reason if planning_backend_report is not None else None
+                ),
             },
             ensure_ascii=False,
         )

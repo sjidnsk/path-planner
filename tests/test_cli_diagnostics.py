@@ -95,6 +95,7 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert "speed_profile" in payload["postprocess"]["trackable_path"]
     assert "tracking_safety_report" in payload["postprocess"]
     assert "is_safe" in payload["postprocess"]["tracking_safety_report"]
+    assert "planning_backend_report" not in payload
     assert "region_graph_report" in payload
     assert payload["region_graph_report"]["status"] == "ok"
     assert payload["region_graph_report"]["region_source"] == "grid_box"
@@ -116,6 +117,49 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
     assert "IRIS / Region Graph Summary" in html
     assert "2D workspace safe-region diagnostic" in html
     assert "reachable" in completed.stdout
+
+
+def test_cli_region_graph_guided_backend_writes_additive_planning_report(tmp_path):
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map_corridor.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--planning-backend",
+            "region_graph_guided",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    backend_report = payload["planning_backend_report"]
+
+    assert payload["schema_version"] == "path-planner-route/v1"
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert backend_report["requested_backend"] == "region_graph_guided"
+    assert backend_report["status"] in {"selected", "fallback"}
+    assert backend_report["selected_backend"] in {"astar", "region_graph_guided"}
+    assert "segment_count" in backend_report
+    assert "comparison" in backend_report
+    assert "region_graph_candidate" in backend_report
+    assert backend_report["region_graph_candidate"]["region_graph_status"] == "ok"
+    stdout_payload = json.loads(completed.stdout)
+    assert stdout_payload["planning_backend"] == backend_report["selected_backend"]
+    assert stdout_payload["planning_backend_fallback_reason"] == backend_report["fallback_reason"]
 
 
 def test_cli_demo_with_tracking_simulation_writes_report(tmp_path):
