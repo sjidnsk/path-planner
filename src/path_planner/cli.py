@@ -6,7 +6,14 @@ from pathlib import Path
 
 from path_planner.adapters import load_plan_input, route_result_to_json_dict
 from path_planner.diagnostics import render_diagnostics
-from path_planner.drake_backend import build_workspace_iris_region_report
+from path_planner.drake_backend import (
+    build_convex_region_sequence_report,
+    build_gcs_curvature_constrained_candidate_report,
+    build_gcs_geometric_candidate_report,
+    build_gcs_motion_feasibility_report,
+    build_gcs_trajectory_report,
+    build_workspace_iris_region_report,
+)
 from path_planner.optimization import TrajectoryOptimizationConfig, optimize_trajectory
 from path_planner.platform import DEFAULT_PLATFORM_KEY, load_planner_platform_profile
 from path_planner.postprocess import run_postprocess
@@ -81,6 +88,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--drake-iris-regions",
         action="store_true",
         help="Run optional 2D workspace Drake Iris region generation prototype",
+    )
+    parser.add_argument(
+        "--gcs-trajectory-smoke",
+        action="store_true",
+        help="Run optional Drake GCS corridor trajectory smoke diagnostics",
+    )
+    parser.add_argument(
+        "--gcs-geometric-candidate",
+        action="store_true",
+        help="Compare optional Drake GCS sampled trajectory as a geometric candidate",
+    )
+    parser.add_argument(
+        "--gcs-motion-feasibility",
+        action="store_true",
+        help="Evaluate optional Drake GCS sampled trajectory against curvature/heading constraints",
+    )
+    parser.add_argument(
+        "--gcs-curvature-constrained-candidate",
+        action="store_true",
+        help="Build an optional curvature-constrained GCS sampled candidate repair diagnostic",
+    )
+    parser.add_argument(
+        "--max-heading-change-deg",
+        type=float,
+        default=120.0,
+        help="Maximum heading change between sampled GCS trajectory segments for motion-feasibility diagnostics",
     )
     parser.add_argument(
         "--planning-backend",
@@ -212,6 +245,52 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
 
+    convex_region_sequence_report = build_convex_region_sequence_report(
+        grid,
+        result,
+        postprocess.corridor,
+        iris_region_report=iris_region_report,
+    )
+    gcs_trajectory_report = None
+    if (
+        args.gcs_trajectory_smoke
+        or args.gcs_geometric_candidate
+        or args.gcs_motion_feasibility
+        or args.gcs_curvature_constrained_candidate
+    ):
+        gcs_trajectory_report = build_gcs_trajectory_report(
+            grid,
+            convex_region_sequence_report,
+        )
+    gcs_candidate_report = None
+    if args.gcs_geometric_candidate:
+        gcs_candidate_report = build_gcs_geometric_candidate_report(
+            grid,
+            result,
+            postprocess,
+            gcs_trajectory_report,
+        )
+    gcs_motion_feasibility_report = None
+    if args.gcs_motion_feasibility or args.gcs_curvature_constrained_candidate:
+        gcs_motion_feasibility_report = build_gcs_motion_feasibility_report(
+            gcs_trajectory_report,
+            min_turning_radius_m=platform_profile.effective_min_turning_radius_m,
+            max_heading_change_deg=args.max_heading_change_deg,
+            max_curvature=args.max_curvature,
+        )
+    gcs_curvature_constrained_candidate_report = None
+    if args.gcs_curvature_constrained_candidate:
+        gcs_curvature_constrained_candidate_report = build_gcs_curvature_constrained_candidate_report(
+            grid,
+            result,
+            convex_region_sequence_report,
+            gcs_trajectory_report,
+            gcs_motion_feasibility_report,
+            min_turning_radius_m=platform_profile.effective_min_turning_radius_m,
+            max_heading_change_deg=args.max_heading_change_deg,
+            max_curvature=args.max_curvature,
+        )
+
     output_json = Path(args.output_json)
     output_json.parent.mkdir(parents=True, exist_ok=True)
     payload = route_result_to_json_dict(
@@ -223,6 +302,11 @@ def main(argv: list[str] | None = None) -> int:
         optimized_tracking_simulation=optimized_tracking_simulation,
         region_graph_report=region_graph_report,
         iris_region_report=iris_region_report,
+        convex_region_sequence_report=convex_region_sequence_report,
+        gcs_trajectory_report=gcs_trajectory_report,
+        gcs_candidate_report=gcs_candidate_report,
+        gcs_motion_feasibility_report=gcs_motion_feasibility_report,
+        gcs_curvature_constrained_candidate_report=gcs_curvature_constrained_candidate_report,
         planning_backend_report=planning_backend_report,
     )
     output_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -264,6 +348,69 @@ def main(argv: list[str] | None = None) -> int:
                 "iris_region_report": iris_region_report is not None,
                 "iris_region_status": iris_region_report.status if iris_region_report is not None else None,
                 "iris_region_count": iris_region_report.region_count if iris_region_report is not None else 0,
+                "convex_region_backend": convex_region_sequence_report.backend,
+                "convex_region_count": convex_region_sequence_report.region_count,
+                "gcs_ready": convex_region_sequence_report.gcs_ready,
+                "gcs_ready_reason": convex_region_sequence_report.gcs_ready_reason,
+                "gcs_trajectory_smoke": gcs_trajectory_report is not None,
+                "gcs_trajectory_attempted": (
+                    gcs_trajectory_report.attempted if gcs_trajectory_report is not None else None
+                ),
+                "gcs_trajectory_success": (
+                    gcs_trajectory_report.success if gcs_trajectory_report is not None else None
+                ),
+                "gcs_trajectory_reason": (
+                    gcs_trajectory_report.reason if gcs_trajectory_report is not None else None
+                ),
+                "gcs_geometric_candidate": gcs_candidate_report is not None,
+                "gcs_candidate_available": (
+                    gcs_candidate_report.available if gcs_candidate_report is not None else None
+                ),
+                "gcs_candidate_selected": (
+                    gcs_candidate_report.selected if gcs_candidate_report is not None else None
+                ),
+                "gcs_candidate_fallback_reason": (
+                    gcs_candidate_report.fallback_reason if gcs_candidate_report is not None else None
+                ),
+                "gcs_motion_feasibility": gcs_motion_feasibility_report is not None,
+                "gcs_motion_feasibility_evaluated": (
+                    gcs_motion_feasibility_report.evaluated
+                    if gcs_motion_feasibility_report is not None
+                    else None
+                ),
+                "gcs_motion_feasibility_status": (
+                    gcs_motion_feasibility_report.feasibility_status
+                    if gcs_motion_feasibility_report is not None
+                    else None
+                ),
+                "gcs_motion_feasibility_fallback_reason": (
+                    gcs_motion_feasibility_report.fallback_reason
+                    if gcs_motion_feasibility_report is not None
+                    else None
+                ),
+                "gcs_curvature_constrained_candidate": (
+                    gcs_curvature_constrained_candidate_report is not None
+                ),
+                "gcs_curvature_constrained_available": (
+                    gcs_curvature_constrained_candidate_report.available
+                    if gcs_curvature_constrained_candidate_report is not None
+                    else None
+                ),
+                "gcs_curvature_constrained_selected": (
+                    gcs_curvature_constrained_candidate_report.selected
+                    if gcs_curvature_constrained_candidate_report is not None
+                    else None
+                ),
+                "gcs_curvature_constrained_repair_success": (
+                    gcs_curvature_constrained_candidate_report.repair_success
+                    if gcs_curvature_constrained_candidate_report is not None
+                    else None
+                ),
+                "gcs_curvature_constrained_fallback_reason": (
+                    gcs_curvature_constrained_candidate_report.fallback_reason
+                    if gcs_curvature_constrained_candidate_report is not None
+                    else None
+                ),
                 "constraint_warnings": len(platform_profile.constraint_warnings),
                 "planning_backend": (
                     planning_backend_report.selected_backend if planning_backend_report is not None else ASTAR_BACKEND

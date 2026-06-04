@@ -7,9 +7,21 @@ from pathlib import Path
 import numpy as np
 
 from path_planner.adapters import route_result_to_json_dict
-from path_planner.core import Cell, CostGrid, GridSpec, PlanRequest
-from path_planner.drake_backend import build_workspace_iris_region_report
-from path_planner.postprocess import build_corridor
+from path_planner.core import Cell, CostGrid, GridSpec, PlanDiagnostics, PlanRequest, PlanResult, WorldPoint
+from path_planner.drake_backend import (
+    ConvexRegionSequenceItem,
+    ConvexRegionSequenceReport,
+    GcsTrajectoryReport,
+    IrisRegion,
+    IrisRegionReport,
+    build_convex_region_sequence_report,
+    build_gcs_curvature_constrained_candidate_report,
+    build_gcs_geometric_candidate_report,
+    build_gcs_motion_feasibility_report,
+    build_gcs_trajectory_report,
+    build_workspace_iris_region_report,
+)
+from path_planner.postprocess import build_corridor, run_postprocess
 from path_planner.postprocess.models import CorridorResult, CorridorSection
 from path_planner.search import AStarPlanner
 
@@ -69,6 +81,602 @@ def test_iris_region_report_is_optional_route_json_field():
     assert with_report["reachable"] is True
     assert with_report["iris_region_report"]["backend"] == "workspace_iris"
     assert with_report["iris_region_report"]["region_count"] == len(corridor.sections)
+
+
+def test_convex_region_sequence_fallback_box_covers_astar_path_without_blocked_cells():
+    grid = make_grid(
+        [
+            [True, True, True, True, True],
+            [True, True, True, True, True],
+            [True, True, False, True, True],
+            [True, True, True, True, True],
+            [True, True, True, True, True],
+        ],
+        resolution=1.0,
+    )
+    request = PlanRequest(start=Cell(0, 2), goal=Cell(4, 2))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+
+    report = build_convex_region_sequence_report(grid, plan, corridor)
+    payload = report.to_route_fields()
+
+    assert payload["convex_region_backend"] == "fallback_box"
+    assert payload["convex_region_fallback_used"] is True
+    assert payload["convex_region_count"] > 0
+    assert payload["convex_region_start_contained"] is True
+    assert payload["convex_region_goal_contained"] is True
+    assert payload["convex_region_blocked_cell_violation_count"] == 0
+    assert payload["convex_region_coverage_status"] == "covered"
+    assert payload["gcs_ready"] is True
+    assert payload["gcs_ready_reason"] == "convex_region_sequence_ready"
+    assert (
+        payload["convex_region_adjacent_overlap_count"] + payload["convex_region_portal_count"]
+        >= payload["convex_region_count"] - 1
+    )
+    covered_indices = {
+        index
+        for region in payload["convex_region_sequence"]
+        for index in region["covered_path_indices"]
+    }
+    assert covered_indices == set(range(len(plan.path_cells)))
+    for region in payload["convex_region_sequence"]:
+        assert region["backend"] == "fallback_box"
+        assert region["source"] == "fallback_box"
+        assert region["hpolyhedron"]["A"]
+        assert region["hpolyhedron"]["b"]
+        bounds = region["bounds"]
+        assert not (
+            bounds["min"][0] <= 2 <= bounds["max"][0]
+            and bounds["min"][1] <= 2 <= bounds["max"][1]
+        )
+
+
+def test_convex_region_sequence_can_use_valid_workspace_iris_regions():
+    grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    iris_regions = tuple(_iris_region_for_cell(index, cell, grid) for index, cell in enumerate(plan.path_cells))
+    iris_report = IrisRegionReport(
+        backend="workspace_iris",
+        status="ok",
+        seed_source="astar_path_cells",
+        domain_source="astar_corridor_box",
+        obstacle_source="blocked_cell_box",
+        regions=iris_regions,
+        obstacle_count=0,
+        validation_status="valid",
+        fallback_used=False,
+    )
+
+    report = build_convex_region_sequence_report(grid, plan, corridor, iris_region_report=iris_report)
+    payload = report.to_route_fields()
+
+    assert payload["convex_region_backend"] == "workspace_iris"
+    assert payload["convex_region_fallback_used"] is False
+    assert payload["convex_region_count"] == len(plan.path_cells)
+    assert payload["gcs_ready"] is True
+    assert {region["source"] for region in payload["convex_region_sequence"]} == {"iris"}
+    assert {region["backend"] for region in payload["convex_region_sequence"]} == {"workspace_iris"}
+
+
+def test_convex_region_sequence_is_optional_route_json_field_without_changing_route_semantics():
+    grid = make_grid(np.ones((3, 4), dtype=bool))
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    report = build_convex_region_sequence_report(grid, plan, corridor)
+
+    payload = route_result_to_json_dict(plan, grid.spec, convex_region_sequence_report=report)
+
+    assert payload["schema_version"] == "path-planner-route/v1"
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["convex_region_count"] > 0
+    assert payload["convex_region_sequence"]
+    assert payload["gcs_ready"] is True
+
+
+def test_gcs_trajectory_report_solves_smoke_path_from_convex_region_sequence():
+    grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    convex_report = build_convex_region_sequence_report(grid, plan, corridor)
+
+    report = build_gcs_trajectory_report(grid, convex_report, sample_count=7)
+    payload = report.to_route_fields()
+
+    assert payload["gcs_trajectory_report_schema_version"] == "gcs_trajectory_report/v1"
+    assert payload["gcs_trajectory_attempted"] is True
+    assert payload["gcs_trajectory_success"] is True
+    assert payload["gcs_trajectory_backend"] == "pydrake_gcs"
+    assert payload["gcs_trajectory_reason"] == "gcs_trajectory_solution_found"
+    assert payload["gcs_trajectory_sample_count"] == 7
+    assert payload["gcs_trajectory_collision_count"] == 0
+    assert payload["gcs_trajectory_path_length"] > 0.0
+    assert payload["gcs_trajectory_region_count"] == convex_report.region_count
+    assert len(payload["gcs_trajectory_sampled_points"]) == 7
+
+
+def test_gcs_trajectory_report_classifies_sample_collision():
+    grid = make_grid(
+        [
+            [True, True, True],
+            [True, False, True],
+            [True, True, True],
+        ],
+        resolution=1.0,
+    )
+    convex_report = _unsafe_two_region_report(grid)
+
+    report = build_gcs_trajectory_report(grid, convex_report, sample_count=9)
+    payload = report.to_route_fields()
+
+    assert payload["gcs_trajectory_attempted"] is True
+    assert payload["gcs_trajectory_success"] is False
+    assert payload["gcs_trajectory_reason"] == "sampled_trajectory_collision"
+    assert payload["gcs_trajectory_collision_count"] > 0
+
+
+def test_gcs_trajectory_report_handles_unavailable_pydrake(monkeypatch):
+    import path_planner.drake_backend.gcs_trajectory as gcs_backend
+
+    grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    convex_report = build_convex_region_sequence_report(grid, plan, corridor)
+
+    def unavailable():
+        raise ImportError("simulated missing pydrake")
+
+    monkeypatch.setattr(gcs_backend, "_load_gcs_dependencies", unavailable)
+
+    payload = build_gcs_trajectory_report(grid, convex_report).to_route_fields()
+
+    assert payload["gcs_trajectory_attempted"] is False
+    assert payload["gcs_trajectory_success"] is False
+    assert payload["gcs_trajectory_reason"] == "pydrake_unavailable"
+    assert "simulated missing pydrake" in payload["gcs_trajectory_result_status"]
+
+
+def test_gcs_trajectory_report_classifies_solver_infeasible(monkeypatch):
+    import path_planner.drake_backend.gcs_trajectory as gcs_backend
+
+    grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    convex_report = build_convex_region_sequence_report(grid, plan, corridor)
+
+    def infeasible(*args, **kwargs):
+        raise RuntimeError("solver reported infeasible constraints")
+
+    monkeypatch.setattr(gcs_backend, "_solve_gcs_path", infeasible)
+
+    payload = build_gcs_trajectory_report(grid, convex_report).to_route_fields()
+
+    assert payload["gcs_trajectory_attempted"] is True
+    assert payload["gcs_trajectory_success"] is False
+    assert payload["gcs_trajectory_reason"] == "solver_infeasible"
+    assert "infeasible" in payload["gcs_trajectory_result_status"]
+
+
+def test_gcs_trajectory_report_is_optional_route_json_field_without_changing_route_semantics():
+    grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    convex_report = build_convex_region_sequence_report(grid, plan, corridor)
+    gcs_report = build_gcs_trajectory_report(grid, convex_report, sample_count=5)
+
+    payload = route_result_to_json_dict(
+        plan,
+        grid.spec,
+        convex_region_sequence_report=convex_report,
+        gcs_trajectory_report=gcs_report,
+    )
+
+    assert payload["schema_version"] == "path-planner-route/v1"
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["gcs_trajectory_attempted"] is True
+    assert payload["gcs_trajectory_success"] is True
+    assert payload["gcs_trajectory_sample_count"] == 5
+
+
+def test_gcs_geometric_candidate_selects_lower_cost_collision_free_sampled_path():
+    grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [10.0, 10.0, 10.0, 10.0],
+        ]
+    )
+    plan = _plan_from_cells(grid, (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2)), total_cost=40.0)
+    postprocess = run_postprocess(grid, plan)
+    gcs_report = _gcs_report_from_points(
+        (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5), WorldPoint(3.5, 0.5))
+    )
+
+    report = build_gcs_geometric_candidate_report(grid, plan, postprocess, gcs_report)
+    payload = report.to_route_fields()
+
+    assert payload["gcs_candidate_report_schema_version"] == "gcs_geometric_candidate_report/v1"
+    assert payload["gcs_candidate_attempted"] is True
+    assert payload["gcs_candidate_available"] is True
+    assert payload["gcs_candidate_selected"] is True
+    assert payload["gcs_candidate_selection_reason"] == "gcs_candidate_quality_improved"
+    assert payload["gcs_candidate_fallback_reason"] is None
+    assert payload["gcs_candidate_collision_count"] == 0
+    assert payload["gcs_candidate_path_cost"] < plan.total_cost
+    assert payload["gcs_candidate_cost_delta_vs_baseline"] < 0.0
+    assert payload["gcs_candidate_baseline_overlap_ratio"] == 0.0
+
+
+def test_gcs_geometric_candidate_reports_cost_dominated_path_without_replacing_route():
+    grid = _candidate_grid(
+        [
+            [10.0, 10.0, 10.0, 10.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    plan = _plan_from_cells(grid, (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2)), total_cost=4.0)
+    postprocess = run_postprocess(grid, plan)
+    gcs_report = _gcs_report_from_points(
+        (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5), WorldPoint(3.5, 0.5))
+    )
+
+    payload = build_gcs_geometric_candidate_report(grid, plan, postprocess, gcs_report).to_route_fields()
+
+    assert payload["gcs_candidate_attempted"] is True
+    assert payload["gcs_candidate_available"] is True
+    assert payload["gcs_candidate_selected"] is False
+    assert payload["gcs_candidate_fallback_reason"] == "cost_dominated"
+    assert payload["gcs_candidate_cost_delta_vs_baseline"] > 0.0
+
+
+def test_gcs_geometric_candidate_reports_duplicate_baseline_path():
+    grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    path_cells = (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2))
+    plan = _plan_from_cells(grid, path_cells, total_cost=4.0)
+    postprocess = run_postprocess(grid, plan)
+    gcs_report = _gcs_report_from_points(tuple(_cell_center(grid, cell) for cell in path_cells))
+
+    payload = build_gcs_geometric_candidate_report(grid, plan, postprocess, gcs_report).to_route_fields()
+
+    assert payload["gcs_candidate_available"] is True
+    assert payload["gcs_candidate_selected"] is False
+    assert payload["gcs_candidate_fallback_reason"] == "path_duplicate_with_baseline"
+    assert payload["gcs_candidate_baseline_overlap_ratio"] == 1.0
+
+
+def test_gcs_geometric_candidate_rechecks_sampled_path_collision():
+    grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ],
+        blocked=(Cell(1, 0),),
+    )
+    plan = _plan_from_cells(grid, (Cell(0, 2), Cell(1, 2), Cell(2, 2)), total_cost=3.0)
+    postprocess = run_postprocess(grid, plan)
+    gcs_report = _gcs_report_from_points((WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5)))
+
+    payload = build_gcs_geometric_candidate_report(grid, plan, postprocess, gcs_report).to_route_fields()
+
+    assert payload["gcs_candidate_attempted"] is True
+    assert payload["gcs_candidate_available"] is False
+    assert payload["gcs_candidate_selected"] is False
+    assert payload["gcs_candidate_fallback_reason"] == "sampled_trajectory_collision"
+    assert payload["gcs_candidate_collision_count"] == 1
+
+
+def test_gcs_geometric_candidate_classifies_missing_and_failed_gcs_reports():
+    grid = _candidate_grid([[1.0, 1.0], [1.0, 1.0]])
+    plan = _plan_from_cells(grid, (Cell(0, 1), Cell(1, 1)), total_cost=2.0)
+    postprocess = run_postprocess(grid, plan)
+    failed_gcs = GcsTrajectoryReport(
+        attempted=True,
+        success=False,
+        backend="pydrake_gcs",
+        result_status="solver failed",
+        reason="solver_failed",
+        sample_count=0,
+        collision_count=0,
+        path_length=0.0,
+        region_count=2,
+    )
+
+    missing = build_gcs_geometric_candidate_report(grid, plan, postprocess, None).to_route_fields()
+    failed = build_gcs_geometric_candidate_report(grid, plan, postprocess, failed_gcs).to_route_fields()
+
+    assert missing["gcs_candidate_attempted"] is True
+    assert missing["gcs_candidate_available"] is False
+    assert missing["gcs_candidate_fallback_reason"] == "gcs_report_missing"
+    assert failed["gcs_candidate_available"] is False
+    assert failed["gcs_candidate_fallback_reason"] == "gcs_trajectory_failed"
+
+
+def test_gcs_motion_feasibility_report_classifies_curvature_bounded_sampled_path():
+    gcs_report = _gcs_report_from_points(
+        (
+            WorldPoint(0.5, 0.5),
+            WorldPoint(1.5, 0.5),
+            WorldPoint(2.5, 0.5),
+            WorldPoint(3.5, 0.5),
+        )
+    )
+
+    payload = build_gcs_motion_feasibility_report(
+        gcs_report,
+        min_turning_radius_m=0.5,
+        max_heading_change_deg=45.0,
+    ).to_route_fields()
+
+    assert payload["gcs_motion_feasibility_report_schema_version"] == "gcs_motion_feasibility_report/v1"
+    assert payload["gcs_motion_feasibility_evaluated"] is True
+    assert payload["gcs_motion_feasibility_trajectory_source"] == "gcs_trajectory_sampled_points"
+    assert payload["gcs_motion_feasibility_motion_model"] == "curvature_bounded"
+    assert payload["gcs_motion_feasibility_feasibility_status"] == "feasible"
+    assert payload["gcs_motion_feasibility_fallback_reason"] is None
+    assert payload["gcs_motion_feasibility_min_turning_radius_m"] == 0.5
+    assert payload["gcs_motion_feasibility_max_heading_change_deg"] == 45.0
+    assert payload["gcs_motion_feasibility_curvature_violation_count"] == 0
+    assert payload["gcs_motion_feasibility_heading_violation_count"] == 0
+    assert payload["gcs_motion_feasibility_violation_indices"] == []
+    assert payload["gcs_motion_feasibility_sample_count"] == 4
+    assert payload["gcs_motion_feasibility_path_length"] > 0.0
+    assert payload["gcs_motion_feasibility_constraint_summary"]["motion_model"] == "curvature_bounded"
+
+
+def test_gcs_motion_feasibility_report_splits_heading_and_curvature_violations():
+    gcs_report = _gcs_report_from_points(
+        (
+            WorldPoint(0.5, 0.5),
+            WorldPoint(1.5, 0.5),
+            WorldPoint(1.5, 1.5),
+            WorldPoint(1.5, 2.5),
+        )
+    )
+
+    payload = build_gcs_motion_feasibility_report(
+        gcs_report,
+        min_turning_radius_m=5.0,
+        max_heading_change_deg=30.0,
+    ).to_route_fields()
+
+    assert payload["gcs_motion_feasibility_evaluated"] is True
+    assert payload["gcs_motion_feasibility_feasibility_status"] == "infeasible"
+    assert payload["gcs_motion_feasibility_fallback_reason"] == "motion_constraint_violation"
+    assert payload["gcs_motion_feasibility_curvature_violation_count"] > 0
+    assert payload["gcs_motion_feasibility_heading_violation_count"] > 0
+    assert 1 in payload["gcs_motion_feasibility_violation_indices"]
+    assert payload["gcs_motion_feasibility_constraint_summary"]["max_observed_heading_change_deg"] >= 90.0
+
+
+def test_gcs_motion_feasibility_report_classifies_missing_failed_and_short_gcs_reports():
+    failed_gcs = GcsTrajectoryReport(
+        attempted=True,
+        success=False,
+        backend="pydrake_gcs",
+        result_status="solver failed",
+        reason="solver_failed",
+        sample_count=0,
+        collision_count=0,
+        path_length=0.0,
+        region_count=2,
+    )
+    short_gcs = _gcs_report_from_points((WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5)))
+
+    missing = build_gcs_motion_feasibility_report(None).to_route_fields()
+    failed = build_gcs_motion_feasibility_report(failed_gcs).to_route_fields()
+    short = build_gcs_motion_feasibility_report(short_gcs).to_route_fields()
+
+    assert missing["gcs_motion_feasibility_evaluated"] is False
+    assert missing["gcs_motion_feasibility_feasibility_status"] == "diagnostic_only"
+    assert missing["gcs_motion_feasibility_fallback_reason"] == "gcs_report_missing"
+    assert failed["gcs_motion_feasibility_evaluated"] is False
+    assert failed["gcs_motion_feasibility_fallback_reason"] == "gcs_trajectory_failed"
+    assert short["gcs_motion_feasibility_evaluated"] is False
+    assert short["gcs_motion_feasibility_fallback_reason"] == "insufficient_samples"
+
+
+def test_gcs_motion_feasibility_report_is_optional_route_json_field_without_changing_route_semantics():
+    grid = _candidate_grid([[1.0, 1.0, 1.0], [10.0, 10.0, 10.0]])
+    plan = _plan_from_cells(grid, (Cell(0, 1), Cell(1, 1), Cell(2, 1)), total_cost=30.0)
+    gcs_report = _gcs_report_from_points(
+        (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5))
+    )
+    motion_report = build_gcs_motion_feasibility_report(
+        gcs_report,
+        min_turning_radius_m=0.5,
+        max_heading_change_deg=45.0,
+    )
+
+    payload = route_result_to_json_dict(
+        plan,
+        grid.spec,
+        gcs_trajectory_report=gcs_report,
+        gcs_motion_feasibility_report=motion_report,
+    )
+
+    assert payload["schema_version"] == "path-planner-route/v1"
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["gcs_motion_feasibility_report_schema_version"] == "gcs_motion_feasibility_report/v1"
+    assert payload["gcs_motion_feasibility_feasibility_status"] == "feasible"
+
+
+def test_gcs_curvature_constrained_candidate_repairs_curvature_violation_within_regions():
+    grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ]
+    )
+    plan = _plan_from_cells(grid, (Cell(0, 0), Cell(1, 0), Cell(1, 1), Cell(1, 2)), total_cost=4.0)
+    convex_report = _wide_convex_region_report(grid)
+    gcs_report = _gcs_report_from_points(
+        (
+            WorldPoint(0.5, 0.5),
+            WorldPoint(1.5, 0.5),
+            WorldPoint(1.5, 1.5),
+            WorldPoint(1.5, 2.5),
+        )
+    )
+    motion_report = build_gcs_motion_feasibility_report(
+        gcs_report,
+        max_curvature=1.0,
+        max_heading_change_deg=120.0,
+    )
+
+    payload = build_gcs_curvature_constrained_candidate_report(
+        grid,
+        plan,
+        convex_report,
+        gcs_report,
+        motion_report,
+        max_curvature=1.0,
+        max_heading_change_deg=120.0,
+    ).to_route_fields()
+
+    assert payload["gcs_curvature_constrained_report_schema_version"] == (
+        "gcs_curvature_constrained_candidate_report/v1"
+    )
+    assert payload["gcs_curvature_constrained_attempted"] is True
+    assert payload["gcs_curvature_constrained_available"] is True
+    assert payload["gcs_curvature_constrained_selected"] is True
+    assert payload["gcs_curvature_constrained_repair_success"] is True
+    assert payload["gcs_curvature_constrained_repair_strategy"] == "moving_average_smoothing"
+    assert payload["gcs_curvature_constrained_fallback_reason"] is None
+    assert payload["gcs_curvature_constrained_status_before"] == "infeasible"
+    assert payload["gcs_curvature_constrained_status_after"] == "feasible"
+    assert payload["gcs_curvature_constrained_curvature_violation_count_before"] > 0
+    assert payload["gcs_curvature_constrained_curvature_violation_count_after"] == 0
+    assert payload["gcs_curvature_constrained_heading_violation_count_after"] == 0
+    assert payload["gcs_curvature_constrained_collision_count"] == 0
+    assert payload["gcs_curvature_constrained_region_containment_violation_count"] == 0
+    assert payload["gcs_curvature_constrained_path_length"] > 0.0
+    assert payload["gcs_curvature_constrained_path_cost"] > 0.0
+    assert payload["gcs_curvature_constrained_cost_delta_vs_baseline"] is not None
+    assert payload["gcs_curvature_constrained_constraint_summary"]["max_curvature"] == 1.0
+    assert payload["gcs_curvature_constrained_constraint_summary"]["repair_passes"] > 0
+
+
+def test_gcs_curvature_constrained_candidate_rechecks_repaired_path_collision():
+    grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ],
+        blocked=(Cell(1, 1),),
+    )
+    plan = _plan_from_cells(grid, (Cell(0, 0), Cell(1, 0), Cell(1, 1), Cell(1, 2)), total_cost=4.0)
+    convex_report = _wide_convex_region_report(grid)
+    gcs_report = _gcs_report_from_points(
+        (
+            WorldPoint(0.5, 0.5),
+            WorldPoint(1.5, 0.5),
+            WorldPoint(1.5, 1.5),
+            WorldPoint(1.5, 2.5),
+        )
+    )
+    motion_report = build_gcs_motion_feasibility_report(gcs_report, max_curvature=1.0)
+
+    payload = build_gcs_curvature_constrained_candidate_report(
+        grid,
+        plan,
+        convex_report,
+        gcs_report,
+        motion_report,
+        max_curvature=1.0,
+    ).to_route_fields()
+
+    assert payload["gcs_curvature_constrained_attempted"] is True
+    assert payload["gcs_curvature_constrained_available"] is False
+    assert payload["gcs_curvature_constrained_selected"] is False
+    assert payload["gcs_curvature_constrained_repair_success"] is False
+    assert payload["gcs_curvature_constrained_fallback_reason"] == "candidate_collision"
+    assert payload["gcs_curvature_constrained_collision_count"] > 0
+
+
+def test_gcs_curvature_constrained_candidate_is_optional_route_json_field_without_changing_route_semantics():
+    grid = _candidate_grid([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]])
+    plan = _plan_from_cells(grid, (Cell(0, 0), Cell(1, 0), Cell(1, 1), Cell(1, 2)), total_cost=4.0)
+    convex_report = _wide_convex_region_report(grid)
+    gcs_report = _gcs_report_from_points(
+        (
+            WorldPoint(0.5, 0.5),
+            WorldPoint(1.5, 0.5),
+            WorldPoint(1.5, 1.5),
+            WorldPoint(1.5, 2.5),
+        )
+    )
+    motion_report = build_gcs_motion_feasibility_report(gcs_report, max_curvature=1.0)
+    constrained_report = build_gcs_curvature_constrained_candidate_report(
+        grid,
+        plan,
+        convex_report,
+        gcs_report,
+        motion_report,
+        max_curvature=1.0,
+    )
+
+    payload = route_result_to_json_dict(
+        plan,
+        grid.spec,
+        convex_region_sequence_report=convex_report,
+        gcs_trajectory_report=gcs_report,
+        gcs_motion_feasibility_report=motion_report,
+        gcs_curvature_constrained_candidate_report=constrained_report,
+    )
+
+    assert payload["schema_version"] == "path-planner-route/v1"
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["geometric_path"]["cells"] == [[0, 0], [1, 0], [1, 1], [1, 2]]
+    assert payload["gcs_curvature_constrained_report_schema_version"] == (
+        "gcs_curvature_constrained_candidate_report/v1"
+    )
+    assert payload["gcs_curvature_constrained_available"] is True
+    assert payload["gcs_curvature_constrained_selected"] is True
+
+
+def test_gcs_geometric_candidate_is_optional_route_json_field_without_changing_route_semantics():
+    grid = _candidate_grid([[1.0, 1.0, 1.0], [10.0, 10.0, 10.0]])
+    plan = _plan_from_cells(grid, (Cell(0, 1), Cell(1, 1), Cell(2, 1)), total_cost=30.0)
+    postprocess = run_postprocess(grid, plan)
+    gcs_report = _gcs_report_from_points((WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5)))
+    candidate_report = build_gcs_geometric_candidate_report(grid, plan, postprocess, gcs_report)
+
+    payload = route_result_to_json_dict(
+        plan,
+        grid.spec,
+        postprocess=postprocess,
+        gcs_trajectory_report=gcs_report,
+        gcs_candidate_report=candidate_report,
+    )
+
+    assert payload["schema_version"] == "path-planner-route/v1"
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["geometric_path"]["cells"] == [[0, 1], [1, 1], [2, 1]]
+    assert payload["gcs_candidate_available"] is True
+    assert payload["gcs_candidate_selected"] is True
+    assert payload["gcs_candidate_path_cost"] < payload["path_cost"]
 
 
 def test_workspace_iris_cell_bounds_do_not_hide_unsafe_cells(monkeypatch):
@@ -173,6 +781,11 @@ def test_cli_drake_iris_regions_writes_optional_report_without_changing_route_se
     assert report["backend"] == "workspace_iris"
     assert report["status"] in {"ok", "fallback"}
     assert report["region_count"] > 0
+    assert payload["convex_region_count"] > 0
+    assert payload["convex_region_sequence"]
+    assert payload["convex_region_backend"] in {"workspace_iris", "fallback_box"}
+    assert payload["convex_region_blocked_cell_violation_count"] == 0
+    assert payload["gcs_ready"] is True
     assert report["seed_source"] == "postprocess_corridor_centers"
     assert report["obstacle_source"] in {"blocked_cell_box", "merged_blocked_rectangle"}
     assert graph_report["quality_metrics"]["requested_region_source"] == "iris"
@@ -192,6 +805,164 @@ def test_cli_drake_iris_regions_writes_optional_report_without_changing_route_se
     assert "iris_region_status" in completed.stdout
 
 
+def test_cli_gcs_trajectory_smoke_writes_optional_report_without_changing_route_semantics(tmp_path):
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map_corridor.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--drake-iris-regions",
+            "--gcs-trajectory-smoke",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["gcs_ready"] is True
+    assert payload["gcs_trajectory_report_schema_version"] == "gcs_trajectory_report/v1"
+    assert payload["gcs_trajectory_attempted"] is True
+    assert payload["gcs_trajectory_success"] is True
+    assert payload["gcs_trajectory_collision_count"] == 0
+    assert payload["gcs_trajectory_region_count"] == payload["convex_region_count"]
+    assert "gcs_trajectory_success" in completed.stdout
+
+
+def test_cli_gcs_geometric_candidate_is_opt_in_and_writes_candidate_report(tmp_path):
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map_corridor.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--drake-iris-regions",
+            "--gcs-geometric-candidate",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["gcs_trajectory_report_schema_version"] == "gcs_trajectory_report/v1"
+    assert payload["gcs_candidate_report_schema_version"] == "gcs_geometric_candidate_report/v1"
+    assert payload["gcs_candidate_attempted"] is True
+    assert "gcs_candidate_available" in payload
+    assert "gcs_candidate_selected" in payload
+    assert "gcs_candidate_available" in completed.stdout
+
+
+def test_cli_gcs_motion_feasibility_is_opt_in_and_writes_report(tmp_path):
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map_corridor.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--drake-iris-regions",
+            "--gcs-motion-feasibility",
+            "--max-heading-change-deg",
+            "120",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["gcs_trajectory_report_schema_version"] == "gcs_trajectory_report/v1"
+    assert payload["gcs_motion_feasibility_report_schema_version"] == "gcs_motion_feasibility_report/v1"
+    assert payload["gcs_motion_feasibility_trajectory_source"] == "gcs_trajectory_sampled_points"
+    assert payload["gcs_motion_feasibility_motion_model"] == "curvature_bounded"
+    assert payload["gcs_motion_feasibility_feasibility_status"] in {"feasible", "infeasible"}
+    assert "gcs_motion_feasibility_status" in completed.stdout
+
+
+def test_cli_gcs_curvature_constrained_candidate_is_opt_in_and_writes_report(tmp_path):
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map_corridor.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--drake-iris-regions",
+            "--gcs-curvature-constrained-candidate",
+            "--max-heading-change-deg",
+            "120",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["gcs_trajectory_report_schema_version"] == "gcs_trajectory_report/v1"
+    assert payload["gcs_motion_feasibility_report_schema_version"] == "gcs_motion_feasibility_report/v1"
+    assert payload["gcs_curvature_constrained_report_schema_version"] == (
+        "gcs_curvature_constrained_candidate_report/v1"
+    )
+    assert payload["gcs_curvature_constrained_attempted"] is True
+    assert "gcs_curvature_constrained_selected" in completed.stdout
+
+
 def test_pydrake_imports_are_confined_to_optional_backend_and_drake_tests():
     root = Path(__file__).resolve().parents[1]
     offenders = []
@@ -203,3 +974,155 @@ def test_pydrake_imports_are_confined_to_optional_backend_and_drake_tests():
             if not relative.startswith("src/path_planner/drake_backend/"):
                 offenders.append(relative)
     assert offenders == []
+
+
+def _iris_region_for_cell(region_id, cell, grid):
+    min_world = grid.spec.cell_to_world(cell)
+    max_world = grid.spec.cell_to_world(Cell(cell.x + 1, cell.y + 1))
+    return IrisRegion(
+        region_id=region_id,
+        source="iris",
+        seed_cell=cell,
+        seed_world=grid.spec.cell_to_world(cell),
+        min_cell=cell,
+        max_cell=cell,
+        min_world=min_world,
+        max_world=max_world,
+        domain_min_cell=cell,
+        domain_max_cell=cell,
+        domain_min_world=min_world,
+        domain_max_world=max_world,
+        hpolyhedron_a=((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)),
+        hpolyhedron_b=(max_world.x, -min_world.x, max_world.y, -min_world.y),
+        validation_status="valid",
+    )
+
+
+def _unsafe_two_region_report(grid):
+    min_cell = Cell(0, 1)
+    max_cell = Cell(2, 1)
+    min_world = grid.spec.cell_to_world(min_cell)
+    max_world = grid.spec.cell_to_world(Cell(max_cell.x + 1, max_cell.y + 1))
+    regions = (
+        ConvexRegionSequenceItem(
+            region_id=0,
+            backend="fallback_box",
+            source="fallback_box",
+            seed_cell=Cell(0, 1),
+            seed_world=grid.spec.cell_to_world(Cell(0, 1)),
+            min_cell=min_cell,
+            max_cell=max_cell,
+            min_world=min_world,
+            max_world=max_world,
+            hpolyhedron_a=((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)),
+            hpolyhedron_b=(max_world.x, -min_world.x, max_world.y, -min_world.y),
+            covered_path_indices=(0,),
+        ),
+        ConvexRegionSequenceItem(
+            region_id=1,
+            backend="fallback_box",
+            source="fallback_box",
+            seed_cell=Cell(2, 1),
+            seed_world=grid.spec.cell_to_world(Cell(2, 1)),
+            min_cell=min_cell,
+            max_cell=max_cell,
+            min_world=min_world,
+            max_world=max_world,
+            hpolyhedron_a=((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)),
+            hpolyhedron_b=(max_world.x, -min_world.x, max_world.y, -min_world.y),
+            covered_path_indices=(1,),
+        ),
+    )
+    return ConvexRegionSequenceReport(
+        backend="fallback_box",
+        fallback_used=True,
+        coverage_status="covered",
+        start_contained=True,
+        goal_contained=True,
+        adjacent_overlap_count=1,
+        portal_count=0,
+        blocked_cell_violation_count=0,
+        gcs_ready=True,
+        gcs_ready_reason="convex_region_sequence_ready",
+        regions=regions,
+        pydrake_available=True,
+    )
+
+
+def _wide_convex_region_report(grid):
+    min_cell = Cell(0, 0)
+    max_cell = Cell(grid.spec.width - 1, grid.spec.height - 1)
+    min_world = grid.spec.cell_to_world(min_cell)
+    max_world = grid.spec.cell_to_world(Cell(max_cell.x + 1, max_cell.y + 1))
+    region = ConvexRegionSequenceItem(
+        region_id=0,
+        backend="fallback_box",
+        source="fallback_box",
+        seed_cell=min_cell,
+        seed_world=grid.spec.cell_to_world(min_cell),
+        min_cell=min_cell,
+        max_cell=max_cell,
+        min_world=min_world,
+        max_world=max_world,
+        hpolyhedron_a=((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)),
+        hpolyhedron_b=(max_world.x, -min_world.x, max_world.y, -min_world.y),
+        covered_path_indices=(0,),
+    )
+    return ConvexRegionSequenceReport(
+        backend="fallback_box",
+        fallback_used=True,
+        coverage_status="covered",
+        start_contained=True,
+        goal_contained=True,
+        adjacent_overlap_count=0,
+        portal_count=0,
+        blocked_cell_violation_count=0,
+        gcs_ready=True,
+        gcs_ready_reason="convex_region_sequence_ready",
+        regions=(region,),
+        pydrake_available=True,
+    )
+
+
+def _candidate_grid(cost_rows, *, blocked=()):
+    cost = np.asarray(cost_rows, dtype=float)
+    passable = np.ones(cost.shape, dtype=bool)
+    for cell in blocked:
+        passable[cell.y, cell.x] = False
+    return CostGrid(
+        spec=GridSpec(width=cost.shape[1], height=cost.shape[0], resolution=1.0),
+        cost=cost,
+        passable_mask=passable,
+    )
+
+
+def _plan_from_cells(grid, cells, *, total_cost):
+    world = tuple(_cell_center(grid, cell) for cell in cells)
+    return PlanResult(
+        success=True,
+        path_cells=tuple(cells),
+        path_world=world,
+        total_cost=float(total_cost),
+        expanded_count=len(cells),
+        failure_reason=None,
+        diagnostics=PlanDiagnostics(path_length_m=float(max(len(cells) - 1, 0))),
+    )
+
+
+def _cell_center(grid, cell):
+    return WorldPoint(cell.x + 0.5, cell.y + 0.5)
+
+
+def _gcs_report_from_points(points):
+    return GcsTrajectoryReport(
+        attempted=True,
+        success=True,
+        backend="pydrake_gcs",
+        result_status="SolutionResult.kSolutionFound",
+        reason="gcs_trajectory_solution_found",
+        sample_count=len(points),
+        collision_count=0,
+        path_length=float(max(len(points) - 1, 0)),
+        region_count=2,
+        sampled_points=tuple(points),
+    )

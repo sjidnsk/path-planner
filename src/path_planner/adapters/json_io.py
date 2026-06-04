@@ -13,7 +13,14 @@ from path_planner.regions import RegionGraphReport
 from path_planner.tracking import TrackingSimulationResult
 
 if TYPE_CHECKING:
-    from path_planner.drake_backend import IrisRegionReport
+    from path_planner.drake_backend import (
+        ConvexRegionSequenceReport,
+        GcsCurvatureConstrainedCandidateReport,
+        GcsGeometricCandidateReport,
+        GcsMotionFeasibilityReport,
+        GcsTrajectoryReport,
+        IrisRegionReport,
+    )
 
 REQUEST_SCHEMA_VERSION = "path-planner-request/v1"
 
@@ -55,6 +62,11 @@ def route_result_to_json_dict(
     optimized_tracking_simulation: TrackingSimulationResult | None = None,
     region_graph_report: RegionGraphReport | None = None,
     iris_region_report: IrisRegionReport | None = None,
+    convex_region_sequence_report: ConvexRegionSequenceReport | None = None,
+    gcs_trajectory_report: GcsTrajectoryReport | None = None,
+    gcs_candidate_report: GcsGeometricCandidateReport | None = None,
+    gcs_motion_feasibility_report: GcsMotionFeasibilityReport | None = None,
+    gcs_curvature_constrained_candidate_report: GcsCurvatureConstrainedCandidateReport | None = None,
     planning_backend_report: Any | None = None,
 ) -> dict[str, Any]:
     payload = result.to_route_dict(spec)
@@ -66,6 +78,16 @@ def route_result_to_json_dict(
         payload["region_graph_report"] = region_graph_report.to_dict()
     if iris_region_report is not None:
         payload["iris_region_report"] = iris_region_report.to_dict()
+    if convex_region_sequence_report is not None:
+        payload.update(convex_region_sequence_report.to_route_fields())
+    if gcs_trajectory_report is not None:
+        payload.update(gcs_trajectory_report.to_route_fields())
+    if gcs_candidate_report is not None:
+        payload.update(gcs_candidate_report.to_route_fields())
+    if gcs_motion_feasibility_report is not None:
+        payload.update(gcs_motion_feasibility_report.to_route_fields())
+    if gcs_curvature_constrained_candidate_report is not None:
+        payload.update(gcs_curvature_constrained_candidate_report.to_route_fields())
     if tracking_simulation is not None:
         payload["tracking_simulation_report"] = tracking_simulation.to_dict()
     if trajectory_optimization is not None:

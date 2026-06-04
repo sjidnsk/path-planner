@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import math
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
-from path_planner.core import Cell, CostGrid, PlanDiagnostics, PlanRequest, PlanResult
+from path_planner.core import Cell, CostGrid, NeighborPolicy, PlanDiagnostics, PlanRequest, PlanResult
 from path_planner.regions import ConvexRegion, RegionEdge, RegionGraphReport
 from path_planner.search.astar import AStarPlanner
 from path_planner.search.planning_grid import PlanningGrid, STANDARD_GRID_ASTAR
@@ -17,6 +17,7 @@ REGION_GRAPH_GUIDED_BACKEND = "region_graph_guided"
 SAMPLED_REGION_PATH_BACKEND = "sampled_region_path"
 SAMPLED_REGION_PATH_REPORT_SCHEMA_VERSION = "sampled_region_path_report/v1"
 TERMINAL_ADJUSTMENT_REPORT_SCHEMA_VERSION = "terminal_adjustment_report/v1"
+REACHABLE_COMPONENT_REPORT_SCHEMA_VERSION = "reachable_component_report/v1"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,10 @@ class SampledRegionPathReport:
     candidate_tracking_proxy: float | None
     baseline_turn_count: int | None
     candidate_turn_count: int | None
+    baseline_path_overlap_ratio: float | None
+    path_duplicate_with_baseline: bool | None
+    benefit_surface_present: bool | None
+    complexity_reason: str | None
     start_goal_anchoring: dict[str, Any] = field(default_factory=dict)
     terminal_adjustment_report: dict[str, Any] = field(default_factory=dict)
     execution_tie_break: dict[str, Any] = field(default_factory=dict)
@@ -89,6 +94,10 @@ class SampledRegionPathReport:
                 "baseline_turn_count": self.baseline_turn_count,
                 "candidate_turn_count": self.candidate_turn_count,
                 "turn_count_delta": _delta_int(self.candidate_turn_count, self.baseline_turn_count),
+                "baseline_path_overlap_ratio": self.baseline_path_overlap_ratio,
+                "path_duplicate_with_baseline": self.path_duplicate_with_baseline,
+                "benefit_surface_present": self.benefit_surface_present,
+                "complexity_reason": self.complexity_reason,
             },
         }
 
@@ -172,12 +181,23 @@ class _RegionPathResolution:
     goal_anchor_region_connected: bool = False
     start_anchor_failure_reason: str | None = None
     goal_anchor_failure_reason: str | None = None
+    anchor_connectivity_closure: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class _TerminalAdjustment:
     request: PlanRequest
     report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ReachableComponents:
+    component_ids: np.ndarray
+    component_count: int
+    component_sizes: dict[int, int]
+    start_component_id: int | None
+    raw_goal_component_id: int | None
+    passable_source: str
 
 
 @dataclass(frozen=True)
@@ -194,6 +214,7 @@ class _SampledCandidate:
     sample_cells: tuple[Cell, ...]
     path_cells: tuple[Cell, ...]
     candidate: PlanResult
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class RegionGraphGuidedPlanner:
@@ -212,11 +233,25 @@ class RegionGraphGuidedPlanner:
         terminal_adjustment = self._terminal_adjustment(grid, request)
         effective_request = terminal_adjustment.request
         region_resolution = self._resolve_region_path(grid, effective_request, region_graph_report)
+        proxy_adjustment = self._proxy_goal_anchor_adjustment(
+            grid,
+            request,
+            region_graph_report,
+            previous_adjustment=terminal_adjustment,
+            previous_resolution=region_resolution,
+        )
+        if proxy_adjustment is not None:
+            terminal_adjustment = proxy_adjustment
+            effective_request = terminal_adjustment.request
+            region_resolution = self._resolve_region_path(grid, effective_request, region_graph_report)
         anchoring = self._anchoring_payload(
             request,
             effective_request,
             region_resolution,
             terminal_adjustment_report=terminal_adjustment.report,
+        )
+        anchoring["reachable_component_report"] = dict(
+            terminal_adjustment.report.get("reachable_component_report", {})
         )
         skeleton, fallback_reason = self._build_skeleton(effective_request, region_resolution)
         fallback_reason = self._terminal_adjusted_fallback_reason(
@@ -356,6 +391,12 @@ class RegionGraphGuidedPlanner:
         request: PlanRequest,
         report: RegionGraphReport,
     ) -> _RegionPathResolution:
+        components = self._reachable_components(grid, request)
+        goal_component_disconnected = (
+            components.start_component_id is not None
+            and components.raw_goal_component_id is not None
+            and components.raw_goal_component_id != components.start_component_id
+        )
         graph = report.graph
         regions: list[Any] = list(graph.regions) if graph is not None else []
         edges: list[RegionEdge] = list(graph.edges) if graph is not None else []
@@ -423,15 +464,32 @@ class RegionGraphGuidedPlanner:
             if (start_anchor_added and region.center_cell == request.start)
             or (goal_anchor_added and region.center_cell == request.goal)
         }
-        edges, anchor_connected = self._connect_anchor_regions(grid, request, tuple(regions), tuple(edges), added_anchor_ids)
+        edges, anchor_connected, anchor_closure = self._connect_anchor_regions(
+            grid,
+            request,
+            tuple(regions),
+            tuple(edges),
+            added_anchor_ids,
+        )
         if start_anchor_added:
             start_anchor_connected = anchor_connected.get(start_candidates[0], False)
             if not start_anchor_connected:
-                start_anchor_failure_reason = "start_anchor_region_unconnected"
+                start_anchor_failure_reason = self._anchor_failure_reason(
+                    "start",
+                    int(start_candidates[0]),
+                    anchor_closure,
+                )
         if goal_anchor_added:
             goal_anchor_connected = anchor_connected.get(goal_candidates[0], False)
             if not goal_anchor_connected:
-                goal_anchor_failure_reason = "goal_anchor_region_unconnected"
+                goal_anchor_failure_reason = self._anchor_failure_reason(
+                    "goal",
+                    int(goal_candidates[0]),
+                    anchor_closure,
+                )
+            if goal_component_disconnected:
+                goal_anchor_connected = False
+                goal_anchor_failure_reason = "anchor_component_disconnected"
 
         region_by_id = {region.region_id: region for region in regions}
         if not start_regions:
@@ -480,10 +538,10 @@ class RegionGraphGuidedPlanner:
                     frontier.append(neighbor)
         if goal_id not in came_from:
             if goal_anchor_added:
-                fallback_reason = "goal_anchor_region_unconnected"
+                fallback_reason = goal_anchor_failure_reason or "goal_anchor_region_unconnected"
                 goal_anchor_failure_reason = fallback_reason
             elif start_anchor_added:
-                fallback_reason = "start_anchor_region_unconnected"
+                fallback_reason = start_anchor_failure_reason or "start_anchor_region_unconnected"
                 start_anchor_failure_reason = fallback_reason
             else:
                 fallback_reason = "region_graph_disconnected"
@@ -502,6 +560,7 @@ class RegionGraphGuidedPlanner:
                 goal_anchor_region_connected=goal_anchor_connected,
                 start_anchor_failure_reason=start_anchor_failure_reason,
                 goal_anchor_failure_reason=goal_anchor_failure_reason,
+                anchor_connectivity_closure=anchor_closure,
             )
 
         ids: list[int] = [goal_id]
@@ -524,6 +583,7 @@ class RegionGraphGuidedPlanner:
             goal_anchor_region_connected=goal_anchor_connected,
             start_anchor_failure_reason=start_anchor_failure_reason,
             goal_anchor_failure_reason=goal_anchor_failure_reason,
+            anchor_connectivity_closure=anchor_closure,
         )
 
     def _run_segments(
@@ -577,11 +637,38 @@ class RegionGraphGuidedPlanner:
                 terminal_adjustment_report=terminal_adjustment_report,
             )
 
-        sample_attempts = self._sample_attempts(grid, request, region_path)
+        component_blocker = self._reachable_component_blocker(terminal_adjustment_report)
+        if component_blocker is not None:
+            component_attempt = self._reachable_component_attempt_payload(
+                terminal_adjustment_report,
+                fallback_reason=component_blocker,
+            )
+            component_rejection = self._reachable_component_rejection_payload(
+                terminal_adjustment_report,
+                fallback_reason=component_blocker,
+            )
+            return None, self._sampled_report(
+                grid,
+                baseline_result,
+                status="fallback",
+                fallback_reason=component_blocker,
+                region_path=region_path,
+                sample_cells=(),
+                path_cells=(),
+                collision_free=False,
+                candidate=None,
+                anchoring=anchoring,
+                terminal_adjustment_report=terminal_adjustment_report,
+                sample_attempts=(component_attempt,),
+                candidate_rankings=(component_rejection,),
+            )
+
+        sample_attempts = self._sample_attempts(grid, request, region_path, anchoring=anchoring)
         candidates, rejected_rankings = self._sampled_candidates(
             grid,
             request,
             region_path=region_path,
+            anchoring=anchoring,
         )
         if not candidates:
             fallback_reason = self._candidate_generation_fallback_reason(rejected_rankings)
@@ -608,7 +695,7 @@ class RegionGraphGuidedPlanner:
                 self._high_cost_exposure(grid, item.candidate.path_cells),
                 self._tracking_proxy(item.candidate.path_cells),
                 item.candidate.diagnostics.path_length_m,
-                0 if item.strategy == "cost_aware_constrained_astar" else 1,
+                self._sampled_candidate_strategy_priority(item.strategy),
                 len(item.sample_cells),
                 item.strategy,
             ),
@@ -681,9 +768,32 @@ class RegionGraphGuidedPlanner:
         request: PlanRequest,
         *,
         region_path: tuple[Any, ...],
+        anchoring: dict[str, Any],
     ) -> tuple[list[_SampledCandidate], list[dict[str, Any]]]:
         candidates: list[_SampledCandidate] = []
         rejected: list[dict[str, Any]] = []
+        bridge_aware, bridge_rejection = self._bridge_aware_constrained_candidate(
+            grid,
+            request,
+            region_path=region_path,
+            anchoring=anchoring,
+        )
+        if bridge_aware is None:
+            if bridge_rejection is not None:
+                rejected.append(bridge_rejection)
+                bridge_corridor, bridge_corridor_rejection = self._bridge_corridor_constrained_candidate(
+                    grid,
+                    request,
+                    region_path=region_path,
+                    anchoring=anchoring,
+                )
+                if bridge_corridor is None:
+                    if bridge_corridor_rejection is not None:
+                        rejected.append(bridge_corridor_rejection)
+                else:
+                    candidates.append(bridge_corridor)
+        else:
+            candidates.append(bridge_aware)
         cost_aware = self._cost_aware_constrained_candidate(grid, request, region_path=region_path)
         if cost_aware is None:
             rejected.append(
@@ -737,6 +847,64 @@ class RegionGraphGuidedPlanner:
                 )
             )
         return candidates, rejected
+
+    def _sampled_candidate_strategy_priority(self, strategy: str) -> int:
+        if strategy == "bridge_corridor_constrained_astar":
+            return 0
+        if strategy == "bridge_aware_constrained_astar":
+            return 1
+        if strategy == "cost_aware_constrained_astar":
+            return 2
+        return 3
+
+    def _reachable_component_blocker(self, terminal_adjustment_report: dict[str, Any]) -> str | None:
+        component = terminal_adjustment_report.get("reachable_component_report")
+        component = component if isinstance(component, dict) else {}
+        reason = component.get("reason")
+        if reason in {
+            "target_component_disconnected",
+            "terminal_adjustment_no_reachable_component",
+            "reachable_terminal_distance_budget_exceeded",
+        }:
+            return str(reason)
+        if component.get("status") == "disconnected":
+            return "target_component_disconnected"
+        return None
+
+    def _reachable_component_attempt_payload(
+        self,
+        terminal_adjustment_report: dict[str, Any],
+        *,
+        fallback_reason: str,
+    ) -> dict[str, Any]:
+        component = terminal_adjustment_report.get("reachable_component_report")
+        component = component if isinstance(component, dict) else {}
+        return {
+            "kind": "reachable_component_check",
+            "strategy": "reachable_component_filter",
+            "status": "blocked",
+            "fallback_reason": fallback_reason,
+            "reachable_component_report": dict(component),
+        }
+
+    def _reachable_component_rejection_payload(
+        self,
+        terminal_adjustment_report: dict[str, Any],
+        *,
+        fallback_reason: str,
+    ) -> dict[str, Any]:
+        component = terminal_adjustment_report.get("reachable_component_report")
+        component = component if isinstance(component, dict) else {}
+        return {
+            "rank": None,
+            "strategy": "reachable_component_filter",
+            "status": "rejected",
+            "fallback_reason": fallback_reason,
+            "sample_count": 0,
+            "sample_cells": [],
+            "edge_transition_count": 0,
+            "reachable_component_report": dict(component),
+        }
 
     def _sample_sequences(
         self,
@@ -837,6 +1005,8 @@ class RegionGraphGuidedPlanner:
         grid: CostGrid | PlanningGrid,
         request: PlanRequest,
         region_path: tuple[Any, ...],
+        *,
+        anchoring: dict[str, Any],
     ) -> tuple[dict[str, Any], ...]:
         attempts: list[dict[str, Any]] = []
         for index, region in enumerate(region_path):
@@ -863,6 +1033,28 @@ class RegionGraphGuidedPlanner:
                     "to_cell": None if pair is None else pair[1].to_list(),
                 }
             )
+        bridge_connector, bridge_rejection = self._bridge_aware_constrained_candidate(
+            grid,
+            request,
+            region_path=region_path,
+            anchoring=anchoring,
+        )
+        bridge_attempt = self._bridge_aware_connector_attempt_payload(bridge_connector, bridge_rejection)
+        if bridge_attempt is not None:
+            attempts.append(bridge_attempt)
+        if bridge_connector is None and bridge_rejection is not None:
+            corridor_connector, corridor_rejection = self._bridge_corridor_constrained_candidate(
+                grid,
+                request,
+                region_path=region_path,
+                anchoring=anchoring,
+            )
+            corridor_attempt = self._bridge_corridor_connector_attempt_payload(
+                corridor_connector,
+                corridor_rejection,
+            )
+            if corridor_attempt is not None:
+                attempts.append(corridor_attempt)
         connector = self._cost_aware_constrained_candidate(grid, request, region_path=region_path)
         attempts.append(
             {
@@ -873,6 +1065,400 @@ class RegionGraphGuidedPlanner:
             }
         )
         return tuple(attempts)
+
+    def _bridge_corridor_connector_attempt_payload(
+        self,
+        connector: _SampledCandidate | None,
+        rejection: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if connector is None and rejection is None:
+            return None
+        if connector is not None:
+            payload = {
+                "kind": "connector_attempt",
+                "strategy": "bridge_corridor_constrained_astar",
+                "status": "available",
+                "path_cell_count": len(connector.path_cells),
+            }
+            payload.update(dict(connector.metadata))
+            return payload
+        assert rejection is not None
+        payload = {
+            "kind": "connector_attempt",
+            "strategy": "bridge_corridor_constrained_astar",
+            "status": "unavailable",
+            "path_cell_count": 0,
+            "fallback_reason": rejection.get("fallback_reason"),
+        }
+        for key, value in rejection.items():
+            if key not in {"rank", "strategy", "status", "sample_count", "sample_cells", "edge_transition_count"}:
+                payload[key] = value
+        return payload
+
+    def _bridge_aware_connector_attempt_payload(
+        self,
+        connector: _SampledCandidate | None,
+        rejection: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if connector is None and rejection is None:
+            return None
+        if connector is not None:
+            payload = {
+                "kind": "connector_attempt",
+                "strategy": "bridge_aware_constrained_astar",
+                "status": "available",
+                "path_cell_count": len(connector.path_cells),
+            }
+            payload.update(dict(connector.metadata))
+            return payload
+        assert rejection is not None
+        payload = {
+            "kind": "connector_attempt",
+            "strategy": "bridge_aware_constrained_astar",
+            "status": "unavailable",
+            "path_cell_count": 0,
+            "fallback_reason": rejection.get("fallback_reason"),
+        }
+        for key, value in rejection.items():
+            if key not in {"rank", "strategy", "status", "sample_count", "sample_cells", "edge_transition_count"}:
+                payload[key] = value
+        return payload
+
+    def _bridge_aware_constrained_candidate(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        *,
+        region_path: tuple[Any, ...],
+        anchoring: dict[str, Any],
+    ) -> tuple[_SampledCandidate | None, dict[str, Any] | None]:
+        mask, metadata = self._bridge_aware_region_sequence_mask(grid, request, region_path, anchoring)
+        if int(metadata.get("bridge_connection_count", 0)) <= 0:
+            return None, None
+        if mask is None:
+            return None, self._bridge_aware_rejection(metadata)
+        constrained_grid = CostGrid(
+            spec=grid.spec,
+            cost=np.array(grid.cost, dtype=float, copy=True),
+            passable_mask=mask,
+        )
+        result = self._planner.plan(
+            constrained_grid,
+            PlanRequest(
+                start=request.start,
+                goal=request.goal,
+                neighbor_policy=request.neighbor_policy,
+                prevent_corner_cutting=request.prevent_corner_cutting,
+                max_iterations=request.max_iterations,
+            ),
+        )
+        if not result.success:
+            failure_metadata = dict(metadata)
+            failure_metadata["fallback_reason"] = self._bridge_aware_connector_failure_reason(metadata)
+            return None, self._bridge_aware_rejection(failure_metadata)
+        candidate = self._candidate_from_sampled_path(grid, request, result.path_cells)
+        return (
+            _SampledCandidate(
+                strategy="bridge_aware_constrained_astar",
+                sample_cells=result.path_cells,
+                path_cells=result.path_cells,
+                candidate=candidate,
+                metadata=metadata,
+            ),
+            None,
+        )
+
+    def _bridge_aware_rejection(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "rank": None,
+            "strategy": "bridge_aware_constrained_astar",
+            "status": "rejected",
+            "fallback_reason": metadata.get("fallback_reason", "bridge_aware_connector_path_unavailable"),
+            "sample_count": 0,
+            "sample_cells": [],
+            "edge_transition_count": 0,
+            **metadata,
+        }
+
+    def _bridge_corridor_constrained_candidate(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        *,
+        region_path: tuple[Any, ...],
+        anchoring: dict[str, Any],
+    ) -> tuple[_SampledCandidate | None, dict[str, Any] | None]:
+        base_mask, metadata = self._bridge_aware_region_sequence_mask(grid, request, region_path, anchoring)
+        if int(metadata.get("bridge_connection_count", 0)) <= 0:
+            return None, None
+        corridor_metadata = self._bridge_corridor_metadata(metadata)
+        if base_mask is None:
+            corridor_metadata["bridge_corridor_failure_reason"] = str(
+                metadata.get("fallback_reason") or "bridge_corridor_blocked"
+            )
+            return None, self._bridge_corridor_rejection(corridor_metadata)
+
+        max_radius = max(1, self._anchor_bridge_max_steps(grid))
+        best_metadata = dict(corridor_metadata)
+        for radius in range(1, max_radius + 1):
+            mask, added_count = self._passable_corridor_expanded_mask(grid, base_mask, radius)
+            result = self._planner.plan(
+                CostGrid(
+                    spec=grid.spec,
+                    cost=np.array(grid.cost, dtype=float, copy=True),
+                    passable_mask=mask,
+                ),
+                PlanRequest(
+                    start=request.start,
+                    goal=request.goal,
+                    neighbor_policy=request.neighbor_policy,
+                    prevent_corner_cutting=request.prevent_corner_cutting,
+                    max_iterations=request.max_iterations,
+                ),
+            )
+            current_metadata = dict(corridor_metadata)
+            current_metadata.update(
+                {
+                    "bridge_corridor_expanded": added_count > 0,
+                    "bridge_corridor_radius_cells": radius,
+                    "bridge_corridor_added_cell_count": added_count,
+                    "bridge_corridor_start_goal_connected": bool(result.success),
+                    "bridge_corridor_failure_reason": None if result.success else "bridge_corridor_budget_exceeded",
+                }
+            )
+            best_metadata = current_metadata
+            if not result.success:
+                continue
+            candidate = self._candidate_from_sampled_path(grid, request, result.path_cells)
+            return (
+                _SampledCandidate(
+                    strategy="bridge_corridor_constrained_astar",
+                    sample_cells=result.path_cells,
+                    path_cells=result.path_cells,
+                    candidate=candidate,
+                    metadata=current_metadata,
+                ),
+                None,
+            )
+
+        best_metadata["bridge_corridor_start_goal_connected"] = False
+        best_metadata["bridge_corridor_failure_reason"] = self._bridge_corridor_failure_reason(
+            grid,
+            request,
+            base_mask,
+            best_metadata,
+        )
+        return None, self._bridge_corridor_rejection(best_metadata)
+
+    def _bridge_corridor_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        result = dict(metadata)
+        result.update(
+            {
+                "bridge_corridor_expanded": False,
+                "bridge_corridor_radius_cells": None,
+                "bridge_corridor_added_cell_count": 0,
+                "bridge_corridor_start_goal_connected": False,
+                "bridge_corridor_failure_reason": None,
+            }
+        )
+        return result
+
+    def _bridge_corridor_rejection(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        reason = metadata.get("bridge_corridor_failure_reason") or "bridge_corridor_budget_exceeded"
+        return {
+            "rank": None,
+            "strategy": "bridge_corridor_constrained_astar",
+            "status": "rejected",
+            "fallback_reason": reason,
+            "sample_count": 0,
+            "sample_cells": [],
+            "edge_transition_count": 0,
+            **metadata,
+        }
+
+    def _passable_corridor_expanded_mask(
+        self,
+        grid: CostGrid | PlanningGrid,
+        base_mask: np.ndarray,
+        radius: int,
+    ) -> tuple[np.ndarray, int]:
+        expanded = np.array(base_mask, dtype=bool, copy=True)
+        source_cells = np.argwhere(base_mask)
+        for y, x in source_cells:
+            min_y = max(0, int(y) - radius)
+            max_y = min(grid.spec.height - 1, int(y) + radius)
+            min_x = max(0, int(x) - radius)
+            max_x = min(grid.spec.width - 1, int(x) + radius)
+            expanded[min_y : max_y + 1, min_x : max_x + 1] = True
+        expanded &= np.asarray(grid.passable_mask, dtype=bool)
+        added_count = int(np.count_nonzero(expanded & ~base_mask))
+        return expanded, added_count
+
+    def _bridge_corridor_failure_reason(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        base_mask: np.ndarray,
+        metadata: dict[str, Any],
+    ) -> str:
+        unconstrained = self._planner.plan(
+            grid,
+            PlanRequest(
+                start=request.start,
+                goal=request.goal,
+                neighbor_policy=request.neighbor_policy,
+                prevent_corner_cutting=request.prevent_corner_cutting,
+                max_iterations=request.max_iterations,
+            ),
+        )
+        if not unconstrained.success:
+            return "bridge_corridor_blocked"
+        radius = metadata.get("bridge_corridor_radius_cells")
+        if isinstance(radius, int) and radius > 0:
+            mask, _ = self._passable_corridor_expanded_mask(grid, base_mask, radius)
+        else:
+            mask = np.array(base_mask, dtype=bool, copy=True)
+        bridge_cells = self._cells_from_payload(metadata.get("bridge_cells", []))
+        if bridge_cells:
+            if not self._mask_connects_any(grid, request.start, bridge_cells, mask, request):
+                return "bridge_corridor_start_bridge_gap"
+            if not self._mask_connects_any(grid, request.goal, bridge_cells, mask, request):
+                return "bridge_corridor_bridge_goal_gap"
+        return "bridge_corridor_budget_exceeded"
+
+    def _mask_connects_any(
+        self,
+        grid: CostGrid | PlanningGrid,
+        start: Cell,
+        goals: tuple[Cell, ...],
+        mask: np.ndarray,
+        request: PlanRequest,
+    ) -> bool:
+        if not grid.spec.in_bounds(start) or not bool(mask[start.y, start.x]):
+            return False
+        for goal in goals:
+            if not grid.spec.in_bounds(goal) or not bool(mask[goal.y, goal.x]):
+                continue
+            result = self._planner.plan(
+                CostGrid(
+                    spec=grid.spec,
+                    cost=np.array(grid.cost, dtype=float, copy=True),
+                    passable_mask=mask,
+                ),
+                PlanRequest(
+                    start=start,
+                    goal=goal,
+                    neighbor_policy=request.neighbor_policy,
+                    prevent_corner_cutting=request.prevent_corner_cutting,
+                    max_iterations=request.max_iterations,
+                ),
+            )
+            if result.success:
+                return True
+        return False
+
+    def _bridge_aware_connector_failure_reason(self, metadata: dict[str, Any]) -> str:
+        if int(metadata.get("bridge_blocked_cell_count", 0)) > 0:
+            return "bridge_aware_connector_bridge_blocked"
+        if int(metadata.get("bridge_out_of_bounds_cell_count", 0)) > 0:
+            return "bridge_aware_connector_mask_excluded"
+        if int(metadata.get("bridge_included_cell_count", 0)) <= 0:
+            return "bridge_aware_connector_mask_excluded"
+        return "bridge_aware_connector_path_unavailable"
+
+    def _bridge_aware_region_sequence_mask(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        region_path: tuple[Any, ...],
+        anchoring: dict[str, Any],
+    ) -> tuple[np.ndarray | None, dict[str, Any]]:
+        bridge_paths = self._bridge_paths_from_anchoring(anchoring)
+        bridge_cells = self._unique_bridge_cells(bridge_paths)
+        metadata: dict[str, Any] = {
+            "bridge_aware": True,
+            "bridge_connection_count": len(bridge_paths),
+            "bridge_cell_count": len(bridge_cells),
+            "bridge_cells": [cell.to_list() for cell in bridge_cells],
+            "bridge_included_cell_count": 0,
+            "bridge_mask_added_cell_count": 0,
+            "bridge_blocked_cell_count": 0,
+            "bridge_out_of_bounds_cell_count": 0,
+        }
+        if not bridge_paths:
+            metadata["fallback_reason"] = "bridge_aware_connector_no_safe_bridge"
+            return None, metadata
+        base_mask = self._region_sequence_mask(grid, region_path)
+        if base_mask is None:
+            metadata["fallback_reason"] = "bridge_aware_connector_region_mask_unavailable"
+            return None, metadata
+        mask = np.array(base_mask, dtype=bool, copy=True)
+        included: list[Cell] = []
+        for cell in bridge_cells:
+            if not grid.spec.in_bounds(cell):
+                metadata["bridge_out_of_bounds_cell_count"] += 1
+                continue
+            if not grid.is_passable(cell):
+                metadata["bridge_blocked_cell_count"] += 1
+                continue
+            if not mask[cell.y, cell.x]:
+                metadata["bridge_mask_added_cell_count"] += 1
+            mask[cell.y, cell.x] = True
+            included.append(cell)
+        metadata["bridge_included_cell_count"] = len(included)
+        metadata["bridge_included_cells"] = [cell.to_list() for cell in included]
+        if not included:
+            metadata["fallback_reason"] = self._bridge_aware_connector_failure_reason(metadata)
+            return None, metadata
+        if grid.spec.in_bounds(request.start) and grid.is_passable(request.start):
+            mask[request.start.y, request.start.x] = True
+        if grid.spec.in_bounds(request.goal) and grid.is_passable(request.goal):
+            mask[request.goal.y, request.goal.x] = True
+        if not np.any(mask):
+            metadata["fallback_reason"] = "bridge_aware_connector_mask_excluded"
+            return None, metadata
+        return mask, metadata
+
+    def _bridge_paths_from_anchoring(self, anchoring: dict[str, Any]) -> tuple[tuple[Cell, ...], ...]:
+        closure = anchoring.get("anchor_connectivity_closure", {}) if isinstance(anchoring, dict) else {}
+        attempts = closure.get("attempts", []) if isinstance(closure, dict) else []
+        paths: list[tuple[Cell, ...]] = []
+        seen: set[tuple[Cell, ...]] = set()
+        for attempt in attempts if isinstance(attempts, list) else []:
+            if not isinstance(attempt, dict):
+                continue
+            if attempt.get("status") != "connected":
+                continue
+            if attempt.get("connection_kind") != "anchor_region_safe_bridge":
+                continue
+            cells = self._cells_from_payload(attempt.get("bridge_cells", []))
+            if not cells or cells in seen:
+                continue
+            seen.add(cells)
+            paths.append(cells)
+        return tuple(paths)
+
+    def _unique_bridge_cells(self, bridge_paths: tuple[tuple[Cell, ...], ...]) -> tuple[Cell, ...]:
+        cells: list[Cell] = []
+        seen: set[Cell] = set()
+        for path in bridge_paths:
+            for cell in path:
+                if cell in seen:
+                    continue
+                seen.add(cell)
+                cells.append(cell)
+        return tuple(cells)
+
+    def _cells_from_payload(self, payload: Any) -> tuple[Cell, ...]:
+        cells: list[Cell] = []
+        for item in payload if isinstance(payload, list) else []:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            try:
+                cells.append(Cell(int(item[0]), int(item[1])))
+            except (TypeError, ValueError):
+                continue
+        return tuple(cells)
 
     def _cost_aware_constrained_candidate(
         self,
@@ -1165,10 +1751,16 @@ class RegionGraphGuidedPlanner:
         baseline: PlanResult,
     ) -> str:
         if report.candidate_path_cost is None:
-            return "sampled_candidate_missing_metrics"
+            return "candidate_missing_metrics"
         if not baseline.success:
             return "sampled_candidate_not_selectable"
+        if report.path_duplicate_with_baseline is True:
+            return "sampled_candidate_path_duplicate"
         if report.candidate_path_cost > baseline.total_cost + self._improvement_epsilon:
+            if self._has_bridge_corridor_connector_attempt(report):
+                return "bridge_corridor_cost_dominated"
+            if self._has_bridge_aware_connector_attempt(report):
+                return "bridge_aware_connector_cost_dominated"
             if self._has_cost_aware_connector_attempt(report):
                 return "region_sequence_cost_dominated"
             return "sampled_candidate_higher_cost"
@@ -1181,13 +1773,39 @@ class RegionGraphGuidedPlanner:
             for delta in (exposure_delta, tracking_delta, turn_count_delta, length_delta)
             if delta is not None
         )
+        if report.complexity_reason == "sampled_candidate_baseline_equivalent":
+            return "sampled_candidate_baseline_equivalent"
         if any(delta > self._improvement_epsilon for delta in quality_deltas):
-            if self._has_cost_aware_connector_attempt(report):
-                return "execution_tie_break_no_alternative"
-            return "sampled_candidate_quality_regression"
-        if self._has_cost_aware_connector_attempt(report):
-            return "execution_tie_break_no_alternative"
-        return "sampled_candidate_equal_cost_no_quality_gain"
+            if self._has_bridge_aware_connector_attempt(report):
+                return "bridge_aware_connector_quality_regression"
+            return "sampled_candidate_no_quality_gain"
+        if report.benefit_surface_present is False:
+            return "fixture_no_benefit_surface"
+        return "sampled_candidate_no_quality_gain"
+
+    def _has_bridge_corridor_connector_attempt(self, report: SampledRegionPathReport) -> bool:
+        for ranking in report.candidate_rankings:
+            if ranking.get("strategy") == "bridge_corridor_constrained_astar":
+                return True
+        for attempt in report.sample_attempts:
+            if (
+                attempt.get("kind") == "connector_attempt"
+                and attempt.get("strategy") == "bridge_corridor_constrained_astar"
+            ):
+                return True
+        return False
+
+    def _has_bridge_aware_connector_attempt(self, report: SampledRegionPathReport) -> bool:
+        for ranking in report.candidate_rankings:
+            if ranking.get("strategy") == "bridge_aware_constrained_astar":
+                return True
+        for attempt in report.sample_attempts:
+            if (
+                attempt.get("kind") == "connector_attempt"
+                and attempt.get("strategy") == "bridge_aware_constrained_astar"
+            ):
+                return True
+        return False
 
     def _has_cost_aware_connector_attempt(self, report: SampledRegionPathReport) -> bool:
         for ranking in report.candidate_rankings:
@@ -1221,40 +1839,62 @@ class RegionGraphGuidedPlanner:
             high_cost_exposure = self._high_cost_exposure(grid, candidate.path_cells)
             tracking_proxy = self._tracking_proxy(candidate.path_cells)
             turn_count = self._turn_count(candidate.path_cells)
+            benefit = self._candidate_benefit_diagnostics(grid, baseline_result, candidate)
             selected = selected_index == index
-            rankings.append(
-                {
-                    "rank": index + 1,
-                    "strategy": item.strategy,
-                    "status": "selected" if selected else "candidate",
-                    "fallback_reason": None,
-                    "selection_reason": (
-                        self._candidate_selection_reason(grid, baseline_result, candidate) if selected else None
-                    ),
-                    "execution_tie_break_reason": self._candidate_execution_tie_break_reason(
-                        grid,
-                        baseline_result,
-                        candidate,
-                    ),
-                    "sample_count": len(item.sample_cells),
-                    "sample_cells": [cell.to_list() for cell in item.sample_cells],
-                    "edge_transition_count": max(len(item.sample_cells) - 1, 0),
-                    "candidate_path_cost": candidate.total_cost,
-                    "candidate_cost_delta": _delta(candidate.total_cost, baseline_cost),
-                    "candidate_path_length_m": candidate.diagnostics.path_length_m,
-                    "path_length_delta_m": _delta(candidate.diagnostics.path_length_m, baseline_length),
-                    "candidate_high_cost_exposure": high_cost_exposure,
-                    "high_cost_exposure_delta": _delta(high_cost_exposure, baseline_exposure),
-                    "candidate_tracking_proxy": tracking_proxy,
-                    "tracking_proxy_delta": _delta(tracking_proxy, baseline_tracking),
-                    "candidate_turn_count": turn_count,
-                    "turn_count_delta": _delta_int(turn_count, baseline_turn_count),
-                }
-            )
+            payload = {
+                "rank": index + 1,
+                "strategy": item.strategy,
+                "status": "selected" if selected else "candidate",
+                "fallback_reason": None,
+                "selection_reason": (
+                    self._candidate_selection_reason(grid, baseline_result, candidate) if selected else None
+                ),
+                "execution_tie_break_reason": self._candidate_execution_tie_break_reason(
+                    grid,
+                    baseline_result,
+                    candidate,
+                ),
+                "sample_count": len(item.sample_cells),
+                "sample_cells": [cell.to_list() for cell in item.sample_cells],
+                "edge_transition_count": max(len(item.sample_cells) - 1, 0),
+                "candidate_path_cost": candidate.total_cost,
+                "candidate_cost_delta": _delta(candidate.total_cost, baseline_cost),
+                "candidate_path_length_m": candidate.diagnostics.path_length_m,
+                "path_length_delta_m": _delta(candidate.diagnostics.path_length_m, baseline_length),
+                "candidate_high_cost_exposure": high_cost_exposure,
+                "high_cost_exposure_delta": _delta(high_cost_exposure, baseline_exposure),
+                "candidate_tracking_proxy": tracking_proxy,
+                "tracking_proxy_delta": _delta(tracking_proxy, baseline_tracking),
+                "candidate_turn_count": turn_count,
+                "turn_count_delta": _delta_int(turn_count, baseline_turn_count),
+                "baseline_path_overlap_ratio": benefit["baseline_path_overlap_ratio"],
+                "path_duplicate_with_baseline": benefit["path_duplicate_with_baseline"],
+                "benefit_surface_present": benefit["benefit_surface_present"],
+                "complexity_reason": benefit["complexity_reason"],
+            }
+            for key, value in item.metadata.items():
+                if key not in payload:
+                    payload[key] = value
+            rankings.append(payload)
         return tuple(rankings)
 
     def _candidate_generation_fallback_reason(self, rankings: list[dict[str, Any]]) -> str:
         reasons = [str(item.get("fallback_reason")) for item in rankings if item.get("fallback_reason")]
+        for reason in reasons:
+            if reason in {
+                "target_component_disconnected",
+                "terminal_adjustment_no_reachable_component",
+                "reachable_terminal_distance_budget_exceeded",
+            }:
+                return reason
+        for reason in reasons:
+            if reason.startswith("bridge_corridor_"):
+                return reason
+        for reason in reasons:
+            if reason.startswith("bridge_aware_connector_"):
+                return reason
+        if any(reason == "constrained_connector_failed" for reason in reasons):
+            return "constrained_connector_failed"
         if any(reason == "sampled_path_collision" for reason in reasons):
             return "sampled_path_collision"
         if any(reason in {"edge_transition_sample_failed", "edge_transition_unavailable"} for reason in reasons):
@@ -1263,11 +1903,268 @@ class RegionGraphGuidedPlanner:
             return reasons[0]
         return "region_sample_unavailable"
 
+    def _reachable_components(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+    ) -> _ReachableComponents:
+        component_ids = np.full(grid.spec.shape, -1, dtype=int)
+        component_sizes: dict[int, int] = {}
+        next_component = 0
+        for y in range(grid.spec.height):
+            for x in range(grid.spec.width):
+                cell = Cell(x, y)
+                if component_ids[y, x] >= 0 or not grid.is_passable(cell):
+                    continue
+                size = 0
+                frontier: deque[Cell] = deque([cell])
+                component_ids[y, x] = next_component
+                while frontier:
+                    current = frontier.popleft()
+                    size += 1
+                    for neighbor in self._component_neighbors(grid, request, current):
+                        if component_ids[neighbor.y, neighbor.x] >= 0:
+                            continue
+                        component_ids[neighbor.y, neighbor.x] = next_component
+                        frontier.append(neighbor)
+                component_sizes[next_component] = size
+                next_component += 1
+        metadata = self._search_metadata(grid)
+        return _ReachableComponents(
+            component_ids=component_ids,
+            component_count=next_component,
+            component_sizes=component_sizes,
+            start_component_id=self._component_id(component_ids, grid, request.start),
+            raw_goal_component_id=self._component_id(component_ids, grid, request.goal),
+            passable_source=str(metadata.get("passable_source") or "unknown"),
+        )
+
+    def _component_neighbors(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        cell: Cell,
+    ) -> tuple[Cell, ...]:
+        deltas = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        if request.neighbor_policy == NeighborPolicy.EIGHT:
+            deltas.extend(((-1, -1), (1, -1), (-1, 1), (1, 1)))
+        neighbors: list[Cell] = []
+        for dx, dy in deltas:
+            neighbor = Cell(cell.x + dx, cell.y + dy)
+            if not grid.spec.in_bounds(neighbor):
+                continue
+            if not self._transition_is_safe(grid, request, cell, neighbor):
+                continue
+            neighbors.append(neighbor)
+        return tuple(neighbors)
+
+    def _component_id(self, component_ids: np.ndarray, grid: CostGrid | PlanningGrid, cell: Cell) -> int | None:
+        if not grid.spec.in_bounds(cell):
+            return None
+        component_id = int(component_ids[cell.y, cell.x])
+        return component_id if component_id >= 0 else None
+
+    def _reachable_component_report(
+        self,
+        grid: CostGrid | PlanningGrid,
+        components: _ReachableComponents,
+        *,
+        raw_goal: Cell,
+        adjusted_goal: Cell,
+    ) -> dict[str, Any]:
+        adjusted_goal_component_id = self._component_id(components.component_ids, grid, adjusted_goal)
+        start_component_id = components.start_component_id
+        raw_goal_component_id = components.raw_goal_component_id
+        if start_component_id is None:
+            status = "unknown"
+            reason = "start_component_unavailable"
+        elif adjusted_goal_component_id == start_component_id:
+            if adjusted_goal != raw_goal and raw_goal_component_id != start_component_id:
+                status = "adjusted_connected"
+                reason = "reachable_component_replacement_selected"
+            else:
+                status = "connected"
+                reason = "target_component_connected"
+        else:
+            status = "disconnected"
+            reason = "target_component_disconnected"
+        return {
+            "schema_version": REACHABLE_COMPONENT_REPORT_SCHEMA_VERSION,
+            "status": status,
+            "reason": reason,
+            "passable_source": components.passable_source,
+            "component_count": components.component_count,
+            "component_sizes": {str(key): value for key, value in sorted(components.component_sizes.items())},
+            "start_component_id": start_component_id,
+            "raw_goal_component_id": raw_goal_component_id,
+            "adjusted_goal_component_id": adjusted_goal_component_id,
+            "start_goal_same_component": (
+                None
+                if start_component_id is None or raw_goal_component_id is None
+                else start_component_id == raw_goal_component_id
+            ),
+            "adjusted_goal_start_component": (
+                None
+                if start_component_id is None or adjusted_goal_component_id is None
+                else start_component_id == adjusted_goal_component_id
+            ),
+        }
+
+    def _goal_rescue_max_radius_cells(self, grid: CostGrid | PlanningGrid) -> int:
+        default_radius = self._terminal_adjustment_max_radius_cells(grid)
+        bridge_radius = self._anchor_bridge_max_steps(grid)
+        return max(default_radius + 1, default_radius * 2, bridge_radius * 2, 1)
+
+    def _reachable_terminal_candidates(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        components: _ReachableComponents,
+        *,
+        max_radius_cells: int,
+        min_radius_exclusive: float = -1.0,
+    ) -> tuple[tuple[float, float, float, int, int, Cell], ...]:
+        if components.start_component_id is None:
+            return ()
+        candidates: list[tuple[float, float, float, int, int, Cell]] = []
+        for y in range(grid.spec.height):
+            for x in range(grid.spec.width):
+                cell = Cell(x, y)
+                if self._component_id(components.component_ids, grid, cell) != components.start_component_id:
+                    continue
+                if isinstance(grid, PlanningGrid) and not bool(grid.original_passable_mask[y, x]):
+                    continue
+                distance_cells = math.hypot(cell.x - request.goal.x, cell.y - request.goal.y)
+                if distance_cells <= min_radius_exclusive or distance_cells > max_radius_cells:
+                    continue
+                candidates.append(
+                    (
+                        distance_cells,
+                        abs(float(cell.y - request.goal.y)),
+                        float(grid.cost_at(cell)),
+                        cell.y,
+                        cell.x,
+                        cell,
+                    )
+                )
+        return tuple(sorted(candidates))
+
+    def _terminal_adjustment_from_rescue(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        base_report: dict[str, Any],
+        components: _ReachableComponents,
+        *,
+        adjusted_goal: Cell,
+        distance_cells: float,
+        candidate_count: int,
+        reason_code: str,
+    ) -> _TerminalAdjustment:
+        component_report = self._reachable_component_report(
+            grid,
+            components,
+            raw_goal=request.goal,
+            adjusted_goal=adjusted_goal,
+        )
+        component_report = dict(component_report)
+        component_report["status"] = "adjusted_connected"
+        component_report["reason"] = reason_code
+        report = dict(base_report)
+        report.update(
+            {
+                "status": "selected",
+                "reason": report.get("reason") or reason_code,
+                "reason_code": reason_code,
+                "target_adjusted": True,
+                "adjusted_goal_cell": adjusted_goal.to_list(),
+                "distance_cells": float(distance_cells),
+                "distance_m": float(distance_cells) * grid.spec.resolution,
+                "rescue_candidate_count": candidate_count,
+                "failure_reason": None,
+                "reachable_terminal_rescue_used": reason_code
+                == "reachable_terminal_selected_by_component_projection",
+                "proxy_goal_anchor_selected": reason_code == "proxy_goal_anchor_selected",
+                "reachable_component_replacement_selected": True,
+                "reachable_component_report": component_report,
+            }
+        )
+        return _TerminalAdjustment(
+            request=PlanRequest(
+                start=request.start,
+                goal=adjusted_goal,
+                neighbor_policy=request.neighbor_policy,
+                prevent_corner_cutting=request.prevent_corner_cutting,
+                max_iterations=request.max_iterations,
+            ),
+            report=report,
+        )
+
+    def _proxy_goal_anchor_adjustment(
+        self,
+        grid: CostGrid | PlanningGrid,
+        original_request: PlanRequest,
+        region_graph_report: RegionGraphReport,
+        *,
+        previous_adjustment: _TerminalAdjustment,
+        previous_resolution: _RegionPathResolution,
+    ) -> _TerminalAdjustment | None:
+        if previous_resolution.fallback_reason != "goal_anchor_safe_bridge_beyond_radius":
+            return None
+        if previous_adjustment.report.get("proxy_goal_anchor_selected") is True:
+            return None
+        components = self._reachable_components(grid, original_request)
+        max_radius = self._goal_rescue_max_radius_cells(grid)
+        candidates = self._reachable_terminal_candidates(
+            grid,
+            original_request,
+            components,
+            max_radius_cells=max_radius,
+            min_radius_exclusive=-1.0,
+        )
+        if not candidates:
+            return None
+        for distance_cells, _, _, _, _, cell in candidates:
+            if cell == original_request.goal:
+                continue
+            proxy_request = PlanRequest(
+                start=original_request.start,
+                goal=cell,
+                neighbor_policy=original_request.neighbor_policy,
+                prevent_corner_cutting=original_request.prevent_corner_cutting,
+                max_iterations=original_request.max_iterations,
+            )
+            proxy_resolution = self._resolve_region_path(grid, proxy_request, region_graph_report)
+            if proxy_resolution.fallback_reason is not None:
+                continue
+            report = dict(previous_adjustment.report)
+            report["reason"] = previous_resolution.fallback_reason
+            report["max_radius_cells"] = previous_adjustment.report.get("max_radius_cells", 0)
+            report["goal_anchor_proxy_source_reason"] = previous_resolution.fallback_reason
+            return self._terminal_adjustment_from_rescue(
+                grid,
+                original_request,
+                report,
+                components,
+                adjusted_goal=cell,
+                distance_cells=distance_cells,
+                candidate_count=len(candidates),
+                reason_code="proxy_goal_anchor_selected",
+            )
+        return None
+
     def _terminal_adjustment(
         self,
         grid: CostGrid | PlanningGrid,
         request: PlanRequest,
     ) -> _TerminalAdjustment:
+        components = self._reachable_components(grid, request)
+        initial_component_report = self._reachable_component_report(
+            grid,
+            components,
+            raw_goal=request.goal,
+            adjusted_goal=request.goal,
+        )
         base_report: dict[str, Any] = {
             "schema_version": TERMINAL_ADJUSTMENT_REPORT_SCHEMA_VERSION,
             "status": "not_required",
@@ -1280,7 +2177,13 @@ class RegionGraphGuidedPlanner:
             "distance_m": None,
             "max_radius_cells": 0,
             "candidate_count": 0,
+            "reachable_candidate_count": 0,
+            "rescue_candidate_count": 0,
             "failure_reason": None,
+            "reachable_terminal_rescue_used": False,
+            "proxy_goal_anchor_selected": False,
+            "reachable_component_replacement_selected": False,
+            "reachable_component_report": initial_component_report,
         }
         if self._endpoint_classification(grid, request.goal, "goal") != "goal_footprint_unsafe":
             return _TerminalAdjustment(request=request, report=base_report)
@@ -1320,8 +2223,51 @@ class RegionGraphGuidedPlanner:
             report["failure_reason"] = "no_footprint_safe_terminal_within_radius"
             return _TerminalAdjustment(request=request, report=report)
 
-        distance_cells, _, _, _, _, adjusted_goal = min(candidates)
+        reachable_candidates = candidates
+        if components.start_component_id is not None:
+            reachable_candidates = [
+                candidate
+                for candidate in candidates
+                if self._component_id(components.component_ids, grid, candidate[-1]) == components.start_component_id
+            ]
+        report["reachable_candidate_count"] = len(reachable_candidates)
+        if not reachable_candidates:
+            rescue_candidates = self._reachable_terminal_candidates(
+                grid,
+                request,
+                components,
+                max_radius_cells=self._goal_rescue_max_radius_cells(grid),
+                min_radius_exclusive=float(max_radius_cells),
+            )
+            if rescue_candidates:
+                distance_cells, _, _, _, _, adjusted_goal = rescue_candidates[0]
+                return self._terminal_adjustment_from_rescue(
+                    grid,
+                    request,
+                    report,
+                    components,
+                    adjusted_goal=adjusted_goal,
+                    distance_cells=distance_cells,
+                    candidate_count=len(rescue_candidates),
+                    reason_code="reachable_terminal_selected_by_component_projection",
+                )
+            report["status"] = "unavailable"
+            report["reason_code"] = "reachable_terminal_distance_budget_exceeded"
+            report["failure_reason"] = "reachable_terminal_distance_budget_exceeded"
+            report["rescue_candidate_count"] = 0
+            component_report = dict(initial_component_report)
+            component_report["reason"] = "reachable_terminal_distance_budget_exceeded"
+            report["reachable_component_report"] = component_report
+            return _TerminalAdjustment(request=request, report=report)
+
+        distance_cells, _, _, _, _, adjusted_goal = min(reachable_candidates)
         distance_m = distance_cells * grid.spec.resolution
+        component_report = self._reachable_component_report(
+            grid,
+            components,
+            raw_goal=request.goal,
+            adjusted_goal=adjusted_goal,
+        )
         report.update(
             {
                 "status": "selected",
@@ -1331,6 +2277,10 @@ class RegionGraphGuidedPlanner:
                 "distance_cells": float(distance_cells),
                 "distance_m": float(distance_m),
                 "failure_reason": None,
+                "reachable_component_replacement_selected": (
+                    component_report.get("reason") == "reachable_component_replacement_selected"
+                ),
+                "reachable_component_report": component_report,
             }
         )
         return _TerminalAdjustment(
@@ -1362,6 +2312,10 @@ class RegionGraphGuidedPlanner:
         reason_code = terminal_adjustment_report.get("reason_code")
         if reason_code == "terminal_adjustment_unavailable":
             return "terminal_adjustment_unavailable"
+        if reason_code == "terminal_adjustment_no_reachable_component":
+            return "terminal_adjustment_no_reachable_component"
+        if reason_code == "reachable_terminal_distance_budget_exceeded":
+            return "reachable_terminal_distance_budget_exceeded"
         return "terminal_adjustment_unsafe"
 
     def _candidate_selection_reason(
@@ -1620,9 +2574,10 @@ class RegionGraphGuidedPlanner:
         regions: tuple[Any, ...],
         edges: tuple[RegionEdge, ...],
         anchor_region_ids: set[int],
-    ) -> tuple[list[RegionEdge], dict[int, bool]]:
+    ) -> tuple[list[RegionEdge], dict[int, bool], dict[str, Any]]:
         result = list(edges)
         connected = {region_id: False for region_id in anchor_region_ids}
+        attempts: list[dict[str, Any]] = []
         existing_pairs = {
             tuple(sorted((int(edge.from_region_id), int(edge.to_region_id))))
             for edge in result
@@ -1631,15 +2586,27 @@ class RegionGraphGuidedPlanner:
         for anchor in regions:
             if int(anchor.region_id) not in anchor_region_ids:
                 continue
+            deferred_bridge_targets: list[Any] = []
             for other in regions:
                 if int(other.region_id) == int(anchor.region_id):
                     continue
                 pair_key = tuple(sorted((int(anchor.region_id), int(other.region_id))))
                 if pair_key in existing_pairs:
                     connected[int(anchor.region_id)] = True
+                    attempts.append(
+                        self._anchor_connection_attempt(
+                            anchor,
+                            other,
+                            status="connected",
+                            reason="existing_edge",
+                            connection_kind="existing_edge",
+                            bridge_path=(),
+                        )
+                    )
                     continue
                 connection_kind = self._anchor_connection_kind(grid, request, anchor, other)
                 if connection_kind is None:
+                    deferred_bridge_targets.append(other)
                     continue
                 result.append(
                     RegionEdge(
@@ -1655,7 +2622,63 @@ class RegionGraphGuidedPlanner:
                 connected[int(anchor.region_id)] = True
                 if int(other.region_id) in connected:
                     connected[int(other.region_id)] = True
-        return result, connected
+                attempts.append(
+                    self._anchor_connection_attempt(
+                        anchor,
+                        other,
+                        status="connected",
+                        reason="direct_connection_found",
+                        connection_kind=connection_kind,
+                        bridge_path=(),
+                    )
+                )
+            if connected.get(int(anchor.region_id), False):
+                continue
+            for other in deferred_bridge_targets:
+                pair_key = tuple(sorted((int(anchor.region_id), int(other.region_id))))
+                if pair_key in existing_pairs:
+                    connected[int(anchor.region_id)] = True
+                    continue
+                bridge = self._anchor_safe_bridge_connection(grid, request, anchor, other)
+                if bridge["status"] != "connected":
+                    attempts.append(
+                        self._anchor_connection_attempt(
+                            anchor,
+                            other,
+                            status=str(bridge["status"]),
+                            reason=str(bridge["reason"]),
+                            connection_kind=None,
+                            bridge_path=(),
+                        )
+                    )
+                    continue
+                connection_kind = str(bridge["connection_kind"])
+                bridge_path = tuple(bridge["bridge_path"])
+                result.append(
+                    RegionEdge(
+                        edge_id=next_edge_id,
+                        source="sampled_connectivity",
+                        from_region_id=int(anchor.region_id),
+                        to_region_id=int(other.region_id),
+                        connection_kind=connection_kind,
+                    )
+                )
+                next_edge_id += 1
+                existing_pairs.add(pair_key)
+                connected[int(anchor.region_id)] = True
+                if int(other.region_id) in connected:
+                    connected[int(other.region_id)] = True
+                attempts.append(
+                    self._anchor_connection_attempt(
+                        anchor,
+                        other,
+                        status="connected",
+                        reason=str(bridge["reason"]),
+                        connection_kind=connection_kind,
+                        bridge_path=bridge_path,
+                    )
+                )
+        return result, connected, self._anchor_connectivity_closure(attempts)
 
     def _anchor_connection_kind(
         self,
@@ -1673,6 +2696,149 @@ class RegionGraphGuidedPlanner:
                 if self._transition_is_safe(grid, request, anchor_cell, other_cell):
                     return "anchor_region_touching"
         return None
+
+    def _anchor_safe_bridge_connection(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PlanRequest,
+        anchor: Any,
+        other: Any,
+    ) -> dict[str, Any]:
+        max_steps = self._anchor_bridge_max_steps(grid)
+        anchor_cells = self._region_passable_cells(grid, anchor)
+        other_cells = self._region_passable_cells(grid, other)
+        if not anchor_cells or not other_cells:
+            return {
+                "status": "unavailable",
+                "reason": "safe_bridge_mask_excluded",
+                "connection_kind": None,
+                "bridge_path": (),
+            }
+        candidate_pairs: list[tuple[float, float, int, int, Cell, Cell]] = []
+        min_distance: float | None = None
+        for anchor_cell in anchor_cells:
+            for other_cell in other_cells:
+                distance = math.hypot(other_cell.x - anchor_cell.x, other_cell.y - anchor_cell.y)
+                min_distance = distance if min_distance is None else min(min_distance, distance)
+                if distance > max_steps:
+                    continue
+                candidate_pairs.append(
+                    (
+                        distance,
+                        grid.cost_at(anchor_cell) + grid.cost_at(other_cell),
+                        anchor_cell.y + other_cell.y,
+                        anchor_cell.x + other_cell.x,
+                        anchor_cell,
+                        other_cell,
+                    )
+                )
+        if not candidate_pairs:
+            return {
+                "status": "unavailable",
+                "reason": "safe_bridge_beyond_radius"
+                if min_distance is not None and min_distance > max_steps
+                else "safe_bridge_path_unavailable",
+                "connection_kind": None,
+                "bridge_path": (),
+            }
+
+        saw_long_path = False
+        saw_blocked_path = False
+        for _, _, _, _, anchor_cell, other_cell in sorted(candidate_pairs)[:16]:
+            result = self._planner.plan(
+                grid,
+                PlanRequest(
+                    start=anchor_cell,
+                    goal=other_cell,
+                    neighbor_policy=request.neighbor_policy,
+                    prevent_corner_cutting=request.prevent_corner_cutting,
+                    max_iterations=request.max_iterations,
+                ),
+            )
+            if not result.success:
+                saw_blocked_path = True
+                continue
+            bridge_steps = max(len(result.path_cells) - 1, 0)
+            if bridge_steps <= max_steps:
+                return {
+                    "status": "connected",
+                    "reason": "safe_bridge_found",
+                    "connection_kind": "anchor_region_safe_bridge",
+                    "bridge_path": result.path_cells,
+                }
+            saw_long_path = True
+        return {
+            "status": "unavailable",
+            "reason": "safe_bridge_beyond_radius"
+            if saw_long_path
+            else "safe_bridge_blocked"
+            if saw_blocked_path
+            else "safe_bridge_path_unavailable",
+            "connection_kind": None,
+            "bridge_path": (),
+        }
+
+    def _anchor_bridge_max_steps(self, grid: CostGrid | PlanningGrid) -> int:
+        if isinstance(grid, PlanningGrid):
+            return max(2, self._terminal_adjustment_max_radius_cells(grid) * 2)
+        return 2
+
+    def _anchor_connection_attempt(
+        self,
+        anchor: Any,
+        other: Any,
+        *,
+        status: str,
+        reason: str,
+        connection_kind: str | None,
+        bridge_path: tuple[Cell, ...],
+    ) -> dict[str, Any]:
+        return {
+            "anchor_region_id": int(anchor.region_id),
+            "target_region_id": int(other.region_id),
+            "status": status,
+            "reason": reason,
+            "connection_kind": connection_kind,
+            "bridge_step_count": max(len(bridge_path) - 1, 0),
+            "bridge_cells": [cell.to_list() for cell in bridge_path],
+        }
+
+    def _anchor_connectivity_closure(self, attempts: list[dict[str, Any]]) -> dict[str, Any]:
+        status_counts = Counter(str(attempt["status"]) for attempt in attempts)
+        reason_counts = Counter(str(attempt["reason"]) for attempt in attempts)
+        connection_kind_counts = Counter(
+            str(attempt["connection_kind"])
+            for attempt in attempts
+            if attempt.get("connection_kind")
+        )
+        return {
+            "schema_version": "anchor-connectivity-closure/v1",
+            "attempt_count": len(attempts),
+            "connected_count": int(status_counts.get("connected", 0)),
+            "status_counts": dict(sorted(status_counts.items())),
+            "reason_counts": dict(sorted(reason_counts.items())),
+            "connection_kind_counts": dict(sorted(connection_kind_counts.items())),
+            "attempts": attempts,
+        }
+
+    def _anchor_failure_reason(
+        self,
+        endpoint: str,
+        anchor_region_id: int,
+        closure: dict[str, Any],
+    ) -> str:
+        attempts = closure.get("attempts", [])
+        for attempt in attempts if isinstance(attempts, list) else []:
+            if int(attempt.get("anchor_region_id", -1)) == anchor_region_id:
+                reason = str(attempt.get("reason"))
+                reason_suffix = {
+                    "safe_bridge_beyond_radius": "safe_bridge_beyond_radius",
+                    "safe_bridge_blocked": "safe_bridge_blocked",
+                    "safe_bridge_mask_excluded": "safe_bridge_mask_excluded",
+                    "safe_bridge_path_unavailable": "safe_bridge_unavailable",
+                }.get(reason, "safe_bridge_unavailable")
+                return f"{endpoint}_anchor_{reason_suffix}"
+        return f"{endpoint}_anchor_region_unconnected"
 
     def _missing_region_reason(self, failure_reason: str | None) -> str:
         reason = (failure_reason or "").lower()
@@ -1709,6 +2875,7 @@ class RegionGraphGuidedPlanner:
             "goal_anchor_region_connected": resolution.goal_anchor_region_connected,
             "start_anchor_failure_reason": resolution.start_anchor_failure_reason,
             "goal_anchor_failure_reason": resolution.goal_anchor_failure_reason,
+            "anchor_connectivity_closure": dict(resolution.anchor_connectivity_closure),
         }
 
     def _sampled_report(
@@ -1734,6 +2901,7 @@ class RegionGraphGuidedPlanner:
         candidate_path_length = candidate.diagnostics.path_length_m if candidate is not None else None
         baseline_turn_count = self._turn_count(baseline_result.path_cells) if baseline_result.success else None
         candidate_turn_count = self._turn_count(candidate.path_cells) if candidate is not None else None
+        benefit = self._candidate_benefit_diagnostics(grid, baseline_result, candidate)
         return SampledRegionPathReport(
             schema_version=SAMPLED_REGION_PATH_REPORT_SCHEMA_VERSION,
             status=status,
@@ -1759,12 +2927,80 @@ class RegionGraphGuidedPlanner:
             candidate_tracking_proxy=self._tracking_proxy(candidate.path_cells) if candidate is not None else None,
             baseline_turn_count=baseline_turn_count,
             candidate_turn_count=candidate_turn_count,
+            baseline_path_overlap_ratio=benefit["baseline_path_overlap_ratio"],
+            path_duplicate_with_baseline=benefit["path_duplicate_with_baseline"],
+            benefit_surface_present=benefit["benefit_surface_present"],
+            complexity_reason=benefit["complexity_reason"],
             start_goal_anchoring=anchoring,
             terminal_adjustment_report=terminal_adjustment_report,
             execution_tie_break=self._execution_tie_break_payload(grid, baseline_result, candidate),
             sample_attempts=sample_attempts,
             candidate_rankings=candidate_rankings,
         )
+
+    def _candidate_benefit_diagnostics(
+        self,
+        grid: CostGrid | PlanningGrid,
+        baseline: PlanResult,
+        candidate: PlanResult | None,
+    ) -> dict[str, Any]:
+        if candidate is None:
+            return {
+                "baseline_path_overlap_ratio": None,
+                "path_duplicate_with_baseline": None,
+                "benefit_surface_present": False,
+                "complexity_reason": "candidate_missing_metrics",
+            }
+        if not baseline.success:
+            return {
+                "baseline_path_overlap_ratio": None,
+                "path_duplicate_with_baseline": False,
+                "benefit_surface_present": True,
+                "complexity_reason": "baseline_unreachable",
+            }
+        overlap_ratio = self._path_overlap_ratio(baseline.path_cells, candidate.path_cells)
+        path_duplicate = candidate.path_cells == baseline.path_cells
+        cost_delta = _delta(candidate.total_cost if math.isfinite(candidate.total_cost) else None, baseline.total_cost)
+        length_delta = _delta(candidate.diagnostics.path_length_m, baseline.diagnostics.path_length_m)
+        exposure_delta = _delta(
+            self._high_cost_exposure(grid, candidate.path_cells),
+            self._high_cost_exposure(grid, baseline.path_cells),
+        )
+        tracking_delta = _delta(self._tracking_proxy(candidate.path_cells), self._tracking_proxy(baseline.path_cells))
+        turn_delta = _delta_int(self._turn_count(candidate.path_cells), self._turn_count(baseline.path_cells))
+        deltas: tuple[float | int | None, ...] = (
+            cost_delta,
+            length_delta,
+            exposure_delta,
+            tracking_delta,
+            turn_delta,
+        )
+        comparable = tuple(delta for delta in deltas if delta is not None)
+        benefit_surface = any(abs(float(delta)) > self._improvement_epsilon for delta in comparable)
+        if cost_delta is None:
+            reason = "candidate_missing_metrics"
+        elif path_duplicate:
+            reason = "sampled_candidate_path_duplicate"
+        elif not benefit_surface:
+            reason = "sampled_candidate_baseline_equivalent"
+        elif any(float(delta) < -self._improvement_epsilon for delta in comparable):
+            reason = "sampled_candidate_has_quality_gain"
+        else:
+            reason = "sampled_candidate_no_quality_gain"
+        return {
+            "baseline_path_overlap_ratio": overlap_ratio,
+            "path_duplicate_with_baseline": path_duplicate,
+            "benefit_surface_present": benefit_surface,
+            "complexity_reason": reason,
+        }
+
+    def _path_overlap_ratio(self, baseline: tuple[Cell, ...], candidate: tuple[Cell, ...]) -> float | None:
+        if not baseline or not candidate:
+            return None
+        baseline_cells = set(baseline)
+        candidate_cells = set(candidate)
+        denominator = max(len(baseline_cells), len(candidate_cells), 1)
+        return float(len(baseline_cells & candidate_cells) / denominator)
 
     def _high_cost_exposure(self, grid: CostGrid | PlanningGrid, path: tuple[Cell, ...]) -> float:
         threshold = 3.0
