@@ -73,7 +73,15 @@ def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     assert "start_goal_connected" in content
     assert "IRIS / Region Graph Summary" in content
     assert "gcs_trajectory_report" in content
-    assert "does not yet implement full GCS graph search, GCS trajectory optimization" in content
+    assert "pydrake_direction_cone_program" in content
+    assert "rho_source_counts" in content
+    assert "candidate_decision" in content
+    assert "quality_gate" in content
+    assert "path_planner.drake_backend.gcs_cli_batch" in content
+    assert "gcs_direction_cone_cli_scenario_batch/v1" in content
+    assert "does not yet implement full GCS graph search" in content
+    assert "Bezier/B-spline GCS trajectory optimization" in content
+    assert "candidate future reports" not in content
 
 
 def test_phase8_drake_documents_exist_and_define_framework_first_scope():

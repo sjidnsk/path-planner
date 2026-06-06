@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from math import hypot
 from typing import Any
 
@@ -19,6 +20,7 @@ from .models import ConvexRegionSequenceItem, ConvexRegionSequenceReport, GcsTra
 
 PYDRAKE_GCS_BACKEND = "pydrake_direction_cone_program"
 DIRECTION_CONE_ENFORCING_BACKEND = "pydrake_mathematical_program"
+FORCE_PYDRAKE_UNAVAILABLE_ENV = "PATH_PLANNER_FORCE_PYDRAKE_UNAVAILABLE"
 
 
 def build_gcs_trajectory_report(
@@ -159,6 +161,8 @@ def _attempted_failure(*, result_status: str, reason: str, region_count: int) ->
 
 
 def _load_gcs_dependencies() -> dict[str, Any]:
+    if os.environ.get(FORCE_PYDRAKE_UNAVAILABLE_ENV):
+        raise ImportError(f"{FORCE_PYDRAKE_UNAVAILABLE_ENV}=1")
     from pydrake.solvers import MathematicalProgram, Solve
 
     return {

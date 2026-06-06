@@ -23,6 +23,7 @@ from path_planner.drake_backend import (
     build_workspace_iris_region_report,
 )
 from path_planner.drake_backend.gcs_diagnostics import build_direction_cone_constraint_summary
+from path_planner.drake_backend.gcs_scenario_matrix import build_gcs_scenario_matrix_summary
 from path_planner.postprocess import build_corridor, run_postprocess
 from path_planner.postprocess.models import CorridorResult, CorridorSection
 from path_planner.search import AStarPlanner
@@ -565,6 +566,175 @@ def test_gcs_geometric_candidate_reports_duplicate_baseline_path():
     assert payload["gcs_candidate_baseline_overlap_ratio"] == 1.0
 
 
+def test_gcs_direction_cone_scenario_matrix_summarizes_expected_outcomes():
+    clean_grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [10.0, 10.0, 10.0, 10.0],
+        ]
+    )
+    collision_grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [10.0, 10.0, 10.0, 10.0],
+        ],
+        blocked=(Cell(1, 0),),
+    )
+    plan = _plan_from_cells(clean_grid, (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2)), total_cost=40.0)
+    postprocess = run_postprocess(clean_grid, plan)
+    selected = build_gcs_geometric_candidate_report(
+        clean_grid,
+        plan,
+        postprocess,
+        _gcs_report_from_points(
+            (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5), WorldPoint(3.5, 0.5))
+        ),
+    ).to_route_fields()
+    expensive_grid = _candidate_grid(
+        [
+            [10.0, 10.0, 10.0, 10.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    cost_dominated_plan = _plan_from_cells(
+        expensive_grid,
+        (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2)),
+        total_cost=4.0,
+    )
+    cost_dominated = build_gcs_geometric_candidate_report(
+        expensive_grid,
+        cost_dominated_plan,
+        run_postprocess(expensive_grid, cost_dominated_plan),
+        _gcs_report_from_points(
+            (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5), WorldPoint(3.5, 0.5))
+        ),
+    ).to_route_fields()
+    duplicate_grid = _candidate_grid(np.ones((3, 4), dtype=float))
+    duplicate_plan = _plan_from_cells(
+        duplicate_grid,
+        (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2)),
+        total_cost=4.0,
+    )
+    duplicate = build_gcs_geometric_candidate_report(
+        duplicate_grid,
+        duplicate_plan,
+        run_postprocess(duplicate_grid, duplicate_plan),
+        _gcs_report_from_points(
+            tuple(_cell_center(duplicate_grid, cell) for cell in (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2)))
+        ),
+    ).to_route_fields()
+    collision = build_gcs_geometric_candidate_report(
+        collision_grid,
+        plan,
+        postprocess,
+        _gcs_report_from_points((WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5))),
+    ).to_route_fields()
+    not_evaluated = build_gcs_geometric_candidate_report(
+        clean_grid,
+        plan,
+        postprocess,
+        _gcs_report_from_points(
+            (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5)),
+            direction_cone_evaluated=False,
+        ),
+    ).to_route_fields()
+    not_enforced = build_gcs_geometric_candidate_report(
+        clean_grid,
+        plan,
+        postprocess,
+        _gcs_report_from_points(
+            (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5)),
+            direction_cone_backend_enforced=False,
+        ),
+    ).to_route_fields()
+    violation = build_gcs_geometric_candidate_report(
+        clean_grid,
+        plan,
+        postprocess,
+        _gcs_report_from_points(
+            (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5)),
+            direction_cone_violation_count=1,
+        ),
+    ).to_route_fields()
+    turn_report = _gcs_report_from_points(
+        (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(1.5, 1.5), WorldPoint(2.5, 1.5))
+    )
+    motion_infeasible = build_gcs_geometric_candidate_report(
+        clean_grid,
+        plan,
+        postprocess,
+        turn_report,
+        build_gcs_motion_feasibility_report(turn_report, min_turning_radius_m=5.0, max_heading_change_deg=30.0),
+    ).to_route_fields()
+    degenerate_portal = {
+        "gcs_trajectory_constraint_summary": build_direction_cone_constraint_summary(
+            (WorldPoint(0.5, 0.5), WorldPoint(1.5, 1.5)),
+            (
+                _convex_region_for_bounds(
+                    clean_grid,
+                    region_id=0,
+                    seed=Cell(0, 0),
+                    min_cell=Cell(0, 0),
+                    max_cell=Cell(0, 0),
+                ),
+                _convex_region_for_bounds(
+                    clean_grid,
+                    region_id=1,
+                    seed=Cell(1, 1),
+                    min_cell=Cell(1, 1),
+                    max_cell=Cell(1, 1),
+                ),
+            ),
+        )
+    }
+    pydrake_unavailable = {
+        "gcs_trajectory_attempted": False,
+        "gcs_trajectory_reason": "pydrake_unavailable",
+        "gcs_trajectory_constraint_summary": _direction_cone_summary(evaluated=False),
+    }
+
+    summary = build_gcs_scenario_matrix_summary(
+        [
+            _scenario_case("open_corridor", selected, "selected", "gcs_candidate_quality_improved"),
+            _scenario_case("cost_dominated", cost_dominated, "blocked", "cost_dominated"),
+            _scenario_case("duplicate_baseline", duplicate, "blocked", "path_duplicate_with_baseline"),
+            _scenario_case("sample_collision", collision, "blocked", "sampled_trajectory_collision"),
+            _scenario_case("direction_cone_not_evaluated", not_evaluated, "blocked", "direction_cone_not_evaluated"),
+            _scenario_case("direction_cone_not_enforced", not_enforced, "blocked", "direction_cone_not_backend_enforced"),
+            _scenario_case("direction_cone_violation", violation, "blocked", "direction_cone_constraint_violation"),
+            _scenario_case("motion_infeasible", motion_infeasible, "blocked", "motion_infeasible"),
+            _scenario_case("degenerate_portal", degenerate_portal, "blocked", "degenerate_portal_width"),
+            _scenario_case("pydrake_unavailable", pydrake_unavailable, "blocked", "pydrake_unavailable"),
+        ]
+    )
+
+    assert summary["schema_version"] == "gcs_direction_cone_scenario_matrix/v1"
+    assert summary["case_count"] == 10
+    assert summary["selected_count"] == 1
+    assert summary["blocked_count"] == 9
+    assert summary["expectation_failures"] == []
+    assert summary["decision_reason_counts"]["gcs_candidate_quality_improved"] == 1
+    assert summary["decision_reason_counts"]["cost_dominated"] == 1
+    assert summary["decision_reason_counts"]["degenerate_portal_width"] == 1
+    assert summary["decision_reason_counts"]["pydrake_unavailable"] == 1
+    case_ids = {case["case_id"] for case in summary["cases"]}
+    assert case_ids == {
+        "open_corridor",
+        "cost_dominated",
+        "duplicate_baseline",
+        "sample_collision",
+        "direction_cone_not_evaluated",
+        "direction_cone_not_enforced",
+        "direction_cone_violation",
+        "motion_infeasible",
+        "degenerate_portal",
+        "pydrake_unavailable",
+    }
+
+
 def test_gcs_geometric_candidate_rechecks_sampled_path_collision():
     grid = _candidate_grid(
         [
@@ -1090,7 +1260,118 @@ def test_cli_gcs_geometric_candidate_is_opt_in_and_writes_candidate_report(tmp_p
     assert payload["gcs_candidate_attempted"] is True
     assert "gcs_candidate_available" in payload
     assert "gcs_candidate_selected" in payload
+    direction_cone = payload["gcs_trajectory_constraint_summary"]
+    cost_summary = payload["gcs_candidate_cost_summary"]
+    assert "rho_source_counts" in direction_cone
+    assert "portal_width_min_m" in direction_cone
+    assert "support_width_min_m" in direction_cone
+    assert "constraint_tightness_min" in direction_cone
+    assert "candidate_decision" in cost_summary
+    assert "decision_reason" in cost_summary
+    assert "quality_gate" in cost_summary
+    if payload["gcs_trajectory_attempted"]:
+        assert direction_cone["backend_enforced"] is True
+        assert direction_cone["rho_source_counts"]
+        assert cost_summary["candidate_decision"] in {"selected", "blocked"}
+    else:
+        assert payload["gcs_trajectory_reason"] == "pydrake_unavailable"
+        assert direction_cone["evaluated"] is False
     assert "gcs_candidate_available" in completed.stdout
+
+
+@pytest.mark.drake
+def test_gcs_cli_scenario_batch_summarizes_route_json_cases(tmp_path):
+    pytest.importorskip("pydrake")
+    from path_planner.drake_backend.gcs_cli_batch import run_gcs_cli_scenario_batch
+
+    output_dir = tmp_path / "batch"
+    summary_json = output_dir / "summary.json"
+
+    summary = run_gcs_cli_scenario_batch(
+        output_dir=output_dir,
+        summary_json=summary_json,
+        python_executable=sys.executable,
+    )
+
+    assert summary_json.exists()
+    persisted = json.loads(summary_json.read_text(encoding="utf-8"))
+    assert persisted == summary
+    assert summary["schema_version"] == "gcs_direction_cone_cli_scenario_batch/v1"
+    assert summary["case_count"] == 7
+    assert summary["selected_count"] == 1
+    assert summary["blocked_count"] == 6
+    assert summary["expectation_failures"] == []
+    assert summary["decision_reason_counts"]["gcs_candidate_quality_improved"] == 1
+    assert summary["decision_reason_counts"]["cost_dominated"] == 1
+    assert summary["decision_reason_counts"]["path_duplicate_with_baseline"] == 1
+    assert summary["decision_reason_counts"]["sampled_trajectory_collision"] == 1
+    assert summary["decision_reason_counts"]["motion_infeasible"] == 1
+    assert summary["decision_reason_counts"]["degenerate_portal_width"] == 1
+    assert summary["decision_reason_counts"]["pydrake_unavailable"] == 1
+    cases = {case["case_id"]: case for case in summary["cases"]}
+    assert set(cases) == {
+        "open_corridor_selected",
+        "cost_dominated_diagonal",
+        "duplicate_baseline",
+        "sampled_trajectory_collision",
+        "motion_infeasible_turn",
+        "degenerate_portal",
+        "pydrake_unavailable",
+    }
+    assert cases["open_corridor_selected"]["outcome"] == "selected"
+    assert cases["open_corridor_selected"]["fallback_reason"] is None
+    assert cases["degenerate_portal"]["fallback_reason"] == "direction_cone_constraint_violation"
+    assert "degenerate_portal_width" in cases["degenerate_portal"]["direction_cone_risk_flags"]
+    for case in summary["cases"]:
+        route_json = output_dir / case["route_json_path"]
+        route = json.loads(route_json.read_text(encoding="utf-8"))
+        assert route["trajectory_kind"] == "geometric_path"
+        assert route["gcs_trajectory_report_schema_version"] == "gcs_trajectory_report/v1"
+        assert route["gcs_candidate_report_schema_version"] == "gcs_geometric_candidate_report/v1"
+        assert "gcs_trajectory_constraint_summary" in route
+        assert "gcs_candidate_cost_summary" in route
+        assert "rho_source_counts" in route["gcs_trajectory_constraint_summary"]
+        assert "candidate_decision" in route["gcs_candidate_cost_summary"]
+        assert "decision_reason" in route["gcs_candidate_cost_summary"]
+        assert "quality_gate" in route["gcs_candidate_cost_summary"]
+
+
+def test_gcs_cli_scenario_batch_cli_forces_pydrake_unavailable_case(tmp_path):
+    summary_json = tmp_path / "summary.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.drake_backend.gcs_cli_batch",
+            "--output-dir",
+            str(tmp_path / "batch"),
+            "--summary-json",
+            str(summary_json),
+            "--case",
+            "pydrake_unavailable",
+        ],
+        check=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        text=True,
+        capture_output=True,
+    )
+
+    summary = json.loads(summary_json.read_text(encoding="utf-8"))
+    assert summary["schema_version"] == "gcs_direction_cone_cli_scenario_batch/v1"
+    assert summary["case_count"] == 1
+    assert summary["selected_count"] == 0
+    assert summary["blocked_count"] == 1
+    assert summary["expectation_failures"] == []
+    case = summary["cases"][0]
+    assert case["case_id"] == "pydrake_unavailable"
+    assert case["outcome"] == "blocked"
+    assert case["decision_reason"] == "pydrake_unavailable"
+    assert case["trajectory_attempted"] is False
+    route = json.loads((tmp_path / "batch" / case["route_json_path"]).read_text(encoding="utf-8"))
+    assert route["gcs_trajectory_attempted"] is False
+    assert route["gcs_trajectory_reason"] == "pydrake_unavailable"
+    assert route["gcs_trajectory_constraint_summary"]["evaluated"] is False
+    assert "pydrake_unavailable" in completed.stdout
 
 
 def test_cli_gcs_motion_feasibility_is_opt_in_and_writes_report(tmp_path):
@@ -1419,4 +1700,15 @@ def _direction_cone_summary(*, evaluated=True, backend_enforced=True, violation_
         ]
         if evaluated
         else [],
+    }
+
+
+def _scenario_case(case_id, payload, expected_outcome, expected_decision_reason):
+    return {
+        "case_id": case_id,
+        "payload": payload,
+        "expected": {
+            "outcome": expected_outcome,
+            "decision_reason": expected_decision_reason,
+        },
     }

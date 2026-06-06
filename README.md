@@ -83,7 +83,9 @@ Phase 8 provides a Drake IRIS/GCS framework prototype:
 - Workspace IRIS diagnostics use `merged_blocked_rectangle` obstacles when that safely reduces obstacle fragmentation, and successful IRIS regions use `postprocess_corridor_safe_component_box` domains while keeping unsafe cells out of serialized region boxes;
 - Phase 8.3 lets `region_graph_report` consume valid IRIS regions as an `iris` graph source and records graph quality metrics and fallback decisions;
 - diagnostics include an IRIS / Region Graph Summary that labels this as a 2D workspace safe-region diagnostic, not a GCS trajectory or vehicle feasibility proof;
-- candidate future reports still include `gcs_trajectory_report`;
+- Phase 8.4 adds an opt-in fixed-sequence `pydrake_direction_cone_program` that emits `gcs_trajectory_report`, `gcs_candidate_report`, `gcs_motion_feasibility_report`, and direction-cone portal/cost diagnostics;
+- GCS direction-cone reports include `rho_source_counts`, `portal_width_min_m`, `support_width_min_m`, `constraint_tightness_min`, `candidate_decision`, `decision_reason`, and `quality_gate` so selected/blocked candidate decisions are machine-readable;
+- `path_planner.drake_backend.gcs_cli_batch` runs a repeatable CLI scenario batch and writes `gcs_direction_cone_cli_scenario_batch/v1` summaries from route JSON evidence;
 - `--optimize-trajectory` continues to mean the current fixed-corridor optimizer until a separate Drake backend switch is implemented;
 - the required fallback chain is Drake unavailable or infeasible -> current optimizer -> postprocess smoothed path -> raw A* path.
 
@@ -95,7 +97,7 @@ Core Algorithm Stage 1 adds an opt-in `region_graph_guided` planning backend:
 - the backend falls back to baseline A* with machine-readable reasons such as `region_graph_disconnected`, `segment_astar_failed`, `region_graph_invalid`, or `region_graph_candidate_not_better`;
 - successful opt-in candidates and fallbacks are recorded in additive `planning_backend_report` diagnostics.
 
-This project does not yet implement full GCS graph search, GCS trajectory optimization, Ackermann trajectory optimization, a production Drake backend, exploration target selection, observation updates, or an online planning service.
+This project does not yet implement full GCS graph search, Bezier/B-spline GCS trajectory optimization, Ackermann trajectory optimization, a production Drake backend, exploration target selection, observation updates, or an online planning service. The current `pydrake_direction_cone_program` is a fixed `convex_region_sequence` MathematicalProgram prototype for 2D geometric candidates and sampled diagnostics.
 
 The planner returns a platform-filtered `geometric_path` plus a trackable-path interface and feasibility diagnostics, not a closed-loop controller command stream.
 
@@ -160,6 +162,13 @@ python -m path_planner.cli --input examples/demo_map_corridor.json --output-json
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --optimize-trajectory
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --optimize-trajectory --resample-spacing-m 0.4
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --drake-iris-regions
+python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --drake-iris-regions --gcs-geometric-candidate
+```
+
+GCS direction-cone CLI batch evidence:
+
+```bash
+python -m path_planner.drake_backend.gcs_cli_batch --output-dir outputs/gcs-cli-batch --summary-json outputs/gcs-cli-batch/summary.json
 ```
 
 Expected outputs:
@@ -167,6 +176,7 @@ Expected outputs:
 - `outputs/demo/route.json`
 - `outputs/demo/diagnostics.png`
 - `outputs/demo/diagnostics.html`
+- `outputs/gcs-cli-batch/summary.json` when the batch runner is used
 
 The route JSON preserves Phase 1 fields and adds a `postprocess` object with
 `platform_profile`, `constraint_warnings`, `corridor_report`, `raw_path`,
@@ -198,6 +208,23 @@ and selected backend, fallback reason, segment count, skeleton cells, candidate
 comparison against baseline A*, and region-graph candidate status. This is an
 additive diagnostic; `path-planner-route/v1` and top-level
 `trajectory_kind=geometric_path` are unchanged.
+When `--gcs-trajectory-smoke`, `--gcs-geometric-candidate`, or
+`--gcs-motion-feasibility` is enabled, the route JSON can include
+`gcs_trajectory_report`, `gcs_candidate_report`, and
+`gcs_motion_feasibility_report` additive fields. The GCS trajectory backend is
+the fixed-sequence `pydrake_direction_cone_program`, not full GCS graph search.
+Its direction-cone summary reports portal/support/rho fields such as
+`rho_source_counts`, `portal_width_min_m`, `support_width_min_m`, and
+`constraint_tightness_min`. Candidate cost summaries report
+`candidate_decision`, `decision_reason`, and `quality_gate` so each replacement
+or blocking decision can be audited from JSON. These reports remain 2D
+geometric candidate diagnostics and do not prove Ackermann feasibility.
+The CLI batch runner generates small request JSON files, invokes
+`path_planner.cli` for each case, and summarizes selected/blocked decisions from
+the resulting route JSON. Its summary schema is
+`gcs_direction_cone_cli_scenario_batch/v1` and covers selected open-corridor,
+cost-dominated, duplicate-baseline, sampled-collision, motion-infeasible,
+degenerate-portal, and pydrake-unavailable cases.
 When `--simulate-tracking` is enabled, the route JSON also includes a top-level
 `tracking_simulation_report` object with `simulated_path`, `config`, `metrics`,
 and `safety_report`.
