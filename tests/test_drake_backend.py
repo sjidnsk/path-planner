@@ -452,6 +452,13 @@ def test_gcs_control_point_report_exposes_terrain_cost_objective_proxy():
     assert cost_summary["control_point_terrain_cost"] > 0.0
     assert cost_summary["sampled_terrain_cost"] == cost_summary["terrain_path_cost"]
     assert cost_summary["terrain_objective_boundary"] == "proxy_not_continuous_field_integral"
+    assert "control_point_high_cost_exposure_proxy_quadratic" not in constraint_summary["objective_terms"]
+    assert "high_cost_exposure_objective_weight" not in cost_summary
+
+
+def test_gcs_control_point_config_rejects_negative_high_cost_exposure_weight():
+    with pytest.raises(ValueError, match="high_cost_exposure_weight must be non-negative"):
+        GcsControlPointSolverConfig(high_cost_exposure_weight=-0.1)
 
 
 @pytest.mark.drake
@@ -476,6 +483,7 @@ def test_gcs_control_point_report_accepts_explicit_calibration_config():
         config=GcsControlPointSolverConfig(
             terrain_objective_weight=0.08,
             second_difference_weight=0.35,
+            high_cost_exposure_weight=0.45,
             direction_cone_max_error_deg=35.0,
             direction_cone_rho_floor_m=0.04,
             direction_cone_seed_rho_ratio=0.08,
@@ -488,8 +496,16 @@ def test_gcs_control_point_report_accepts_explicit_calibration_config():
     assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
     assert constraint_summary["objective_term_weights"]["control_point_terrain_anchor_quadratic"] == 0.08
     assert constraint_summary["objective_term_weights"]["control_point_second_difference_quadratic"] == 0.35
+    assert constraint_summary["objective_term_weights"]["control_point_high_cost_exposure_proxy_quadratic"] == 0.45
+    assert "control_point_high_cost_exposure_proxy_quadratic" in constraint_summary["objective_terms"]
     assert constraint_summary["terrain_objective_weight"] == 0.08
+    assert constraint_summary["high_cost_exposure_objective_weight"] == 0.45
+    assert constraint_summary["high_cost_exposure_proxy_source"] == "region_high_cost_exposure_proxy"
     assert cost_summary["terrain_objective_weight"] == 0.08
+    assert cost_summary["high_cost_exposure_objective_weight"] == 0.45
+    assert cost_summary["high_cost_exposure_proxy_source"] == "region_high_cost_exposure_proxy"
+    assert cost_summary["high_cost_exposure_proxy_cost"] is not None
+    assert cost_summary["high_cost_exposure_proxy_boundary"] == "proxy_not_continuous_field_integral"
     assert constraint_summary["max_allowed_direction_error_deg"] == 35.0
     assert constraint_summary["rho_lower_bound_min_m"] >= 0.04
     assert constraint_summary["parameters"][0]["rho_seed_distance_m"] >= 0.04
@@ -1564,6 +1580,8 @@ def test_cli_gcs_control_point_candidate_forwards_calibration_parameters(tmp_pat
             "0.08",
             "--gcs-control-point-second-difference-weight",
             "0.35",
+            "--gcs-control-point-high-cost-exposure-weight",
+            "0.45",
             "--gcs-control-point-direction-cone-max-error-deg",
             "35",
             "--gcs-control-point-direction-cone-rho-floor-m",
@@ -1584,6 +1602,10 @@ def test_cli_gcs_control_point_candidate_forwards_calibration_parameters(tmp_pat
     assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
     assert constraint_summary["objective_term_weights"]["control_point_terrain_anchor_quadratic"] == 0.08
     assert constraint_summary["objective_term_weights"]["control_point_second_difference_quadratic"] == 0.35
+    assert constraint_summary["objective_term_weights"]["control_point_high_cost_exposure_proxy_quadratic"] == 0.45
+    assert constraint_summary["high_cost_exposure_objective_weight"] == 0.45
+    assert cost_summary["high_cost_exposure_objective_weight"] == 0.45
+    assert cost_summary["high_cost_exposure_proxy_cost"] is not None
     assert constraint_summary["max_allowed_direction_error_deg"] == 35.0
     assert constraint_summary["rho_lower_bound_min_m"] >= 0.04
     assert cost_summary["terrain_objective_weight"] == 0.08

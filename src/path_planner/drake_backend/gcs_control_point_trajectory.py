@@ -43,7 +43,9 @@ SEGMENT_LENGTH_OBJECTIVE_WEIGHT = 1.0
 LOW_COST_ANCHOR_OBJECTIVE_WEIGHT = 0.1
 CONTROL_POINT_TERRAIN_OBJECTIVE_WEIGHT = 0.05
 CONTROL_POINT_SECOND_DIFFERENCE_OBJECTIVE_WEIGHT = 0.2
+CONTROL_POINT_HIGH_COST_EXPOSURE_OBJECTIVE_WEIGHT = 0.0
 CONTROL_POINT_TERRAIN_OBJECTIVE_SOURCE = "region_inverse_cost_weighted_passable_cell_centroid"
+CONTROL_POINT_HIGH_COST_EXPOSURE_OBJECTIVE_SOURCE = "region_high_cost_exposure_proxy"
 CONTROL_POINT_TERRAIN_OBJECTIVE_BOUNDARY = "proxy_not_continuous_field_integral"
 OBJECTIVE_TERM_WEIGHTS = {
     "segment_length_quadratic": SEGMENT_LENGTH_OBJECTIVE_WEIGHT,
@@ -51,6 +53,7 @@ OBJECTIVE_TERM_WEIGHTS = {
     "control_point_terrain_anchor_quadratic": CONTROL_POINT_TERRAIN_OBJECTIVE_WEIGHT,
     "control_point_second_difference_quadratic": CONTROL_POINT_SECOND_DIFFERENCE_OBJECTIVE_WEIGHT,
 }
+HIGH_COST_EXPOSURE_OBJECTIVE_TERM = "control_point_high_cost_exposure_proxy_quadratic"
 OBJECTIVE_TERMS = tuple(OBJECTIVE_TERM_WEIGHTS)
 
 
@@ -58,6 +61,7 @@ OBJECTIVE_TERMS = tuple(OBJECTIVE_TERM_WEIGHTS)
 class GcsControlPointSolverConfig:
     terrain_objective_weight: float = CONTROL_POINT_TERRAIN_OBJECTIVE_WEIGHT
     second_difference_weight: float = CONTROL_POINT_SECOND_DIFFERENCE_OBJECTIVE_WEIGHT
+    high_cost_exposure_weight: float = CONTROL_POINT_HIGH_COST_EXPOSURE_OBJECTIVE_WEIGHT
     direction_cone_max_error_deg: float = 45.0
     direction_cone_rho_floor_m: float = DIRECTION_CONE_RHO_FLOOR_M
     direction_cone_seed_rho_ratio: float = DIRECTION_CONE_SEED_RHO_RATIO
@@ -68,6 +72,8 @@ class GcsControlPointSolverConfig:
             raise ValueError("terrain_objective_weight must be non-negative")
         if self.second_difference_weight < 0.0:
             raise ValueError("second_difference_weight must be non-negative")
+        if self.high_cost_exposure_weight < 0.0:
+            raise ValueError("high_cost_exposure_weight must be non-negative")
         if not 0.0 < self.direction_cone_max_error_deg < 90.0:
             raise ValueError("direction_cone_max_error_deg must be between 0 and 90")
         if self.direction_cone_rho_floor_m < 0.0:
@@ -79,12 +85,22 @@ class GcsControlPointSolverConfig:
 
     @property
     def objective_term_weights(self) -> dict[str, float]:
-        return {
+        weights = {
             "segment_length_quadratic": SEGMENT_LENGTH_OBJECTIVE_WEIGHT,
             "low_cost_anchor_quadratic": LOW_COST_ANCHOR_OBJECTIVE_WEIGHT,
             "control_point_terrain_anchor_quadratic": float(self.terrain_objective_weight),
             "control_point_second_difference_quadratic": float(self.second_difference_weight),
         }
+        if self.high_cost_exposure_weight > 0.0:
+            weights[HIGH_COST_EXPOSURE_OBJECTIVE_TERM] = float(self.high_cost_exposure_weight)
+        return weights
+
+    @property
+    def objective_terms(self) -> tuple[str, ...]:
+        terms = list(OBJECTIVE_TERMS)
+        if self.high_cost_exposure_weight > 0.0:
+            terms.append(HIGH_COST_EXPOSURE_OBJECTIVE_TERM)
+        return tuple(terms)
 
 
 @dataclass(frozen=True)
@@ -98,6 +114,8 @@ class _TerrainObjectiveAnchor:
     passable_cell_count: int
     high_cost_cell_count: int
     objective_weight: float
+    high_cost_exposure_proxy_cost: float | None
+    high_cost_exposure_objective_weight: float
 
 
 def build_gcs_control_point_trajectory_report(
@@ -236,7 +254,7 @@ def _not_attempted(
         path_length=0.0,
         region_count=region_count,
         constraint_summary=_not_evaluated_summary(reason, config=config),
-        cost_summary=_not_evaluated_cost_summary(reason),
+        cost_summary=_not_evaluated_cost_summary(reason, config=config),
     )
 
 
@@ -258,7 +276,7 @@ def _attempted_failure(
         path_length=0.0,
         region_count=region_count,
         constraint_summary=_not_evaluated_summary(reason, config=config),
-        cost_summary=_not_evaluated_cost_summary(reason),
+        cost_summary=_not_evaluated_cost_summary(reason, config=config),
     )
 
 
@@ -348,6 +366,11 @@ def _solve_control_point_path(
             (control_points[index, 0] - anchor.point.x) ** 2
             + (control_points[index, 1] - anchor.point.y) ** 2
         )
+        if anchor.high_cost_exposure_objective_weight > 0.0:
+            objective += anchor.high_cost_exposure_objective_weight * (
+                (control_points[index, 0] - anchor.point.x) ** 2
+                + (control_points[index, 1] - anchor.point.y) ** 2
+            )
     for index in range(1, len(regions) - 1):
         ddx = control_points[index + 1, 0] - 2.0 * control_points[index, 0] + control_points[index - 1, 0]
         ddy = control_points[index + 1, 1] - 2.0 * control_points[index, 1] + control_points[index - 1, 1]
@@ -397,7 +420,7 @@ def _control_point_constraint_summary(
                 "control_point_region_containment_count"
             ],
             "start_goal_constraint_count": solver_counts["start_goal_constraint_count"],
-            "objective_terms": list(OBJECTIVE_TERMS),
+            "objective_terms": list(config.objective_terms),
             "objective_term_weights": config.objective_term_weights,
             "terrain_objective_source": terrain_objective_summary["terrain_objective_source"],
             "terrain_objective_weight": terrain_objective_summary["terrain_objective_weight"],
@@ -407,6 +430,7 @@ def _control_point_constraint_summary(
             "terrain_objective_boundary": CONTROL_POINT_TERRAIN_OBJECTIVE_BOUNDARY,
         }
     )
+    summary.update(_high_cost_exposure_constraint_fields(terrain_objective_summary, config=config))
     return summary
 
 
@@ -420,7 +444,7 @@ def _not_evaluated_summary(reason: str, *, config: GcsControlPointSolverConfig) 
             "derivative_constraint_count": 0,
             "control_point_region_containment_count": 0,
             "start_goal_constraint_count": 0,
-            "objective_terms": list(OBJECTIVE_TERMS),
+            "objective_terms": list(config.objective_terms),
             "objective_term_weights": config.objective_term_weights,
             "terrain_objective_source": "not_evaluated",
             "terrain_objective_weight": None,
@@ -428,6 +452,7 @@ def _not_evaluated_summary(reason: str, *, config: GcsControlPointSolverConfig) 
             "terrain_objective_boundary": CONTROL_POINT_TERRAIN_OBJECTIVE_BOUNDARY,
         }
     )
+    summary.update(_not_evaluated_high_cost_exposure_fields(config=config))
     return summary
 
 
@@ -464,6 +489,8 @@ def _terrain_objective_anchors(
                     passable_cell_count=0,
                     high_cost_cell_count=0,
                     objective_weight=config.terrain_objective_weight,
+                    high_cost_exposure_proxy_cost=None,
+                    high_cost_exposure_objective_weight=0.0,
                 )
             )
             continue
@@ -483,6 +510,14 @@ def _terrain_objective_anchors(
         mean_region_cost = float(sum(costs) / len(costs))
         denominator = max(min_region_cost, cost_floor)
         cost_pressure = min(max(mean_region_cost / denominator, 1.0), 5.0)
+        high_cost_exposure_values = [max(cost - high_cost_threshold, 0.0) for cost in costs]
+        high_cost_proxy_cost = float(sum(high_cost_exposure_values) / len(high_cost_exposure_values))
+        high_cost_pressure = min(max(high_cost_proxy_cost, 0.0), 5.0)
+        high_cost_objective_weight = (
+            float(config.high_cost_exposure_weight * high_cost_pressure)
+            if config.high_cost_exposure_weight > 0.0 and high_cost_proxy_cost > 0.0
+            else 0.0
+        )
         anchors.append(
             _TerrainObjectiveAnchor(
                 region_id=region.region_id,
@@ -494,6 +529,8 @@ def _terrain_objective_anchors(
                 passable_cell_count=len(samples),
                 high_cost_cell_count=sum(1 for cost in costs if cost > high_cost_threshold),
                 objective_weight=float(config.terrain_objective_weight * cost_pressure),
+                high_cost_exposure_proxy_cost=high_cost_proxy_cost,
+                high_cost_exposure_objective_weight=high_cost_objective_weight,
             )
         )
     return tuple(anchors)
@@ -505,7 +542,7 @@ def _terrain_objective_summary(
     config: GcsControlPointSolverConfig,
 ) -> dict[str, Any]:
     costs = [anchor.cost for anchor in anchors if anchor.cost is not None]
-    return {
+    summary = {
         "terrain_objective_source": CONTROL_POINT_TERRAIN_OBJECTIVE_SOURCE,
         "terrain_objective_boundary": CONTROL_POINT_TERRAIN_OBJECTIVE_BOUNDARY,
         "terrain_objective_weight": float(config.terrain_objective_weight),
@@ -519,10 +556,35 @@ def _terrain_objective_summary(
         "control_point_terrain_cost_mean": float(sum(costs) / len(costs)) if costs else None,
         "terrain_objective_anchors": [_terrain_anchor_to_dict(anchor) for anchor in anchors],
     }
+    if config.high_cost_exposure_weight > 0.0:
+        proxy_costs = [
+            anchor.high_cost_exposure_proxy_cost
+            for anchor in anchors
+            if anchor.high_cost_exposure_proxy_cost is not None
+        ]
+        summary.update(
+            {
+                "high_cost_exposure_objective_weight": float(config.high_cost_exposure_weight),
+                "high_cost_exposure_proxy_cost": float(sum(proxy_costs)) if proxy_costs else None,
+                "high_cost_exposure_proxy_cost_mean": (
+                    float(sum(proxy_costs) / len(proxy_costs)) if proxy_costs else None
+                ),
+                "high_cost_exposure_proxy_source": CONTROL_POINT_HIGH_COST_EXPOSURE_OBJECTIVE_SOURCE,
+                "high_cost_exposure_proxy_boundary": CONTROL_POINT_TERRAIN_OBJECTIVE_BOUNDARY,
+                "high_cost_exposure_proxy_anchor_count": len(anchors),
+                "high_cost_exposure_proxy_high_cost_anchor_count": sum(
+                    1
+                    for anchor in anchors
+                    if anchor.high_cost_exposure_proxy_cost is not None
+                    and anchor.high_cost_exposure_proxy_cost > 0.0
+                ),
+            }
+        )
+    return summary
 
 
 def _terrain_anchor_to_dict(anchor: _TerrainObjectiveAnchor) -> dict[str, Any]:
-    return {
+    payload = {
         "region_id": anchor.region_id,
         "anchor_world": anchor.point.to_list(),
         "anchor_cell": None if anchor.nearest_cell is None else anchor.nearest_cell.to_list(),
@@ -533,6 +595,14 @@ def _terrain_anchor_to_dict(anchor: _TerrainObjectiveAnchor) -> dict[str, Any]:
         "high_cost_cell_count": anchor.high_cost_cell_count,
         "objective_weight": anchor.objective_weight,
     }
+    if anchor.high_cost_exposure_objective_weight > 0.0:
+        payload.update(
+            {
+                "high_cost_exposure_proxy_cost": anchor.high_cost_exposure_proxy_cost,
+                "high_cost_exposure_objective_weight": anchor.high_cost_exposure_objective_weight,
+            }
+        )
+    return payload
 
 
 def _control_point_cost_summary(
@@ -546,7 +616,43 @@ def _control_point_cost_summary(
     return summary
 
 
-def _not_evaluated_cost_summary(reason: str) -> dict[str, Any]:
+def _high_cost_exposure_constraint_fields(
+    terrain_objective_summary: dict[str, Any],
+    *,
+    config: GcsControlPointSolverConfig,
+) -> dict[str, Any]:
+    if config.high_cost_exposure_weight <= 0.0:
+        return {}
+    return {
+        "high_cost_exposure_objective_weight": terrain_objective_summary[
+            "high_cost_exposure_objective_weight"
+        ],
+        "high_cost_exposure_proxy_source": terrain_objective_summary[
+            "high_cost_exposure_proxy_source"
+        ],
+        "high_cost_exposure_proxy_anchor_count": terrain_objective_summary[
+            "high_cost_exposure_proxy_anchor_count"
+        ],
+        "high_cost_exposure_proxy_high_cost_anchor_count": terrain_objective_summary[
+            "high_cost_exposure_proxy_high_cost_anchor_count"
+        ],
+        "high_cost_exposure_proxy_boundary": CONTROL_POINT_TERRAIN_OBJECTIVE_BOUNDARY,
+    }
+
+
+def _not_evaluated_high_cost_exposure_fields(*, config: GcsControlPointSolverConfig) -> dict[str, Any]:
+    if config.high_cost_exposure_weight <= 0.0:
+        return {}
+    return {
+        "high_cost_exposure_objective_weight": float(config.high_cost_exposure_weight),
+        "high_cost_exposure_proxy_source": "not_evaluated",
+        "high_cost_exposure_proxy_anchor_count": 0,
+        "high_cost_exposure_proxy_high_cost_anchor_count": 0,
+        "high_cost_exposure_proxy_boundary": CONTROL_POINT_TERRAIN_OBJECTIVE_BOUNDARY,
+    }
+
+
+def _not_evaluated_cost_summary(reason: str, *, config: GcsControlPointSolverConfig) -> dict[str, Any]:
     summary = empty_gcs_cost_summary()
     summary.update(
         {
@@ -564,4 +670,17 @@ def _not_evaluated_cost_summary(reason: str) -> dict[str, Any]:
             "terrain_objective_not_evaluated_reason": reason,
         }
     )
+    if config.high_cost_exposure_weight > 0.0:
+        summary.update(
+            {
+                "high_cost_exposure_objective_weight": float(config.high_cost_exposure_weight),
+                "high_cost_exposure_proxy_cost": None,
+                "high_cost_exposure_proxy_cost_mean": None,
+                "high_cost_exposure_proxy_source": "not_evaluated",
+                "high_cost_exposure_proxy_boundary": CONTROL_POINT_TERRAIN_OBJECTIVE_BOUNDARY,
+                "high_cost_exposure_proxy_anchor_count": 0,
+                "high_cost_exposure_proxy_high_cost_anchor_count": 0,
+                "high_cost_exposure_proxy_not_evaluated_reason": reason,
+            }
+        )
     return summary

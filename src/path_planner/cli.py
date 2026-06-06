@@ -119,6 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Control-point GCS second-difference smoothness weight; only used with --gcs-control-point-candidate",
     )
     parser.add_argument(
+        "--gcs-control-point-high-cost-exposure-weight",
+        type=float,
+        default=0.0,
+        help="Control-point GCS high-cost exposure proxy objective weight; only used with --gcs-control-point-candidate",
+    )
+    parser.add_argument(
         "--gcs-control-point-direction-cone-max-error-deg",
         type=float,
         default=45.0,
@@ -303,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
                 config=GcsControlPointSolverConfig(
                     terrain_objective_weight=args.gcs_control_point_terrain_weight,
                     second_difference_weight=args.gcs_control_point_second_difference_weight,
+                    high_cost_exposure_weight=args.gcs_control_point_high_cost_exposure_weight,
                     direction_cone_max_error_deg=args.gcs_control_point_direction_cone_max_error_deg,
                     direction_cone_rho_floor_m=args.gcs_control_point_direction_cone_rho_floor_m,
                     direction_cone_seed_rho_ratio=args.gcs_control_point_direction_cone_seed_rho_ratio,
