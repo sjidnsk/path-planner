@@ -79,6 +79,9 @@ def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     assert "quality_gate" in content
     assert "path_planner.drake_backend.gcs_cli_batch" in content
     assert "gcs_direction_cone_cli_scenario_batch/v1" in content
+    assert "gcs_motion_feasibility_cli_batch/v1" in content
+    assert "--batch-kind motion-feasibility" in content
+    assert "not an Ackermann trajectory optimizer" in content
     assert "does not yet implement full GCS graph search" in content
     assert "Bezier/B-spline GCS trajectory optimization" in content
     assert "candidate future reports" not in content

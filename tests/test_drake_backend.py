@@ -1374,6 +1374,186 @@ def test_gcs_cli_scenario_batch_cli_forces_pydrake_unavailable_case(tmp_path):
     assert "pydrake_unavailable" in completed.stdout
 
 
+def test_gcs_motion_feasibility_batch_summary_flags_expected_mismatches():
+    from path_planner.drake_backend.gcs_cli_batch import build_gcs_motion_feasibility_batch_summary
+
+    feasible_payload = {
+        "gcs_trajectory_attempted": True,
+        "gcs_trajectory_success": True,
+        "gcs_trajectory_reason": "direction_cone_solution_found",
+        "gcs_candidate_selected": True,
+        "gcs_candidate_available": True,
+        "gcs_candidate_fallback_reason": None,
+        "gcs_motion_feasibility_report_schema_version": "gcs_motion_feasibility_report/v1",
+        "gcs_motion_feasibility_evaluated": True,
+        "gcs_motion_feasibility_feasibility_status": "feasible",
+        "gcs_motion_feasibility_fallback_reason": None,
+        "gcs_motion_feasibility_motion_model": "curvature_bounded",
+        "gcs_motion_feasibility_min_turning_radius_m": None,
+        "gcs_motion_feasibility_max_heading_change_deg": 120.0,
+        "gcs_motion_feasibility_curvature_violation_count": 0,
+        "gcs_motion_feasibility_heading_violation_count": 0,
+        "gcs_motion_feasibility_violation_indices": [],
+        "gcs_motion_feasibility_sample_count": 4,
+        "gcs_motion_feasibility_path_length": 3.0,
+        "gcs_motion_feasibility_constraint_summary": {
+            "max_observed_curvature": 0.0,
+            "min_observed_turning_radius_m": None,
+            "max_observed_heading_change_deg": 0.0,
+        },
+    }
+    unavailable_payload = {
+        "gcs_trajectory_attempted": False,
+        "gcs_trajectory_success": False,
+        "gcs_trajectory_reason": "pydrake_unavailable",
+        "gcs_candidate_selected": False,
+        "gcs_candidate_available": False,
+        "gcs_candidate_fallback_reason": "gcs_trajectory_failed",
+        "gcs_motion_feasibility_report_schema_version": "gcs_motion_feasibility_report/v1",
+        "gcs_motion_feasibility_evaluated": False,
+        "gcs_motion_feasibility_feasibility_status": "diagnostic_only",
+        "gcs_motion_feasibility_fallback_reason": "gcs_trajectory_failed",
+        "gcs_motion_feasibility_motion_model": "curvature_bounded",
+        "gcs_motion_feasibility_min_turning_radius_m": None,
+        "gcs_motion_feasibility_max_heading_change_deg": 120.0,
+        "gcs_motion_feasibility_curvature_violation_count": 0,
+        "gcs_motion_feasibility_heading_violation_count": 0,
+        "gcs_motion_feasibility_violation_indices": [],
+        "gcs_motion_feasibility_sample_count": 0,
+        "gcs_motion_feasibility_path_length": 0.0,
+        "gcs_motion_feasibility_constraint_summary": {
+            "max_observed_curvature": None,
+            "min_observed_turning_radius_m": None,
+            "max_observed_heading_change_deg": None,
+        },
+    }
+
+    summary = build_gcs_motion_feasibility_batch_summary(
+        [
+            {
+                "case_id": "feasible_case",
+                "payload": feasible_payload,
+                "expected": {"outcome": "feasible", "decision_reason": "motion_feasible"},
+            },
+            {
+                "case_id": "mismatch_case",
+                "payload": unavailable_payload,
+                "expected": {"outcome": "feasible", "decision_reason": "motion_feasible"},
+            },
+        ]
+    )
+
+    assert summary["schema_version"] == "gcs_motion_feasibility_cli_batch/v1"
+    assert summary["case_count"] == 2
+    assert summary["feasible_count"] == 1
+    assert summary["infeasible_count"] == 0
+    assert summary["diagnostic_only_count"] == 1
+    assert summary["candidate_selected_count"] == 1
+    assert summary["candidate_blocked_count"] == 1
+    assert summary["decision_reason_counts"]["motion_feasible"] == 1
+    assert summary["decision_reason_counts"]["pydrake_unavailable"] == 1
+    assert summary["expectation_failures"] == [
+        {"case_id": "mismatch_case", "mismatch_fields": ["outcome", "decision_reason"]}
+    ]
+
+
+@pytest.mark.drake
+def test_gcs_motion_feasibility_cli_batch_summarizes_route_json_cases(tmp_path):
+    pytest.importorskip("pydrake")
+    from path_planner.drake_backend.gcs_cli_batch import run_gcs_motion_feasibility_cli_batch
+
+    output_dir = tmp_path / "motion-batch"
+    summary_json = output_dir / "summary.json"
+
+    summary = run_gcs_motion_feasibility_cli_batch(
+        output_dir=output_dir,
+        summary_json=summary_json,
+        python_executable=sys.executable,
+    )
+
+    assert summary_json.exists()
+    persisted = json.loads(summary_json.read_text(encoding="utf-8"))
+    assert persisted == summary
+    assert summary["schema_version"] == "gcs_motion_feasibility_cli_batch/v1"
+    assert summary["case_count"] == 6
+    assert summary["feasible_count"] == 2
+    assert summary["infeasible_count"] == 3
+    assert summary["diagnostic_only_count"] == 1
+    assert summary["candidate_selected_count"] == 1
+    assert summary["expectation_failures"] == []
+    assert summary["decision_reason_counts"]["motion_feasible"] == 2
+    assert summary["decision_reason_counts"]["heading_constraint_violation"] == 2
+    assert summary["decision_reason_counts"]["curvature_constraint_violation"] == 1
+    assert summary["decision_reason_counts"]["pydrake_unavailable"] == 1
+    cases = {case["case_id"]: case for case in summary["cases"]}
+    assert set(cases) == {
+        "straight_feasible",
+        "gentle_turn_feasible",
+        "sharp_turn_blocked",
+        "tight_radius_blocked",
+        "direction_cone_selected_but_motion_blocked",
+        "pydrake_unavailable",
+    }
+    assert cases["straight_feasible"]["outcome"] == "feasible"
+    assert cases["straight_feasible"]["heading_violation_count"] == 0
+    assert cases["gentle_turn_feasible"]["candidate_selected"] is True
+    assert cases["sharp_turn_blocked"]["outcome"] == "infeasible"
+    assert cases["sharp_turn_blocked"]["heading_violation_count"] > 0
+    assert cases["tight_radius_blocked"]["curvature_violation_count"] > 0
+    assert cases["direction_cone_selected_but_motion_blocked"]["motion_gate_blocked_candidate"] is True
+    assert cases["pydrake_unavailable"]["outcome"] == "diagnostic_only"
+    assert cases["pydrake_unavailable"]["decision_reason"] == "pydrake_unavailable"
+    for case in summary["cases"]:
+        route_json = output_dir / case["route_json_path"]
+        route = json.loads(route_json.read_text(encoding="utf-8"))
+        assert route["trajectory_kind"] == "geometric_path"
+        assert route["gcs_trajectory_report_schema_version"] == "gcs_trajectory_report/v1"
+        assert route["gcs_candidate_report_schema_version"] == "gcs_geometric_candidate_report/v1"
+        assert route["gcs_motion_feasibility_report_schema_version"] == "gcs_motion_feasibility_report/v1"
+        assert "gcs_motion_feasibility_constraint_summary" in route
+
+
+def test_gcs_motion_feasibility_batch_cli_forces_pydrake_unavailable_case(tmp_path):
+    summary_json = tmp_path / "summary.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.drake_backend.gcs_cli_batch",
+            "--batch-kind",
+            "motion-feasibility",
+            "--output-dir",
+            str(tmp_path / "motion-batch"),
+            "--summary-json",
+            str(summary_json),
+            "--case",
+            "pydrake_unavailable",
+        ],
+        check=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        text=True,
+        capture_output=True,
+    )
+
+    summary = json.loads(summary_json.read_text(encoding="utf-8"))
+    assert summary["schema_version"] == "gcs_motion_feasibility_cli_batch/v1"
+    assert summary["case_count"] == 1
+    assert summary["feasible_count"] == 0
+    assert summary["infeasible_count"] == 0
+    assert summary["diagnostic_only_count"] == 1
+    assert summary["expectation_failures"] == []
+    case = summary["cases"][0]
+    assert case["case_id"] == "pydrake_unavailable"
+    assert case["outcome"] == "diagnostic_only"
+    assert case["decision_reason"] == "pydrake_unavailable"
+    assert case["trajectory_attempted"] is False
+    route = json.loads((tmp_path / "motion-batch" / case["route_json_path"]).read_text(encoding="utf-8"))
+    assert route["gcs_trajectory_attempted"] is False
+    assert route["gcs_trajectory_reason"] == "pydrake_unavailable"
+    assert route["gcs_motion_feasibility_feasibility_status"] == "diagnostic_only"
+    assert "pydrake_unavailable" in completed.stdout
+
+
 def test_cli_gcs_motion_feasibility_is_opt_in_and_writes_report(tmp_path):
     output_json = tmp_path / "route.json"
     output_dir = tmp_path / "report"

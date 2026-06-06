@@ -13,6 +13,7 @@ from .gcs_scenario_matrix import build_gcs_scenario_matrix_summary
 from .gcs_trajectory import FORCE_PYDRAKE_UNAVAILABLE_ENV
 
 GCS_CLI_SCENARIO_BATCH_SCHEMA_VERSION = "gcs_direction_cone_cli_scenario_batch/v1"
+GCS_MOTION_FEASIBILITY_CLI_BATCH_SCHEMA_VERSION = "gcs_motion_feasibility_cli_batch/v1"
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,79 @@ def run_gcs_cli_scenario_batch(
     python_executable: str | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    scenarios = _selected_scenarios(_builtin_scenarios(), case_ids)
+    matrix_cases, case_metadata = _run_cli_route_cases(
+        output_dir=output_dir,
+        summary_json=summary_json,
+        scenarios=scenarios,
+        common_cli_args=("--gcs-geometric-candidate",),
+        python_executable=python_executable,
+        extra_env=extra_env,
+    )
+    summary = build_gcs_scenario_matrix_summary(matrix_cases)
+    summary["schema_version"] = GCS_CLI_SCENARIO_BATCH_SCHEMA_VERSION
+    summary["cli_module"] = "path_planner.cli"
+    for case in summary["cases"]:
+        case.update(case_metadata[case["case_id"]])
+    _write_summary(summary_json, output_dir, summary)
+    return summary
+
+
+def run_gcs_motion_feasibility_cli_batch(
+    *,
+    output_dir: str | Path,
+    summary_json: str | Path | None = None,
+    case_ids: tuple[str, ...] | list[str] | None = None,
+    python_executable: str | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    scenarios = _selected_scenarios(_motion_feasibility_scenarios(), case_ids)
+    matrix_cases, case_metadata = _run_cli_route_cases(
+        output_dir=output_dir,
+        summary_json=summary_json,
+        scenarios=scenarios,
+        common_cli_args=("--gcs-geometric-candidate", "--gcs-motion-feasibility"),
+        python_executable=python_executable,
+        extra_env=extra_env,
+    )
+    summary = build_gcs_motion_feasibility_batch_summary(matrix_cases)
+    summary["cli_module"] = "path_planner.cli"
+    for case in summary["cases"]:
+        case.update(case_metadata[case["case_id"]])
+    _write_summary(summary_json, output_dir, summary)
+    return summary
+
+
+def build_gcs_motion_feasibility_batch_summary(cases: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    rows = [_motion_feasibility_case_summary(case) for case in cases]
+    return {
+        "schema_version": GCS_MOTION_FEASIBILITY_CLI_BATCH_SCHEMA_VERSION,
+        "case_count": len(rows),
+        "feasible_count": sum(1 for row in rows if row["outcome"] == "feasible"),
+        "infeasible_count": sum(1 for row in rows if row["outcome"] == "infeasible"),
+        "diagnostic_only_count": sum(1 for row in rows if row["outcome"] == "diagnostic_only"),
+        "candidate_selected_count": sum(1 for row in rows if row["candidate_selected"]),
+        "candidate_blocked_count": sum(1 for row in rows if not row["candidate_selected"]),
+        "decision_reason_counts": _counts(row["decision_reason"] for row in rows),
+        "fallback_reason_counts": _counts(row["fallback_reason"] for row in rows),
+        "expectation_failures": [
+            {"case_id": row["case_id"], "mismatch_fields": row["mismatch_fields"]}
+            for row in rows
+            if row["mismatch_fields"]
+        ],
+        "cases": rows,
+    }
+
+
+def _run_cli_route_cases(
+    *,
+    output_dir: str | Path,
+    summary_json: str | Path | None,
+    scenarios: tuple[GcsCliScenario, ...],
+    common_cli_args: tuple[str, ...],
+    python_executable: str | None,
+    extra_env: dict[str, str] | None,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     summary_path = Path(summary_json) if summary_json is not None else output_root / "summary.json"
@@ -43,7 +117,6 @@ def run_gcs_cli_scenario_batch(
         encoding="utf-8",
     )
 
-    scenarios = _selected_scenarios(case_ids)
     matrix_cases: list[dict[str, Any]] = []
     case_metadata: dict[str, dict[str, Any]] = {}
     for scenario in scenarios:
@@ -74,7 +147,7 @@ def run_gcs_cli_scenario_batch(
             "batch",
             "--platform-config",
             str(platform_config_path),
-            "--gcs-geometric-candidate",
+            *common_cli_args,
             *scenario.cli_args,
         ]
         completed = subprocess.run(command, check=True, env=env, text=True, capture_output=True)
@@ -97,47 +170,144 @@ def run_gcs_cli_scenario_batch(
             "stdout_json_path": stdout_path.relative_to(output_root).as_posix(),
             "stderr_path": stderr_path.relative_to(output_root).as_posix(),
         }
+    return matrix_cases, case_metadata
 
-    summary = build_gcs_scenario_matrix_summary(matrix_cases)
-    summary["schema_version"] = GCS_CLI_SCENARIO_BATCH_SCHEMA_VERSION
-    summary["cli_module"] = "path_planner.cli"
-    for case in summary["cases"]:
-        case.update(case_metadata[case["case_id"]])
+
+def _write_summary(summary_json: str | Path | None, output_dir: str | Path, summary: dict[str, Any]) -> None:
+    output_root = Path(output_dir)
+    summary_path = Path(summary_json) if summary_json is not None else output_root / "summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    return summary
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run GCS direction-cone CLI scenario batch evidence")
+    parser = argparse.ArgumentParser(description="Run GCS CLI scenario batch evidence")
+    parser.add_argument(
+        "--batch-kind",
+        choices=("direction-cone", "motion-feasibility"),
+        default="direction-cone",
+        help="Batch evidence kind to run. Defaults to the direction-cone batch for backward compatibility.",
+    )
     parser.add_argument("--output-dir", required=True, help="Directory for per-case request/route/diagnostic output")
     parser.add_argument("--summary-json", default=None, help="Path to write the batch summary JSON")
     parser.add_argument(
         "--case",
         action="append",
-        choices=tuple(sorted(_builtin_scenarios().keys())),
         help="Run one scenario case id; can be repeated. Defaults to all built-in cases.",
     )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    summary = run_gcs_cli_scenario_batch(
-        output_dir=args.output_dir,
-        summary_json=args.summary_json,
-        case_ids=tuple(args.case) if args.case else None,
-    )
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.batch_kind == "motion-feasibility":
+            summary = run_gcs_motion_feasibility_cli_batch(
+                output_dir=args.output_dir,
+                summary_json=args.summary_json,
+                case_ids=tuple(args.case) if args.case else None,
+            )
+        else:
+            summary = run_gcs_cli_scenario_batch(
+                output_dir=args.output_dir,
+                summary_json=args.summary_json,
+                case_ids=tuple(args.case) if args.case else None,
+            )
+    except ValueError as exc:
+        parser.error(str(exc))
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 
 
-def _selected_scenarios(case_ids: tuple[str, ...] | list[str] | None) -> tuple[GcsCliScenario, ...]:
-    scenarios = _builtin_scenarios()
+def _selected_scenarios(
+    scenarios: dict[str, GcsCliScenario],
+    case_ids: tuple[str, ...] | list[str] | None,
+) -> tuple[GcsCliScenario, ...]:
     selected_ids = tuple(case_ids) if case_ids else tuple(scenarios)
     missing = [case_id for case_id in selected_ids if case_id not in scenarios]
     if missing:
         raise ValueError(f"unknown GCS CLI scenario case(s): {', '.join(missing)}")
     return tuple(scenarios[case_id] for case_id in selected_ids)
+
+
+def _motion_feasibility_case_summary(case: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(case.get("payload") or {})
+    expected = dict(case.get("expected") or {})
+    motion_summary = payload.get("gcs_motion_feasibility_constraint_summary") or {}
+    if not isinstance(motion_summary, dict):
+        motion_summary = {}
+    outcome = str(payload.get("gcs_motion_feasibility_feasibility_status") or "not_evaluated")
+    decision_reason = _motion_decision_reason(payload, outcome)
+    fallback_reason = None if outcome == "feasible" else decision_reason
+    candidate_selected = bool(payload.get("gcs_candidate_selected", False))
+    candidate_fallback_reason = payload.get("gcs_candidate_fallback_reason")
+    row = {
+        "case_id": str(case.get("case_id") or "unnamed"),
+        "outcome": outcome,
+        "decision_reason": decision_reason,
+        "fallback_reason": fallback_reason,
+        "trajectory_attempted": payload.get("gcs_trajectory_attempted"),
+        "trajectory_success": payload.get("gcs_trajectory_success"),
+        "trajectory_reason": payload.get("gcs_trajectory_reason"),
+        "motion_evaluated": payload.get("gcs_motion_feasibility_evaluated"),
+        "motion_status": outcome,
+        "motion_fallback_reason": payload.get("gcs_motion_feasibility_fallback_reason"),
+        "motion_model": payload.get("gcs_motion_feasibility_motion_model"),
+        "min_turning_radius_m": payload.get("gcs_motion_feasibility_min_turning_radius_m"),
+        "max_heading_change_deg": payload.get("gcs_motion_feasibility_max_heading_change_deg"),
+        "curvature_violation_count": int(payload.get("gcs_motion_feasibility_curvature_violation_count") or 0),
+        "heading_violation_count": int(payload.get("gcs_motion_feasibility_heading_violation_count") or 0),
+        "violation_indices": list(payload.get("gcs_motion_feasibility_violation_indices") or []),
+        "sample_count": int(payload.get("gcs_motion_feasibility_sample_count") or 0),
+        "path_length": payload.get("gcs_motion_feasibility_path_length"),
+        "max_observed_curvature": motion_summary.get("max_observed_curvature"),
+        "min_observed_turning_radius_m": motion_summary.get("min_observed_turning_radius_m"),
+        "max_observed_heading_change_deg": motion_summary.get("max_observed_heading_change_deg"),
+        "candidate_selected": candidate_selected,
+        "candidate_available": payload.get("gcs_candidate_available"),
+        "candidate_fallback_reason": candidate_fallback_reason,
+        "motion_gate_blocked_candidate": (
+            outcome == "infeasible"
+            and candidate_fallback_reason == "motion_infeasible"
+            and payload.get("gcs_trajectory_success") is True
+        ),
+    }
+    row["mismatch_fields"] = _motion_mismatch_fields(row, expected)
+    return row
+
+
+def _motion_decision_reason(payload: dict[str, Any], outcome: str) -> str | None:
+    if payload.get("gcs_trajectory_reason") == "pydrake_unavailable":
+        return "pydrake_unavailable"
+    if outcome == "feasible":
+        return "motion_feasible"
+    reason = (
+        payload.get("gcs_motion_feasibility_fallback_reason")
+        or payload.get("gcs_candidate_fallback_reason")
+        or payload.get("gcs_trajectory_reason")
+    )
+    return str(reason) if reason is not None else None
+
+
+def _motion_mismatch_fields(row: dict[str, Any], expected: dict[str, Any]) -> list[str]:
+    mismatches: list[str] = []
+    expected_outcome = expected.get("outcome")
+    if expected_outcome is not None and row.get("outcome") != expected_outcome:
+        mismatches.append("outcome")
+    expected_reason = expected.get("decision_reason")
+    if expected_reason is not None and row.get("decision_reason") != expected_reason:
+        mismatches.append("decision_reason")
+    return mismatches
+
+
+def _counts(values) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        if value is None:
+            continue
+        counts[str(value)] = counts.get(str(value), 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _cli_environment(*, extra_env: dict[str, str] | None) -> dict[str, str]:
@@ -253,6 +423,78 @@ def _builtin_scenarios() -> dict[str, GcsCliScenario]:
                 goal=[3, 1],
             ),
             expected_outcome="blocked",
+            expected_decision_reason="pydrake_unavailable",
+            env={FORCE_PYDRAKE_UNAVAILABLE_ENV: "1"},
+        ),
+    }
+
+
+def _motion_feasibility_scenarios() -> dict[str, GcsCliScenario]:
+    diagonal_turn_request = _request(
+        "motion_feasibility_turn",
+        cost=_filled_cost(width=8, height=4, value=1),
+        passable_mask=_full_mask(width=8, height=4),
+        start=[0, 3],
+        goal=[7, 0],
+    )
+    straight_request = _request(
+        "straight_feasible",
+        cost=[
+            [1, 1, 1, 1],
+            [0, 1, 1, 1],
+            [1, 1, 1, 1],
+        ],
+        passable_mask=_full_mask(width=4, height=3),
+        start=[0, 1],
+        goal=[3, 1],
+    )
+    return {
+        "straight_feasible": GcsCliScenario(
+            case_id="straight_feasible",
+            request=straight_request,
+            expected_outcome="feasible",
+            expected_decision_reason="motion_feasible",
+            cli_args=("--max-shortcut-cost", "0", "--max-heading-change-deg", "120"),
+        ),
+        "gentle_turn_feasible": GcsCliScenario(
+            case_id="gentle_turn_feasible",
+            request=_diagonal_open_request("gentle_turn_feasible", size=28),
+            expected_outcome="feasible",
+            expected_decision_reason="motion_feasible",
+            cli_args=("--max-shortcut-cost", "0", "--max-heading-change-deg", "120"),
+        ),
+        "sharp_turn_blocked": GcsCliScenario(
+            case_id="sharp_turn_blocked",
+            request=diagonal_turn_request,
+            expected_outcome="infeasible",
+            expected_decision_reason="heading_constraint_violation",
+            cli_args=("--max-shortcut-cost", "0", "--max-heading-change-deg", "1"),
+        ),
+        "tight_radius_blocked": GcsCliScenario(
+            case_id="tight_radius_blocked",
+            request=diagonal_turn_request,
+            expected_outcome="infeasible",
+            expected_decision_reason="curvature_constraint_violation",
+            cli_args=(
+                "--max-shortcut-cost",
+                "0",
+                "--max-heading-change-deg",
+                "120",
+                "--min-turning-radius",
+                "20",
+            ),
+        ),
+        "direction_cone_selected_but_motion_blocked": GcsCliScenario(
+            case_id="direction_cone_selected_but_motion_blocked",
+            request=_diagonal_open_request("direction_cone_selected_but_motion_blocked", size=28),
+            expected_outcome="infeasible",
+            expected_decision_reason="heading_constraint_violation",
+            cli_args=("--max-shortcut-cost", "0", "--max-heading-change-deg", "1"),
+        ),
+        "pydrake_unavailable": GcsCliScenario(
+            case_id="pydrake_unavailable",
+            request=straight_request,
+            expected_outcome="diagnostic_only",
             expected_decision_reason="pydrake_unavailable",
             env={FORCE_PYDRAKE_UNAVAILABLE_ENV: "1"},
         ),

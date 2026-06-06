@@ -85,7 +85,7 @@ Phase 8 provides a Drake IRIS/GCS framework prototype:
 - diagnostics include an IRIS / Region Graph Summary that labels this as a 2D workspace safe-region diagnostic, not a GCS trajectory or vehicle feasibility proof;
 - Phase 8.4 adds an opt-in fixed-sequence `pydrake_direction_cone_program` that emits `gcs_trajectory_report`, `gcs_candidate_report`, `gcs_motion_feasibility_report`, and direction-cone portal/cost diagnostics;
 - GCS direction-cone reports include `rho_source_counts`, `portal_width_min_m`, `support_width_min_m`, `constraint_tightness_min`, `candidate_decision`, `decision_reason`, and `quality_gate` so selected/blocked candidate decisions are machine-readable;
-- `path_planner.drake_backend.gcs_cli_batch` runs a repeatable CLI scenario batch and writes `gcs_direction_cone_cli_scenario_batch/v1` summaries from route JSON evidence;
+- `path_planner.drake_backend.gcs_cli_batch` runs repeatable CLI scenario batches and writes `gcs_direction_cone_cli_scenario_batch/v1` and `gcs_motion_feasibility_cli_batch/v1` summaries from route JSON evidence;
 - `--optimize-trajectory` continues to mean the current fixed-corridor optimizer until a separate Drake backend switch is implemented;
 - the required fallback chain is Drake unavailable or infeasible -> current optimizer -> postprocess smoothed path -> raw A* path.
 
@@ -169,6 +169,7 @@ GCS direction-cone CLI batch evidence:
 
 ```bash
 python -m path_planner.drake_backend.gcs_cli_batch --output-dir outputs/gcs-cli-batch --summary-json outputs/gcs-cli-batch/summary.json
+python -m path_planner.drake_backend.gcs_cli_batch --batch-kind motion-feasibility --output-dir outputs/gcs-motion-batch --summary-json outputs/gcs-motion-batch/summary.json
 ```
 
 Expected outputs:
@@ -177,6 +178,7 @@ Expected outputs:
 - `outputs/demo/diagnostics.png`
 - `outputs/demo/diagnostics.html`
 - `outputs/gcs-cli-batch/summary.json` when the batch runner is used
+- `outputs/gcs-motion-batch/summary.json` when the motion-feasibility batch runner is used
 
 The route JSON preserves Phase 1 fields and adds a `postprocess` object with
 `platform_profile`, `constraint_warnings`, `corridor_report`, `raw_path`,
@@ -225,6 +227,13 @@ the resulting route JSON. Its summary schema is
 `gcs_direction_cone_cli_scenario_batch/v1` and covers selected open-corridor,
 cost-dominated, duplicate-baseline, sampled-collision, motion-infeasible,
 degenerate-portal, and pydrake-unavailable cases.
+With `--batch-kind motion-feasibility`, the same runner emits
+`gcs_motion_feasibility_cli_batch/v1` summaries for straight feasible,
+gentle-turn feasible, sharp-turn blocked, tight-radius blocked,
+direction-cone-success-but-motion-blocked, and pydrake-unavailable route JSON
+cases. The motion batch records heading and turning-radius diagnostics,
+candidate selected/blocked state, fallback reasons, and expectation failures.
+It is a regression gate for sampled geometric candidates, not an Ackermann trajectory optimizer.
 When `--simulate-tracking` is enabled, the route JSON also includes a top-level
 `tracking_simulation_report` object with `simulated_path`, `config`, `metrics`,
 and `safety_report`.
