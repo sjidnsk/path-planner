@@ -8,6 +8,9 @@ import numpy as np
 from path_planner.core import Cell, CostGrid, WorldPoint
 
 from .gcs_diagnostics import (
+    DIRECTION_CONE_RHO_FLOOR_M,
+    DIRECTION_CONE_SEED_RHO_RATIO,
+    DIRECTION_CONE_WIDTH_RHO_RATIO,
     build_direction_cone_constraint_summary,
     build_gcs_cost_summary,
     direction_cone_edge_parameters,
@@ -52,6 +55,39 @@ OBJECTIVE_TERMS = tuple(OBJECTIVE_TERM_WEIGHTS)
 
 
 @dataclass(frozen=True)
+class GcsControlPointSolverConfig:
+    terrain_objective_weight: float = CONTROL_POINT_TERRAIN_OBJECTIVE_WEIGHT
+    second_difference_weight: float = CONTROL_POINT_SECOND_DIFFERENCE_OBJECTIVE_WEIGHT
+    direction_cone_max_error_deg: float = 45.0
+    direction_cone_rho_floor_m: float = DIRECTION_CONE_RHO_FLOOR_M
+    direction_cone_seed_rho_ratio: float = DIRECTION_CONE_SEED_RHO_RATIO
+    direction_cone_width_rho_ratio: float = DIRECTION_CONE_WIDTH_RHO_RATIO
+
+    def __post_init__(self) -> None:
+        if self.terrain_objective_weight < 0.0:
+            raise ValueError("terrain_objective_weight must be non-negative")
+        if self.second_difference_weight < 0.0:
+            raise ValueError("second_difference_weight must be non-negative")
+        if not 0.0 < self.direction_cone_max_error_deg < 90.0:
+            raise ValueError("direction_cone_max_error_deg must be between 0 and 90")
+        if self.direction_cone_rho_floor_m < 0.0:
+            raise ValueError("direction_cone_rho_floor_m must be non-negative")
+        if self.direction_cone_seed_rho_ratio < 0.0:
+            raise ValueError("direction_cone_seed_rho_ratio must be non-negative")
+        if self.direction_cone_width_rho_ratio < 0.0:
+            raise ValueError("direction_cone_width_rho_ratio must be non-negative")
+
+    @property
+    def objective_term_weights(self) -> dict[str, float]:
+        return {
+            "segment_length_quadratic": SEGMENT_LENGTH_OBJECTIVE_WEIGHT,
+            "low_cost_anchor_quadratic": LOW_COST_ANCHOR_OBJECTIVE_WEIGHT,
+            "control_point_terrain_anchor_quadratic": float(self.terrain_objective_weight),
+            "control_point_second_difference_quadratic": float(self.second_difference_weight),
+        }
+
+
+@dataclass(frozen=True)
 class _TerrainObjectiveAnchor:
     region_id: int
     point: WorldPoint
@@ -69,23 +105,27 @@ def build_gcs_control_point_trajectory_report(
     convex_region_sequence_report: ConvexRegionSequenceReport | None,
     *,
     sample_count: int = 25,
+    config: GcsControlPointSolverConfig | None = None,
 ) -> GcsTrajectoryReport:
+    config = GcsControlPointSolverConfig() if config is None else config
     if convex_region_sequence_report is None:
-        return _not_attempted("convex_region_report_missing", "convex_region_report_missing")
+        return _not_attempted("convex_region_report_missing", "convex_region_report_missing", config=config)
     if not convex_region_sequence_report.gcs_ready:
         return _not_attempted(
             "convex_region_not_gcs_ready",
             convex_region_sequence_report.gcs_ready_reason,
             region_count=convex_region_sequence_report.region_count,
+            config=config,
         )
     regions = convex_region_sequence_report.regions
     if not regions:
-        return _not_attempted("convex_region_not_gcs_ready", "convex_region_sequence_empty")
+        return _not_attempted("convex_region_not_gcs_ready", "convex_region_sequence_empty", config=config)
     if not _has_region_adjacency(regions):
         return _not_attempted(
             "region_overlap_missing",
             "region_overlap_missing",
             region_count=convex_region_sequence_report.region_count,
+            config=config,
         )
 
     try:
@@ -95,6 +135,7 @@ def build_gcs_control_point_trajectory_report(
             f"{type(exc).__name__}: {exc}",
             "pydrake_unavailable",
             region_count=convex_region_sequence_report.region_count,
+            config=config,
         )
 
     sample_count = max(int(sample_count), 2)
@@ -105,6 +146,7 @@ def build_gcs_control_point_trajectory_report(
             result_status=f"{type(exc).__name__}: {exc}",
             reason="invalid_hpolyhedron",
             region_count=convex_region_sequence_report.region_count,
+            config=config,
         )
 
     try:
@@ -113,12 +155,14 @@ def build_gcs_control_point_trajectory_report(
             grid,
             regions,
             sample_count=sample_count,
+            config=config,
         )
     except Exception as exc:
         return _attempted_failure(
             result_status=f"{type(exc).__name__}: {exc}",
             reason=_solver_exception_reason(exc),
             region_count=convex_region_sequence_report.region_count,
+            config=config,
         )
 
     result_status = _solution_status(result)
@@ -127,6 +171,7 @@ def build_gcs_control_point_trajectory_report(
             result_status=result_status,
             reason=_solver_result_reason(result_status),
             region_count=convex_region_sequence_report.region_count,
+            config=config,
         )
 
     collision_count = _sample_collision_count(grid, sampled_points)
@@ -135,11 +180,12 @@ def build_gcs_control_point_trajectory_report(
         sampled_points,
         regions,
         solver_counts=solver_counts,
-        terrain_objective_summary=_terrain_objective_summary(terrain_anchors),
+        terrain_objective_summary=_terrain_objective_summary(terrain_anchors, config=config),
+        config=config,
     )
     cost_summary = _control_point_cost_summary(
         build_gcs_cost_summary(grid, sampled_points),
-        terrain_objective_summary=_terrain_objective_summary(terrain_anchors),
+        terrain_objective_summary=_terrain_objective_summary(terrain_anchors, config=config),
     )
     if collision_count > 0:
         return GcsTrajectoryReport(
@@ -172,7 +218,13 @@ def build_gcs_control_point_trajectory_report(
     )
 
 
-def _not_attempted(result_status: str, reason: str, *, region_count: int = 0) -> GcsTrajectoryReport:
+def _not_attempted(
+    result_status: str,
+    reason: str,
+    *,
+    config: GcsControlPointSolverConfig,
+    region_count: int = 0,
+) -> GcsTrajectoryReport:
     return GcsTrajectoryReport(
         attempted=False,
         success=False,
@@ -183,12 +235,18 @@ def _not_attempted(result_status: str, reason: str, *, region_count: int = 0) ->
         collision_count=0,
         path_length=0.0,
         region_count=region_count,
-        constraint_summary=_not_evaluated_summary(reason),
+        constraint_summary=_not_evaluated_summary(reason, config=config),
         cost_summary=_not_evaluated_cost_summary(reason),
     )
 
 
-def _attempted_failure(*, result_status: str, reason: str, region_count: int) -> GcsTrajectoryReport:
+def _attempted_failure(
+    *,
+    result_status: str,
+    reason: str,
+    region_count: int,
+    config: GcsControlPointSolverConfig,
+) -> GcsTrajectoryReport:
     return GcsTrajectoryReport(
         attempted=True,
         success=False,
@@ -199,7 +257,7 @@ def _attempted_failure(*, result_status: str, reason: str, region_count: int) ->
         collision_count=0,
         path_length=0.0,
         region_count=region_count,
-        constraint_summary=_not_evaluated_summary(reason),
+        constraint_summary=_not_evaluated_summary(reason, config=config),
         cost_summary=_not_evaluated_cost_summary(reason),
     )
 
@@ -210,13 +268,14 @@ def _solve_control_point_path(
     regions: tuple[ConvexRegionSequenceItem, ...],
     *,
     sample_count: int,
+    config: GcsControlPointSolverConfig,
 ) -> tuple[tuple[WorldPoint, ...], Any, dict[str, int], tuple[_TerrainObjectiveAnchor, ...]]:
     if len(regions) < 2:
         raise ValueError("control-point direction_cone backend requires at least two regions")
 
     prog = deps["MathematicalProgram"]()
     control_points = prog.NewContinuousVariables(len(regions), 2, "cp")
-    terrain_anchors = _terrain_objective_anchors(grid, regions)
+    terrain_anchors = _terrain_objective_anchors(grid, regions, config=config)
     counts = {
         "solver_constraint_count": 0,
         "control_point_region_containment_count": 0,
@@ -248,7 +307,14 @@ def _solve_control_point_path(
         counts["start_goal_constraint_count"] += 1
 
     for index, (first, second) in enumerate(zip(regions[:-1], regions[1:])):
-        edge_parameters = direction_cone_edge_parameters(first, second)
+        edge_parameters = direction_cone_edge_parameters(
+            first,
+            second,
+            max_allowed_direction_error_deg=config.direction_cone_max_error_deg,
+            rho_floor_m=config.direction_cone_rho_floor_m,
+            seed_rho_ratio=config.direction_cone_seed_rho_ratio,
+            width_rho_ratio=config.direction_cone_width_rho_ratio,
+        )
         if edge_parameters["seed_distance_m"] <= 0.0:
             raise ValueError("direction_cone reference segment is degenerate")
         tangent = np.asarray(edge_parameters["tangent"], dtype=float)
@@ -285,7 +351,7 @@ def _solve_control_point_path(
     for index in range(1, len(regions) - 1):
         ddx = control_points[index + 1, 0] - 2.0 * control_points[index, 0] + control_points[index - 1, 0]
         ddy = control_points[index + 1, 1] - 2.0 * control_points[index, 1] + control_points[index - 1, 1]
-        objective += CONTROL_POINT_SECOND_DIFFERENCE_OBJECTIVE_WEIGHT * (ddx * ddx + ddy * ddy)
+        objective += config.second_difference_weight * (ddx * ddx + ddy * ddy)
     prog.AddQuadraticCost(objective)
 
     for index, region in enumerate(regions):
@@ -307,9 +373,17 @@ def _control_point_constraint_summary(
     *,
     solver_counts: dict[str, int],
     terrain_objective_summary: dict[str, Any],
+    config: GcsControlPointSolverConfig,
 ) -> dict[str, Any]:
     summary = mark_direction_cone_backend_enforced(
-        build_direction_cone_constraint_summary(sampled_points, regions),
+        build_direction_cone_constraint_summary(
+            sampled_points,
+            regions,
+            max_allowed_direction_error_deg=config.direction_cone_max_error_deg,
+            rho_floor_m=config.direction_cone_rho_floor_m,
+            seed_rho_ratio=config.direction_cone_seed_rho_ratio,
+            width_rho_ratio=config.direction_cone_width_rho_ratio,
+        ),
         enforcing_backend=CONTROL_POINT_ENFORCING_BACKEND,
         solver_constraint_count=solver_counts["solver_constraint_count"],
     )
@@ -324,7 +398,7 @@ def _control_point_constraint_summary(
             ],
             "start_goal_constraint_count": solver_counts["start_goal_constraint_count"],
             "objective_terms": list(OBJECTIVE_TERMS),
-            "objective_term_weights": dict(OBJECTIVE_TERM_WEIGHTS),
+            "objective_term_weights": config.objective_term_weights,
             "terrain_objective_source": terrain_objective_summary["terrain_objective_source"],
             "terrain_objective_weight": terrain_objective_summary["terrain_objective_weight"],
             "terrain_objective_anchor_count": terrain_objective_summary[
@@ -336,7 +410,7 @@ def _control_point_constraint_summary(
     return summary
 
 
-def _not_evaluated_summary(reason: str) -> dict[str, Any]:
+def _not_evaluated_summary(reason: str, *, config: GcsControlPointSolverConfig) -> dict[str, Any]:
     summary = direction_cone_not_evaluated_summary(reason)
     summary.update(
         {
@@ -347,7 +421,7 @@ def _not_evaluated_summary(reason: str) -> dict[str, Any]:
             "control_point_region_containment_count": 0,
             "start_goal_constraint_count": 0,
             "objective_terms": list(OBJECTIVE_TERMS),
-            "objective_term_weights": dict(OBJECTIVE_TERM_WEIGHTS),
+            "objective_term_weights": config.objective_term_weights,
             "terrain_objective_source": "not_evaluated",
             "terrain_objective_weight": None,
             "terrain_objective_anchor_count": 0,
@@ -361,6 +435,7 @@ def _terrain_objective_anchors(
     grid: CostGrid,
     regions: tuple[ConvexRegionSequenceItem, ...],
     *,
+    config: GcsControlPointSolverConfig,
     high_cost_threshold: float = 3.0,
 ) -> tuple[_TerrainObjectiveAnchor, ...]:
     anchors: list[_TerrainObjectiveAnchor] = []
@@ -388,7 +463,7 @@ def _terrain_objective_anchors(
                     mean_region_cost=fallback_cost,
                     passable_cell_count=0,
                     high_cost_cell_count=0,
-                    objective_weight=CONTROL_POINT_TERRAIN_OBJECTIVE_WEIGHT,
+                    objective_weight=config.terrain_objective_weight,
                 )
             )
             continue
@@ -418,18 +493,22 @@ def _terrain_objective_anchors(
                 mean_region_cost=float(mean_region_cost),
                 passable_cell_count=len(samples),
                 high_cost_cell_count=sum(1 for cost in costs if cost > high_cost_threshold),
-                objective_weight=float(CONTROL_POINT_TERRAIN_OBJECTIVE_WEIGHT * cost_pressure),
+                objective_weight=float(config.terrain_objective_weight * cost_pressure),
             )
         )
     return tuple(anchors)
 
 
-def _terrain_objective_summary(anchors: tuple[_TerrainObjectiveAnchor, ...]) -> dict[str, Any]:
+def _terrain_objective_summary(
+    anchors: tuple[_TerrainObjectiveAnchor, ...],
+    *,
+    config: GcsControlPointSolverConfig,
+) -> dict[str, Any]:
     costs = [anchor.cost for anchor in anchors if anchor.cost is not None]
     return {
         "terrain_objective_source": CONTROL_POINT_TERRAIN_OBJECTIVE_SOURCE,
         "terrain_objective_boundary": CONTROL_POINT_TERRAIN_OBJECTIVE_BOUNDARY,
-        "terrain_objective_weight": float(CONTROL_POINT_TERRAIN_OBJECTIVE_WEIGHT),
+        "terrain_objective_weight": float(config.terrain_objective_weight),
         "terrain_objective_anchor_count": len(anchors),
         "terrain_objective_passable_cell_count": sum(anchor.passable_cell_count for anchor in anchors),
         "terrain_objective_high_cost_cell_count": sum(anchor.high_cost_cell_count for anchor in anchors),

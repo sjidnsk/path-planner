@@ -24,6 +24,7 @@ from path_planner.drake_backend import (
     build_workspace_iris_region_report,
 )
 from path_planner.drake_backend.gcs_diagnostics import build_direction_cone_constraint_summary
+from path_planner.drake_backend.gcs_control_point_trajectory import GcsControlPointSolverConfig
 from path_planner.drake_backend.gcs_scenario_matrix import build_gcs_scenario_matrix_summary
 from path_planner.postprocess import build_corridor, run_postprocess
 from path_planner.postprocess.models import CorridorResult, CorridorSection
@@ -436,6 +437,9 @@ def test_gcs_control_point_report_exposes_terrain_cost_objective_proxy():
     assert payload["gcs_trajectory_success"] is True
     assert "control_point_terrain_anchor_quadratic" in constraint_summary["objective_terms"]
     assert constraint_summary["objective_term_weights"]["control_point_terrain_anchor_quadratic"] > 0.0
+    assert constraint_summary["objective_term_weights"]["control_point_terrain_anchor_quadratic"] == 0.05
+    assert constraint_summary["objective_term_weights"]["control_point_second_difference_quadratic"] == 0.2
+    assert constraint_summary["max_allowed_direction_error_deg"] == 45.0
     assert constraint_summary["terrain_objective_source"] == (
         "region_inverse_cost_weighted_passable_cell_centroid"
     )
@@ -443,10 +447,52 @@ def test_gcs_control_point_report_exposes_terrain_cost_objective_proxy():
         "region_inverse_cost_weighted_passable_cell_centroid"
     )
     assert cost_summary["terrain_objective_weight"] > 0.0
+    assert cost_summary["terrain_objective_weight"] == 0.05
     assert cost_summary["terrain_objective_anchor_count"] == convex_report.region_count
     assert cost_summary["control_point_terrain_cost"] > 0.0
     assert cost_summary["sampled_terrain_cost"] == cost_summary["terrain_path_cost"]
     assert cost_summary["terrain_objective_boundary"] == "proxy_not_continuous_field_integral"
+
+
+@pytest.mark.drake
+def test_gcs_control_point_report_accepts_explicit_calibration_config():
+    pytest.importorskip("pydrake")
+    grid = _candidate_grid(
+        [
+            [1.0, 8.0, 1.0, 1.0],
+            [1.0, 6.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    request = PlanRequest(start=Cell(0, 2), goal=Cell(3, 0))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    convex_report = build_convex_region_sequence_report(grid, plan, corridor)
+
+    report = build_gcs_control_point_trajectory_report(
+        grid,
+        convex_report,
+        sample_count=9,
+        config=GcsControlPointSolverConfig(
+            terrain_objective_weight=0.08,
+            second_difference_weight=0.35,
+            direction_cone_max_error_deg=35.0,
+            direction_cone_rho_floor_m=0.04,
+            direction_cone_seed_rho_ratio=0.08,
+        ),
+    )
+    payload = report.to_route_fields()
+    constraint_summary = payload["gcs_trajectory_constraint_summary"]
+    cost_summary = payload["gcs_trajectory_cost_summary"]
+
+    assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert constraint_summary["objective_term_weights"]["control_point_terrain_anchor_quadratic"] == 0.08
+    assert constraint_summary["objective_term_weights"]["control_point_second_difference_quadratic"] == 0.35
+    assert constraint_summary["terrain_objective_weight"] == 0.08
+    assert cost_summary["terrain_objective_weight"] == 0.08
+    assert constraint_summary["max_allowed_direction_error_deg"] == 35.0
+    assert constraint_summary["rho_lower_bound_min_m"] >= 0.04
+    assert constraint_summary["parameters"][0]["rho_seed_distance_m"] >= 0.04
 
 
 def test_gcs_control_point_report_handles_unavailable_pydrake(monkeypatch):
@@ -1492,6 +1538,55 @@ def test_cli_gcs_control_point_candidate_is_opt_in_and_writes_reports(tmp_path):
     assert payload["gcs_motion_feasibility_report_schema_version"] == "gcs_motion_feasibility_report/v1"
     assert "gcs_trajectory_backend" in completed.stdout
     assert "gcs_candidate_available" in completed.stdout
+
+
+def test_cli_gcs_control_point_candidate_forwards_calibration_parameters(tmp_path):
+    pytest.importorskip("pydrake")
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map_corridor.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--drake-iris-regions",
+            "--gcs-control-point-candidate",
+            "--gcs-control-point-terrain-weight",
+            "0.08",
+            "--gcs-control-point-second-difference-weight",
+            "0.35",
+            "--gcs-control-point-direction-cone-max-error-deg",
+            "35",
+            "--gcs-control-point-direction-cone-rho-floor-m",
+            "0.04",
+            "--gcs-control-point-direction-cone-seed-rho-ratio",
+            "0.08",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    constraint_summary = payload["gcs_trajectory_constraint_summary"]
+    cost_summary = payload["gcs_trajectory_cost_summary"]
+
+    assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert constraint_summary["objective_term_weights"]["control_point_terrain_anchor_quadratic"] == 0.08
+    assert constraint_summary["objective_term_weights"]["control_point_second_difference_quadratic"] == 0.35
+    assert constraint_summary["max_allowed_direction_error_deg"] == 35.0
+    assert constraint_summary["rho_lower_bound_min_m"] >= 0.04
+    assert cost_summary["terrain_objective_weight"] == 0.08
 
 
 def test_cli_gcs_control_point_candidate_forces_pydrake_unavailable(tmp_path):

@@ -47,6 +47,9 @@ def build_direction_cone_constraint_summary(
     regions: tuple[ConvexRegionSequenceItem, ...],
     *,
     max_allowed_direction_error_deg: float = 45.0,
+    rho_floor_m: float = DIRECTION_CONE_RHO_FLOOR_M,
+    seed_rho_ratio: float = DIRECTION_CONE_SEED_RHO_RATIO,
+    width_rho_ratio: float = DIRECTION_CONE_WIDTH_RHO_RATIO,
 ) -> dict[str, Any]:
     if len(points) < 2:
         return direction_cone_not_evaluated_summary("insufficient_direction_cone_samples")
@@ -77,6 +80,9 @@ def build_direction_cone_constraint_summary(
             reference,
             reference_edge_index,
             max_allowed_direction_error_deg=max_allowed_direction_error_deg,
+            rho_floor_m=rho_floor_m,
+            seed_rho_ratio=seed_rho_ratio,
+            width_rho_ratio=width_rho_ratio,
         )
         tangent = (edge_parameters["tangent"][0], edge_parameters["tangent"][1])
         normal = (-tangent[1], tangent[0])
@@ -183,6 +189,9 @@ def direction_cone_edge_parameters(
     second: ConvexRegionSequenceItem,
     *,
     max_allowed_direction_error_deg: float = 45.0,
+    rho_floor_m: float = DIRECTION_CONE_RHO_FLOOR_M,
+    seed_rho_ratio: float = DIRECTION_CONE_SEED_RHO_RATIO,
+    width_rho_ratio: float = DIRECTION_CONE_WIDTH_RHO_RATIO,
 ) -> dict[str, Any]:
     seed_distance = _seed_distance(first.seed_world, second.seed_world)
     if seed_distance <= 0.0:
@@ -198,9 +207,9 @@ def direction_cone_edge_parameters(
     eta = math.tan(math.radians(max_allowed_direction_error_deg))
     portal_width = _portal_width(first, second, normal)
     support_width = min(_support_width(first, normal), _support_width(second, normal))
-    rho_seed = DIRECTION_CONE_SEED_RHO_RATIO * seed_distance
-    rho_portal = None if portal_width is None else DIRECTION_CONE_WIDTH_RHO_RATIO * portal_width
-    rho_support = DIRECTION_CONE_WIDTH_RHO_RATIO * support_width
+    rho_seed = seed_rho_ratio * seed_distance
+    rho_portal = None if portal_width is None else width_rho_ratio * portal_width
+    rho_support = width_rho_ratio * support_width
 
     candidates = [("seed_distance", rho_seed)]
     if rho_portal is not None and rho_portal > 0.0:
@@ -208,7 +217,7 @@ def direction_cone_edge_parameters(
     if rho_support > 0.0:
         candidates.append(("support_width", rho_support))
     rho_source, rho_candidate = min(candidates, key=lambda item: item[1])
-    rho_lower_bound = max(DIRECTION_CONE_RHO_FLOOR_M, rho_candidate)
+    rho_lower_bound = max(rho_floor_m, rho_candidate)
 
     if rho_source == "seed_distance" and rho_portal is not None and rho_support > 0.0:
         rho_source = "seed_distance_portal_support_min"
@@ -238,9 +247,9 @@ def direction_cone_edge_parameters(
         "support_width_m": float(support_width),
         "rho_lower_bound_m": float(rho_lower_bound),
         "rho_source": rho_source,
-        "rho_seed_distance_m": float(max(DIRECTION_CONE_RHO_FLOOR_M, rho_seed)),
-        "rho_portal_m": None if rho_portal is None else float(max(DIRECTION_CONE_RHO_FLOOR_M, rho_portal)),
-        "rho_support_m": float(max(DIRECTION_CONE_RHO_FLOOR_M, rho_support)),
+        "rho_seed_distance_m": float(max(rho_floor_m, rho_seed)),
+        "rho_portal_m": None if rho_portal is None else float(max(rho_floor_m, rho_portal)),
+        "rho_support_m": float(max(rho_floor_m, rho_support)),
         "risk_flags": risk_flags,
     }
 
@@ -361,12 +370,18 @@ def _edge_parameters_for_segment(
     reference_edge_index: int,
     *,
     max_allowed_direction_error_deg: float,
+    rho_floor_m: float,
+    seed_rho_ratio: float,
+    width_rho_ratio: float,
 ) -> dict[str, Any]:
     if len(regions) >= 2 and reference_edge_index < len(regions) - 1:
         return direction_cone_edge_parameters(
             regions[reference_edge_index],
             regions[reference_edge_index + 1],
             max_allowed_direction_error_deg=max_allowed_direction_error_deg,
+            rho_floor_m=rho_floor_m,
+            seed_rho_ratio=seed_rho_ratio,
+            width_rho_ratio=width_rho_ratio,
         )
     tangent = _reference_tangent(reference, reference_edge_index, max(len(reference) - 1, 1))
     seed_distance = _norm(
@@ -375,7 +390,7 @@ def _edge_parameters_for_segment(
             reference[reference_edge_index + 1].y - reference[reference_edge_index].y,
         )
     )
-    rho_lower_bound = max(DIRECTION_CONE_RHO_FLOOR_M, DIRECTION_CONE_SEED_RHO_RATIO * seed_distance)
+    rho_lower_bound = max(rho_floor_m, seed_rho_ratio * seed_distance)
     return {
         "tangent": [float(tangent[0]), float(tangent[1])],
         "normal": [float(-tangent[1]), float(tangent[0])],

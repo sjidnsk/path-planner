@@ -7,6 +7,7 @@ from pathlib import Path
 from path_planner.adapters import load_plan_input, route_result_to_json_dict
 from path_planner.diagnostics import render_diagnostics
 from path_planner.drake_backend import (
+    GcsControlPointSolverConfig,
     build_convex_region_sequence_report,
     build_gcs_control_point_trajectory_report,
     build_gcs_curvature_constrained_candidate_report,
@@ -104,6 +105,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--gcs-control-point-candidate",
         action="store_true",
         help="Compare optional control-point direction-cone GCS sampled trajectory as a geometric candidate",
+    )
+    parser.add_argument(
+        "--gcs-control-point-terrain-weight",
+        type=float,
+        default=0.05,
+        help="Control-point GCS terrain anchor objective weight; only used with --gcs-control-point-candidate",
+    )
+    parser.add_argument(
+        "--gcs-control-point-second-difference-weight",
+        type=float,
+        default=0.2,
+        help="Control-point GCS second-difference smoothness weight; only used with --gcs-control-point-candidate",
+    )
+    parser.add_argument(
+        "--gcs-control-point-direction-cone-max-error-deg",
+        type=float,
+        default=45.0,
+        help="Control-point direction_cone tolerance in degrees; only used with --gcs-control-point-candidate",
+    )
+    parser.add_argument(
+        "--gcs-control-point-direction-cone-rho-floor-m",
+        type=float,
+        default=1.0e-4,
+        help="Control-point direction_cone rho lower-bound floor in meters",
+    )
+    parser.add_argument(
+        "--gcs-control-point-direction-cone-seed-rho-ratio",
+        type=float,
+        default=0.05,
+        help="Control-point direction_cone seed-distance rho ratio",
     )
     parser.add_argument(
         "--gcs-motion-feasibility",
@@ -269,6 +300,13 @@ def main(argv: list[str] | None = None) -> int:
             gcs_trajectory_report = build_gcs_control_point_trajectory_report(
                 grid,
                 convex_region_sequence_report,
+                config=GcsControlPointSolverConfig(
+                    terrain_objective_weight=args.gcs_control_point_terrain_weight,
+                    second_difference_weight=args.gcs_control_point_second_difference_weight,
+                    direction_cone_max_error_deg=args.gcs_control_point_direction_cone_max_error_deg,
+                    direction_cone_rho_floor_m=args.gcs_control_point_direction_cone_rho_floor_m,
+                    direction_cone_seed_rho_ratio=args.gcs_control_point_direction_cone_seed_rho_ratio,
+                ),
             )
         else:
             gcs_trajectory_report = build_gcs_trajectory_report(
