@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from path_planner.adapters import route_result_to_json_dict
 from path_planner.core import Cell, CostGrid, GridSpec, PlanDiagnostics, PlanRequest, PlanResult, WorldPoint
@@ -179,6 +180,7 @@ def test_convex_region_sequence_is_optional_route_json_field_without_changing_ro
 
 
 def test_gcs_trajectory_report_solves_smoke_path_from_convex_region_sequence():
+    pytest.importorskip("pydrake")
     grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
     request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
     plan = AStarPlanner().plan(grid, request)
@@ -191,16 +193,38 @@ def test_gcs_trajectory_report_solves_smoke_path_from_convex_region_sequence():
     assert payload["gcs_trajectory_report_schema_version"] == "gcs_trajectory_report/v1"
     assert payload["gcs_trajectory_attempted"] is True
     assert payload["gcs_trajectory_success"] is True
-    assert payload["gcs_trajectory_backend"] == "pydrake_gcs"
-    assert payload["gcs_trajectory_reason"] == "gcs_trajectory_solution_found"
+    assert payload["gcs_trajectory_backend"] == "pydrake_direction_cone_program"
+    assert payload["gcs_trajectory_reason"] == "direction_cone_solution_found"
     assert payload["gcs_trajectory_sample_count"] == 7
     assert payload["gcs_trajectory_collision_count"] == 0
     assert payload["gcs_trajectory_path_length"] > 0.0
     assert payload["gcs_trajectory_region_count"] == convex_report.region_count
     assert len(payload["gcs_trajectory_sampled_points"]) == 7
+    assert payload["gcs_trajectory_constraint_summary"]["constraint_model"] == "direction_cone"
+    assert payload["gcs_trajectory_constraint_summary"]["schema_version"] == "gcs_direction_cone_constraint/v1"
+    assert payload["gcs_trajectory_constraint_summary"]["attempted"] is True
+    assert payload["gcs_trajectory_constraint_summary"]["evaluated"] is True
+    assert payload["gcs_trajectory_constraint_summary"]["backend_enforced"] is True
+    assert payload["gcs_trajectory_constraint_summary"]["enforcing_backend"] == "pydrake_mathematical_program"
+    assert payload["gcs_trajectory_constraint_summary"]["fallback_reason"] is None
+    assert payload["gcs_trajectory_constraint_summary"]["solver_constraint_count"] > 0
+    assert payload["gcs_trajectory_constraint_summary"]["violation_count"] == 0
+    assert payload["gcs_trajectory_constraint_summary"]["eta"] > 0.0
+    assert payload["gcs_trajectory_constraint_summary"]["rho_min"] is not None
+    assert payload["gcs_trajectory_constraint_summary"]["parameter_count"] > 0
+    assert payload["gcs_trajectory_constraint_summary"]["parameters"][0]["tangent"]
+    assert payload["gcs_trajectory_constraint_summary"]["parameters"][0]["normal"]
+    assert payload["gcs_trajectory_cost_summary"]["schema_version"] == "gcs_cost_summary/v1"
+    assert payload["gcs_trajectory_cost_summary"]["path_length"] == pytest.approx(
+        payload["gcs_trajectory_path_length"]
+    )
+    assert payload["gcs_trajectory_cost_summary"]["terrain_path_cost"] > 0.0
+    assert payload["gcs_trajectory_cost_summary"]["high_cost_exposure"] == 0.0
+    assert payload["gcs_trajectory_cost_summary"]["smoothness_proxy"] >= 0.0
 
 
 def test_gcs_trajectory_report_classifies_sample_collision():
+    pytest.importorskip("pydrake")
     grid = make_grid(
         [
             [True, True, True],
@@ -240,9 +264,14 @@ def test_gcs_trajectory_report_handles_unavailable_pydrake(monkeypatch):
     assert payload["gcs_trajectory_success"] is False
     assert payload["gcs_trajectory_reason"] == "pydrake_unavailable"
     assert "simulated missing pydrake" in payload["gcs_trajectory_result_status"]
+    assert payload["gcs_trajectory_constraint_summary"]["constraint_model"] == "direction_cone"
+    assert payload["gcs_trajectory_constraint_summary"]["evaluated"] is False
+    assert payload["gcs_trajectory_cost_summary"]["schema_version"] == "gcs_cost_summary/v1"
+    assert payload["gcs_trajectory_cost_summary"]["terrain_path_cost"] is None
 
 
 def test_gcs_trajectory_report_classifies_solver_infeasible(monkeypatch):
+    pytest.importorskip("pydrake")
     import path_planner.drake_backend.gcs_trajectory as gcs_backend
 
     grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
@@ -265,6 +294,7 @@ def test_gcs_trajectory_report_classifies_solver_infeasible(monkeypatch):
 
 
 def test_gcs_trajectory_report_is_optional_route_json_field_without_changing_route_semantics():
+    pytest.importorskip("pydrake")
     grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
     request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
     plan = AStarPlanner().plan(grid, request)
@@ -314,6 +344,120 @@ def test_gcs_geometric_candidate_selects_lower_cost_collision_free_sampled_path(
     assert payload["gcs_candidate_path_cost"] < plan.total_cost
     assert payload["gcs_candidate_cost_delta_vs_baseline"] < 0.0
     assert payload["gcs_candidate_baseline_overlap_ratio"] == 0.0
+    assert payload["gcs_candidate_constraint_summary"]["direction_cone"]["evaluated"] is True
+    assert payload["gcs_candidate_constraint_summary"]["direction_cone"]["violation_count"] == 0
+    assert payload["gcs_candidate_cost_summary"]["schema_version"] == "gcs_candidate_cost_summary/v1"
+    assert payload["gcs_candidate_cost_summary"]["terrain_path_cost"] == payload["gcs_candidate_path_cost"]
+    assert payload["gcs_candidate_cost_summary"]["cost_delta_vs_baseline"] < 0.0
+    assert payload["gcs_candidate_cost_summary"]["smoothness_proxy"] >= 0.0
+
+
+def test_gcs_geometric_candidate_blocks_when_direction_cone_was_not_evaluated():
+    grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [10.0, 10.0, 10.0, 10.0],
+        ]
+    )
+    plan = _plan_from_cells(grid, (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2)), total_cost=40.0)
+    postprocess = run_postprocess(grid, plan)
+    gcs_report = _gcs_report_from_points(
+        (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5), WorldPoint(3.5, 0.5)),
+        direction_cone_evaluated=False,
+    )
+
+    payload = build_gcs_geometric_candidate_report(grid, plan, postprocess, gcs_report).to_route_fields()
+
+    assert payload["gcs_candidate_attempted"] is True
+    assert payload["gcs_candidate_available"] is False
+    assert payload["gcs_candidate_selected"] is False
+    assert payload["gcs_candidate_fallback_reason"] == "direction_cone_not_evaluated"
+    assert payload["gcs_candidate_constraint_summary"]["direction_cone"]["evaluated"] is False
+
+
+def test_gcs_geometric_candidate_blocks_when_direction_cone_was_not_backend_enforced():
+    grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [10.0, 10.0, 10.0, 10.0],
+        ]
+    )
+    plan = _plan_from_cells(grid, (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2)), total_cost=40.0)
+    postprocess = run_postprocess(grid, plan)
+    gcs_report = _gcs_report_from_points(
+        (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5), WorldPoint(3.5, 0.5)),
+        direction_cone_backend_enforced=False,
+    )
+
+    payload = build_gcs_geometric_candidate_report(grid, plan, postprocess, gcs_report).to_route_fields()
+
+    assert payload["gcs_candidate_available"] is False
+    assert payload["gcs_candidate_selected"] is False
+    assert payload["gcs_candidate_fallback_reason"] == "direction_cone_not_backend_enforced"
+    assert payload["gcs_candidate_constraint_summary"]["direction_cone"]["backend_enforced"] is False
+
+
+def test_gcs_geometric_candidate_blocks_direction_cone_violation_without_replacing_route():
+    grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [10.0, 10.0, 10.0, 10.0],
+        ]
+    )
+    plan = _plan_from_cells(grid, (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2)), total_cost=40.0)
+    postprocess = run_postprocess(grid, plan)
+    gcs_report = _gcs_report_from_points(
+        (WorldPoint(0.5, 0.5), WorldPoint(1.5, 0.5), WorldPoint(2.5, 0.5), WorldPoint(3.5, 0.5)),
+        direction_cone_violation_count=1,
+    )
+
+    payload = build_gcs_geometric_candidate_report(grid, plan, postprocess, gcs_report).to_route_fields()
+
+    assert payload["gcs_candidate_available"] is False
+    assert payload["gcs_candidate_selected"] is False
+    assert payload["gcs_candidate_fallback_reason"] == "direction_cone_constraint_violation"
+    assert payload["gcs_candidate_constraint_summary"]["direction_cone"]["violation_count"] == 1
+
+
+def test_gcs_geometric_candidate_blocks_motion_infeasible_path_without_replacing_route():
+    grid = _candidate_grid(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [10.0, 10.0, 10.0, 10.0],
+        ]
+    )
+    plan = _plan_from_cells(grid, (Cell(0, 2), Cell(1, 2), Cell(2, 2), Cell(3, 2)), total_cost=40.0)
+    postprocess = run_postprocess(grid, plan)
+    gcs_report = _gcs_report_from_points(
+        (
+            WorldPoint(0.5, 0.5),
+            WorldPoint(1.5, 0.5),
+            WorldPoint(1.5, 1.5),
+            WorldPoint(2.5, 1.5),
+        )
+    )
+    motion_report = build_gcs_motion_feasibility_report(
+        gcs_report,
+        min_turning_radius_m=5.0,
+        max_heading_change_deg=30.0,
+    )
+
+    payload = build_gcs_geometric_candidate_report(
+        grid,
+        plan,
+        postprocess,
+        gcs_report,
+        motion_report,
+    ).to_route_fields()
+
+    assert payload["gcs_candidate_available"] is False
+    assert payload["gcs_candidate_selected"] is False
+    assert payload["gcs_candidate_fallback_reason"] == "motion_infeasible"
+    assert payload["gcs_candidate_constraint_summary"]["motion_feasibility"]["status"] == "infeasible"
 
 
 def test_gcs_geometric_candidate_reports_cost_dominated_path_without_replacing_route():
@@ -837,10 +981,16 @@ def test_cli_gcs_trajectory_smoke_writes_optional_report_without_changing_route_
     assert payload["reachable"] is True
     assert payload["gcs_ready"] is True
     assert payload["gcs_trajectory_report_schema_version"] == "gcs_trajectory_report/v1"
-    assert payload["gcs_trajectory_attempted"] is True
-    assert payload["gcs_trajectory_success"] is True
-    assert payload["gcs_trajectory_collision_count"] == 0
-    assert payload["gcs_trajectory_region_count"] == payload["convex_region_count"]
+    assert payload["gcs_trajectory_constraint_summary"]["constraint_model"] == "direction_cone"
+    assert payload["gcs_trajectory_cost_summary"]["schema_version"] == "gcs_cost_summary/v1"
+    if payload["gcs_trajectory_attempted"]:
+        assert payload["gcs_trajectory_success"] is True
+        assert payload["gcs_trajectory_collision_count"] == 0
+        assert payload["gcs_trajectory_region_count"] == payload["convex_region_count"]
+    else:
+        assert payload["gcs_trajectory_success"] is False
+        assert payload["gcs_trajectory_reason"] == "pydrake_unavailable"
+        assert payload["gcs_trajectory_constraint_summary"]["evaluated"] is False
     assert "gcs_trajectory_success" in completed.stdout
 
 
@@ -918,7 +1068,11 @@ def test_cli_gcs_motion_feasibility_is_opt_in_and_writes_report(tmp_path):
     assert payload["gcs_motion_feasibility_report_schema_version"] == "gcs_motion_feasibility_report/v1"
     assert payload["gcs_motion_feasibility_trajectory_source"] == "gcs_trajectory_sampled_points"
     assert payload["gcs_motion_feasibility_motion_model"] == "curvature_bounded"
-    assert payload["gcs_motion_feasibility_feasibility_status"] in {"feasible", "infeasible"}
+    if payload["gcs_trajectory_attempted"]:
+        assert payload["gcs_motion_feasibility_feasibility_status"] in {"feasible", "infeasible"}
+    else:
+        assert payload["gcs_motion_feasibility_feasibility_status"] == "diagnostic_only"
+        assert payload["gcs_motion_feasibility_fallback_reason"] == "gcs_trajectory_failed"
     assert "gcs_motion_feasibility_status" in completed.stdout
 
 
@@ -1113,7 +1267,13 @@ def _cell_center(grid, cell):
     return WorldPoint(cell.x + 0.5, cell.y + 0.5)
 
 
-def _gcs_report_from_points(points):
+def _gcs_report_from_points(
+    points,
+    *,
+    direction_cone_evaluated=True,
+    direction_cone_backend_enforced=True,
+    direction_cone_violation_count=0,
+):
     return GcsTrajectoryReport(
         attempted=True,
         success=True,
@@ -1125,4 +1285,58 @@ def _gcs_report_from_points(points):
         path_length=float(max(len(points) - 1, 0)),
         region_count=2,
         sampled_points=tuple(points),
+        constraint_summary=_direction_cone_summary(
+            evaluated=direction_cone_evaluated,
+            backend_enforced=direction_cone_backend_enforced,
+            violation_count=direction_cone_violation_count,
+        ),
+        cost_summary={
+            "schema_version": "gcs_cost_summary/v1",
+            "path_length": float(max(len(points) - 1, 0)),
+            "terrain_path_cost": float(len(points)),
+            "high_cost_exposure": 0.0,
+            "energy_proxy": float(max(len(points) - 1, 0)),
+            "smoothness_proxy": 0.0,
+        },
     )
+
+
+def _direction_cone_summary(*, evaluated=True, backend_enforced=True, violation_count=0):
+    actual_backend_enforced = bool(evaluated and backend_enforced)
+    return {
+        "schema_version": "gcs_direction_cone_constraint/v1",
+        "constraint_model": "direction_cone",
+        "attempted": True,
+        "evaluated": evaluated,
+        "status": "enforced" if actual_backend_enforced else "evaluated" if evaluated else "not_evaluated",
+        "backend_enforced": actual_backend_enforced,
+        "enforcing_backend": "pydrake_mathematical_program" if actual_backend_enforced else None,
+        "fallback_reason": (
+            None
+            if actual_backend_enforced
+            else "direction_cone_backend_constraint_not_supported"
+            if evaluated
+            else "insufficient_direction_cone_samples"
+        ),
+        "max_allowed_direction_error_deg": 45.0,
+        "eta": 1.0,
+        "rho_min": 1.0 if evaluated else None,
+        "region_width_min_m": 1.0 if evaluated else None,
+        "parameter_count": 1 if evaluated else 0,
+        "solver_constraint_count": 4 if actual_backend_enforced else 0,
+        "violation_count": int(violation_count),
+        "risk_flags": ["direction_cone_violation"] if violation_count else [],
+        "parameters": [
+            {
+                "edge_index": 0,
+                "tangent": [1.0, 0.0],
+                "normal": [-0.0, 1.0],
+                "rho": 1.0,
+                "eta": 1.0,
+                "region_width_m": 1.0,
+                "risk_flags": [],
+            }
+        ]
+        if evaluated
+        else [],
+    }

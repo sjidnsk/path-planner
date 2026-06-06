@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from path_planner.core import Cell, WorldPoint
@@ -21,7 +21,7 @@ CONVEX_REGION_SEQUENCE_SCHEMA_VERSION = "convex_region_sequence_report/v1"
 CONVEX_REGION_BACKENDS = frozenset({"workspace_iris", "fallback_box"})
 CONVEX_REGION_SOURCES = frozenset({"iris", "fallback_box"})
 GCS_TRAJECTORY_REPORT_SCHEMA_VERSION = "gcs_trajectory_report/v1"
-GCS_TRAJECTORY_BACKENDS = frozenset({"pydrake_gcs"})
+GCS_TRAJECTORY_BACKENDS = frozenset({"pydrake_gcs", "pydrake_direction_cone_program"})
 GCS_GEOMETRIC_CANDIDATE_REPORT_SCHEMA_VERSION = "gcs_geometric_candidate_report/v1"
 GCS_GEOMETRIC_CANDIDATE_SELECTION_REASONS = frozenset({"gcs_candidate_quality_improved"})
 GCS_GEOMETRIC_CANDIDATE_FALLBACK_REASONS = frozenset(
@@ -33,6 +33,10 @@ GCS_GEOMETRIC_CANDIDATE_FALLBACK_REASONS = frozenset(
         "gcs_report_missing",
         "gcs_trajectory_failed",
         "unsupported_route_replacement",
+        "direction_cone_not_evaluated",
+        "direction_cone_not_backend_enforced",
+        "direction_cone_constraint_violation",
+        "motion_infeasible",
     }
 )
 GCS_MOTION_FEASIBILITY_REPORT_SCHEMA_VERSION = "gcs_motion_feasibility_report/v1"
@@ -331,6 +335,8 @@ class GcsTrajectoryReport:
     path_length: float
     region_count: int
     sampled_points: tuple[WorldPoint, ...] = ()
+    constraint_summary: dict[str, Any] = field(default_factory=dict)
+    cost_summary: dict[str, Any] = field(default_factory=dict)
     schema_version: str = GCS_TRAJECTORY_REPORT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -361,6 +367,8 @@ class GcsTrajectoryReport:
             "gcs_trajectory_path_length": self.path_length,
             "gcs_trajectory_region_count": self.region_count,
             "gcs_trajectory_sampled_points": [point.to_list() for point in self.sampled_points],
+            "gcs_trajectory_constraint_summary": dict(self.constraint_summary),
+            "gcs_trajectory_cost_summary": dict(self.cost_summary),
         }
 
 
@@ -378,6 +386,8 @@ class GcsGeometricCandidateReport:
     baseline_overlap_ratio: float | None
     cost_delta_vs_baseline: float | None
     cost_delta_vs_postprocess: float | None
+    constraint_summary: dict[str, Any] = field(default_factory=dict)
+    cost_summary: dict[str, Any] = field(default_factory=dict)
     schema_version: str = GCS_GEOMETRIC_CANDIDATE_REPORT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -425,6 +435,8 @@ class GcsGeometricCandidateReport:
             "gcs_candidate_baseline_overlap_ratio": self.baseline_overlap_ratio,
             "gcs_candidate_cost_delta_vs_baseline": self.cost_delta_vs_baseline,
             "gcs_candidate_cost_delta_vs_postprocess": self.cost_delta_vs_postprocess,
+            "gcs_candidate_constraint_summary": dict(self.constraint_summary),
+            "gcs_candidate_cost_summary": dict(self.cost_summary),
         }
 
 

@@ -262,6 +262,14 @@ def main(argv: list[str] | None = None) -> int:
             grid,
             convex_region_sequence_report,
         )
+    gcs_motion_feasibility_report = None
+    if args.gcs_geometric_candidate or args.gcs_motion_feasibility or args.gcs_curvature_constrained_candidate:
+        gcs_motion_feasibility_report = build_gcs_motion_feasibility_report(
+            gcs_trajectory_report,
+            min_turning_radius_m=platform_profile.effective_min_turning_radius_m,
+            max_heading_change_deg=args.max_heading_change_deg,
+            max_curvature=args.max_curvature,
+        )
     gcs_candidate_report = None
     if args.gcs_geometric_candidate:
         gcs_candidate_report = build_gcs_geometric_candidate_report(
@@ -269,14 +277,7 @@ def main(argv: list[str] | None = None) -> int:
             result,
             postprocess,
             gcs_trajectory_report,
-        )
-    gcs_motion_feasibility_report = None
-    if args.gcs_motion_feasibility or args.gcs_curvature_constrained_candidate:
-        gcs_motion_feasibility_report = build_gcs_motion_feasibility_report(
-            gcs_trajectory_report,
-            min_turning_radius_m=platform_profile.effective_min_turning_radius_m,
-            max_heading_change_deg=args.max_heading_change_deg,
-            max_curvature=args.max_curvature,
+            gcs_motion_feasibility_report,
         )
     gcs_curvature_constrained_candidate_report = None
     if args.gcs_curvature_constrained_candidate:

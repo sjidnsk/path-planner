@@ -5,7 +5,8 @@ from math import hypot, isfinite
 from path_planner.core import Cell, CostGrid, PlanResult, WorldPoint
 from path_planner.postprocess import PostprocessResult
 
-from .models import GcsGeometricCandidateReport, GcsTrajectoryReport
+from .gcs_diagnostics import build_gcs_cost_summary
+from .models import GcsGeometricCandidateReport, GcsMotionFeasibilityReport, GcsTrajectoryReport
 
 GCS_CANDIDATE_SELECTED_REASON = "gcs_candidate_quality_improved"
 
@@ -15,6 +16,7 @@ def build_gcs_geometric_candidate_report(
     result: PlanResult,
     postprocess: PostprocessResult | None,
     gcs_trajectory_report: GcsTrajectoryReport | None,
+    gcs_motion_feasibility_report: GcsMotionFeasibilityReport | None = None,
     *,
     high_cost_threshold: float = 3.0,
     duplicate_overlap_threshold: float = 0.95,
@@ -23,18 +25,61 @@ def build_gcs_geometric_candidate_report(
     if gcs_trajectory_report is None:
         return _unavailable("gcs_report_missing")
     if not result.success or not result.path_cells:
-        return _unavailable("unsupported_route_replacement")
+        return _unavailable(
+            "unsupported_route_replacement",
+            constraint_summary=_constraint_summary(
+                gcs_trajectory_report,
+                gcs_motion_feasibility_report,
+            ),
+        )
     if not gcs_trajectory_report.success:
         if gcs_trajectory_report.reason == "sampled_trajectory_collision":
             return _unavailable(
                 "sampled_trajectory_collision",
                 collision_count=gcs_trajectory_report.collision_count,
+                constraint_summary=_constraint_summary(
+                    gcs_trajectory_report,
+                    gcs_motion_feasibility_report,
+                ),
             )
-        return _unavailable("gcs_trajectory_failed")
+        return _unavailable(
+            "gcs_trajectory_failed",
+            constraint_summary=_constraint_summary(
+                gcs_trajectory_report,
+                gcs_motion_feasibility_report,
+            ),
+        )
 
     sampled_points = gcs_trajectory_report.sampled_points
     if not sampled_points:
-        return _unavailable("gcs_trajectory_failed")
+        return _unavailable(
+            "gcs_trajectory_failed",
+            constraint_summary=_constraint_summary(
+                gcs_trajectory_report,
+                gcs_motion_feasibility_report,
+            ),
+        )
+    direction_cone_blocker = _direction_cone_blocker(gcs_trajectory_report)
+    if direction_cone_blocker is not None:
+        return _unavailable(
+            direction_cone_blocker,
+            constraint_summary=_constraint_summary(
+                gcs_trajectory_report,
+                gcs_motion_feasibility_report,
+            ),
+        )
+    if (
+        gcs_motion_feasibility_report is not None
+        and gcs_motion_feasibility_report.evaluated
+        and gcs_motion_feasibility_report.feasibility_status == "infeasible"
+    ):
+        return _unavailable(
+            "motion_infeasible",
+            constraint_summary=_constraint_summary(
+                gcs_trajectory_report,
+                gcs_motion_feasibility_report,
+            ),
+        )
 
     candidate = _path_metrics(
         grid,
@@ -56,6 +101,19 @@ def build_gcs_geometric_candidate_report(
             baseline_overlap_ratio=_baseline_overlap_ratio(candidate.cells, result.path_cells),
             cost_delta_vs_baseline=None,
             cost_delta_vs_postprocess=None,
+            constraint_summary=_constraint_summary(
+                gcs_trajectory_report,
+                gcs_motion_feasibility_report,
+            ),
+            cost_summary=_candidate_cost_summary(
+                grid,
+                sampled_points,
+                candidate,
+                baseline_cost=None,
+                postprocess_cost=None,
+                cost_delta_vs_baseline=None,
+                cost_delta_vs_postprocess=None,
+            ),
         )
 
     baseline_cost = _finite_float(result.total_cost)
@@ -83,6 +141,19 @@ def build_gcs_geometric_candidate_report(
             baseline_overlap_ratio=overlap_ratio,
             cost_delta_vs_baseline=cost_delta_vs_baseline,
             cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+            constraint_summary=_constraint_summary(
+                gcs_trajectory_report,
+                gcs_motion_feasibility_report,
+            ),
+            cost_summary=_candidate_cost_summary(
+                grid,
+                sampled_points,
+                candidate,
+                baseline_cost=baseline_cost,
+                postprocess_cost=postprocess_cost,
+                cost_delta_vs_baseline=cost_delta_vs_baseline,
+                cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+            ),
         )
 
     fallback_reason = _fallback_reason(
@@ -105,6 +176,19 @@ def build_gcs_geometric_candidate_report(
         baseline_overlap_ratio=overlap_ratio,
         cost_delta_vs_baseline=cost_delta_vs_baseline,
         cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+        constraint_summary=_constraint_summary(
+            gcs_trajectory_report,
+            gcs_motion_feasibility_report,
+        ),
+        cost_summary=_candidate_cost_summary(
+            grid,
+            sampled_points,
+            candidate,
+            baseline_cost=baseline_cost,
+            postprocess_cost=postprocess_cost,
+            cost_delta_vs_baseline=cost_delta_vs_baseline,
+            cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+        ),
     )
 
 
@@ -125,7 +209,13 @@ class _PathMetrics:
         self.high_cost_exposure = high_cost_exposure
 
 
-def _unavailable(reason: str, *, collision_count: int = 0) -> GcsGeometricCandidateReport:
+def _unavailable(
+    reason: str,
+    *,
+    collision_count: int = 0,
+    constraint_summary: dict | None = None,
+    cost_summary: dict | None = None,
+) -> GcsGeometricCandidateReport:
     return GcsGeometricCandidateReport(
         attempted=True,
         available=False,
@@ -139,6 +229,8 @@ def _unavailable(reason: str, *, collision_count: int = 0) -> GcsGeometricCandid
         baseline_overlap_ratio=None,
         cost_delta_vs_baseline=None,
         cost_delta_vs_postprocess=None,
+        constraint_summary=constraint_summary or _empty_constraint_summary(),
+        cost_summary=cost_summary or _empty_candidate_cost_summary(),
     )
 
 
@@ -231,6 +323,83 @@ def _fallback_reason(
     if cost_delta_vs_postprocess is not None and cost_delta_vs_postprocess > improvement_epsilon:
         return "cost_dominated"
     return "no_quality_gain"
+
+
+def _direction_cone_blocker(gcs_trajectory_report: GcsTrajectoryReport) -> str | None:
+    direction_cone = gcs_trajectory_report.constraint_summary
+    if direction_cone.get("constraint_model") != "direction_cone":
+        return "direction_cone_not_evaluated"
+    if not direction_cone.get("evaluated", False):
+        return "direction_cone_not_evaluated"
+    if not direction_cone.get("backend_enforced", False):
+        return "direction_cone_not_backend_enforced"
+    if int(direction_cone.get("violation_count") or 0) > 0:
+        return "direction_cone_constraint_violation"
+    return None
+
+
+def _constraint_summary(
+    gcs_trajectory_report: GcsTrajectoryReport | None,
+    gcs_motion_feasibility_report: GcsMotionFeasibilityReport | None,
+) -> dict:
+    motion = {"evaluated": False, "status": "not_requested", "fallback_reason": None}
+    if gcs_motion_feasibility_report is not None:
+        motion = {
+            "evaluated": gcs_motion_feasibility_report.evaluated,
+            "status": gcs_motion_feasibility_report.feasibility_status,
+            "fallback_reason": gcs_motion_feasibility_report.fallback_reason,
+            "motion_model": gcs_motion_feasibility_report.motion_model,
+        }
+    return {
+        "schema_version": "gcs_candidate_constraint_summary/v1",
+        "direction_cone": dict(gcs_trajectory_report.constraint_summary) if gcs_trajectory_report is not None else {},
+        "motion_feasibility": motion,
+    }
+
+
+def _empty_constraint_summary() -> dict:
+    return {
+        "schema_version": "gcs_candidate_constraint_summary/v1",
+        "direction_cone": {},
+        "motion_feasibility": {"evaluated": False, "status": "not_requested", "fallback_reason": None},
+    }
+
+
+def _candidate_cost_summary(
+    grid: CostGrid,
+    sampled_points: tuple[WorldPoint, ...],
+    candidate: _PathMetrics,
+    *,
+    baseline_cost: float | None,
+    postprocess_cost: float | None,
+    cost_delta_vs_baseline: float | None,
+    cost_delta_vs_postprocess: float | None,
+) -> dict:
+    summary = build_gcs_cost_summary(grid, sampled_points)
+    summary["schema_version"] = "gcs_candidate_cost_summary/v1"
+    summary["terrain_path_cost"] = candidate.path_cost
+    summary["path_length"] = candidate.path_length
+    summary["high_cost_exposure"] = candidate.high_cost_exposure
+    summary["baseline_path_cost"] = baseline_cost
+    summary["postprocess_path_cost"] = postprocess_cost
+    summary["cost_delta_vs_baseline"] = cost_delta_vs_baseline
+    summary["cost_delta_vs_postprocess"] = cost_delta_vs_postprocess
+    return summary
+
+
+def _empty_candidate_cost_summary() -> dict:
+    return {
+        "schema_version": "gcs_candidate_cost_summary/v1",
+        "path_length": None,
+        "terrain_path_cost": None,
+        "high_cost_exposure": None,
+        "energy_proxy": None,
+        "smoothness_proxy": None,
+        "baseline_path_cost": None,
+        "postprocess_path_cost": None,
+        "cost_delta_vs_baseline": None,
+        "cost_delta_vs_postprocess": None,
+    }
 
 
 def _finite_float(value: float | None) -> float | None:
