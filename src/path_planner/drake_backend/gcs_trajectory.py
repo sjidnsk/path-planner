@@ -10,6 +10,7 @@ from path_planner.core import Cell, CostGrid, WorldPoint
 from .gcs_diagnostics import (
     build_direction_cone_constraint_summary,
     build_gcs_cost_summary,
+    direction_cone_edge_parameters,
     direction_cone_not_evaluated_summary,
     empty_gcs_cost_summary,
     mark_direction_cone_backend_enforced,
@@ -212,17 +213,18 @@ def _solve_gcs_path(
         prog.AddBoundingBoxConstraint(value, value, variable)
         constraint_count += 1
 
-    eta = np.tan(np.deg2rad(45.0))
     for index, (first, second) in enumerate(zip(regions[:-1], regions[1:])):
-        tangent = _seed_tangent(first, second)
-        if tangent is None:
+        edge_parameters = direction_cone_edge_parameters(first, second)
+        if edge_parameters["seed_distance_m"] <= 0.0:
             raise ValueError("direction_cone reference segment is degenerate")
+        tangent = np.asarray(edge_parameters["tangent"], dtype=float)
         normal = np.asarray([-tangent[1], tangent[0]], dtype=float)
         delta_x = variables[index + 1, 0] - variables[index, 0]
         delta_y = variables[index + 1, 1] - variables[index, 1]
         forward = tangent[0] * delta_x + tangent[1] * delta_y
         lateral = normal[0] * delta_x + normal[1] * delta_y
-        rho = max(1.0e-4, 0.05 * _seed_distance(first, second))
+        eta = float(edge_parameters["eta"])
+        rho = float(edge_parameters["rho_lower_bound_m"])
 
         prog.AddLinearConstraint(forward, rho, np.inf)
         prog.AddLinearConstraint(lateral - eta * forward, -np.inf, 0.0)

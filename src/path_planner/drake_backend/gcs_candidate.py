@@ -109,10 +109,20 @@ def build_gcs_geometric_candidate_report(
                 grid,
                 sampled_points,
                 candidate,
+                high_cost_threshold=high_cost_threshold,
                 baseline_cost=None,
                 postprocess_cost=None,
                 cost_delta_vs_baseline=None,
                 cost_delta_vs_postprocess=None,
+                candidate_decision="blocked",
+                decision_reason="sampled_trajectory_collision",
+                quality_gate=_quality_gate_summary(
+                    cost_delta_vs_baseline=None,
+                    cost_delta_vs_postprocess=None,
+                    overlap_ratio=None,
+                    duplicate_overlap_threshold=duplicate_overlap_threshold,
+                    improvement_epsilon=improvement_epsilon,
+                ),
             ),
         )
 
@@ -149,10 +159,20 @@ def build_gcs_geometric_candidate_report(
                 grid,
                 sampled_points,
                 candidate,
+                high_cost_threshold=high_cost_threshold,
                 baseline_cost=baseline_cost,
                 postprocess_cost=postprocess_cost,
                 cost_delta_vs_baseline=cost_delta_vs_baseline,
                 cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+                candidate_decision="selected",
+                decision_reason=GCS_CANDIDATE_SELECTED_REASON,
+                quality_gate=_quality_gate_summary(
+                    cost_delta_vs_baseline=cost_delta_vs_baseline,
+                    cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+                    overlap_ratio=overlap_ratio,
+                    duplicate_overlap_threshold=duplicate_overlap_threshold,
+                    improvement_epsilon=improvement_epsilon,
+                ),
             ),
         )
 
@@ -184,10 +204,20 @@ def build_gcs_geometric_candidate_report(
             grid,
             sampled_points,
             candidate,
+            high_cost_threshold=high_cost_threshold,
             baseline_cost=baseline_cost,
             postprocess_cost=postprocess_cost,
             cost_delta_vs_baseline=cost_delta_vs_baseline,
             cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+            candidate_decision="blocked",
+            decision_reason=fallback_reason,
+            quality_gate=_quality_gate_summary(
+                cost_delta_vs_baseline=cost_delta_vs_baseline,
+                cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+                overlap_ratio=overlap_ratio,
+                duplicate_overlap_threshold=duplicate_overlap_threshold,
+                improvement_epsilon=improvement_epsilon,
+            ),
         ),
     )
 
@@ -370,12 +400,16 @@ def _candidate_cost_summary(
     sampled_points: tuple[WorldPoint, ...],
     candidate: _PathMetrics,
     *,
+    high_cost_threshold: float,
     baseline_cost: float | None,
     postprocess_cost: float | None,
     cost_delta_vs_baseline: float | None,
     cost_delta_vs_postprocess: float | None,
+    candidate_decision: str,
+    decision_reason: str,
+    quality_gate: dict,
 ) -> dict:
-    summary = build_gcs_cost_summary(grid, sampled_points)
+    summary = build_gcs_cost_summary(grid, sampled_points, high_cost_threshold=high_cost_threshold)
     summary["schema_version"] = "gcs_candidate_cost_summary/v1"
     summary["terrain_path_cost"] = candidate.path_cost
     summary["path_length"] = candidate.path_length
@@ -384,6 +418,9 @@ def _candidate_cost_summary(
     summary["postprocess_path_cost"] = postprocess_cost
     summary["cost_delta_vs_baseline"] = cost_delta_vs_baseline
     summary["cost_delta_vs_postprocess"] = cost_delta_vs_postprocess
+    summary["candidate_decision"] = candidate_decision
+    summary["decision_reason"] = decision_reason
+    summary["quality_gate"] = quality_gate
     return summary
 
 
@@ -393,12 +430,49 @@ def _empty_candidate_cost_summary() -> dict:
         "path_length": None,
         "terrain_path_cost": None,
         "high_cost_exposure": None,
+        "terrain_cost_source": "not_evaluated",
+        "high_cost_threshold": None,
+        "sampled_cell_count": 0,
+        "blocked_sample_count": 0,
         "energy_proxy": None,
         "smoothness_proxy": None,
         "baseline_path_cost": None,
         "postprocess_path_cost": None,
         "cost_delta_vs_baseline": None,
         "cost_delta_vs_postprocess": None,
+        "candidate_decision": "blocked",
+        "decision_reason": "cost_not_evaluated",
+        "quality_gate": {},
+    }
+
+
+def _quality_gate_summary(
+    *,
+    cost_delta_vs_baseline: float | None,
+    cost_delta_vs_postprocess: float | None,
+    overlap_ratio: float | None,
+    duplicate_overlap_threshold: float,
+    improvement_epsilon: float,
+) -> dict:
+    baseline_delta_improved = (
+        None if cost_delta_vs_baseline is None else cost_delta_vs_baseline < -improvement_epsilon
+    )
+    postprocess_delta_improved = (
+        None if cost_delta_vs_postprocess is None else cost_delta_vs_postprocess < -improvement_epsilon
+    )
+    duplicate_with_baseline = (
+        None
+        if overlap_ratio is None or cost_delta_vs_baseline is None
+        else overlap_ratio >= duplicate_overlap_threshold
+        and abs(cost_delta_vs_baseline) <= improvement_epsilon
+    )
+    return {
+        "baseline_delta_improved": baseline_delta_improved,
+        "postprocess_delta_improved": postprocess_delta_improved,
+        "duplicate_with_baseline": duplicate_with_baseline,
+        "baseline_overlap_ratio": overlap_ratio,
+        "duplicate_overlap_threshold": float(duplicate_overlap_threshold),
+        "improvement_epsilon": float(improvement_epsilon),
     }
 
 

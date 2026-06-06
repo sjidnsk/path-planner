@@ -22,6 +22,7 @@ from path_planner.drake_backend import (
     build_gcs_trajectory_report,
     build_workspace_iris_region_report,
 )
+from path_planner.drake_backend.gcs_diagnostics import build_direction_cone_constraint_summary
 from path_planner.postprocess import build_corridor, run_postprocess
 from path_planner.postprocess.models import CorridorResult, CorridorSection
 from path_planner.search import AStarPlanner
@@ -244,6 +245,59 @@ def test_gcs_trajectory_report_classifies_sample_collision():
     assert payload["gcs_trajectory_collision_count"] > 0
 
 
+def test_direction_cone_summary_reports_portal_support_and_rho_parameters():
+    grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    convex_report = build_convex_region_sequence_report(grid, plan, corridor)
+    points = tuple(region.seed_world for region in convex_report.regions)
+
+    summary = build_direction_cone_constraint_summary(points, convex_report.regions)
+
+    assert summary["evaluated"] is True
+    assert summary["portal_width_min_m"] is not None
+    assert summary["support_width_min_m"] is not None
+    assert summary["rho_lower_bound_min_m"] is not None
+    assert summary["rho_source_counts"]["seed_distance_portal_support_min"] > 0
+    assert summary["constraint_tightness_min"] > 1.0
+    first_parameter = summary["parameters"][0]
+    assert first_parameter["portal_width_m"] is not None
+    assert first_parameter["support_width_m"] is not None
+    assert first_parameter["rho_lower_bound_m"] > 0.0
+    assert first_parameter["rho_source"] == "seed_distance_portal_support_min"
+    assert first_parameter["constraint_tightness"] > 1.0
+
+
+def test_direction_cone_summary_flags_degenerate_portal_geometry():
+    grid = make_grid(np.ones((2, 2), dtype=bool), resolution=1.0)
+    first = _convex_region_for_bounds(
+        grid,
+        region_id=0,
+        seed=Cell(0, 0),
+        min_cell=Cell(0, 0),
+        max_cell=Cell(0, 0),
+    )
+    second = _convex_region_for_bounds(
+        grid,
+        region_id=1,
+        seed=Cell(1, 1),
+        min_cell=Cell(1, 1),
+        max_cell=Cell(1, 1),
+    )
+
+    summary = build_direction_cone_constraint_summary(
+        (first.seed_world, second.seed_world),
+        (first, second),
+    )
+
+    assert summary["evaluated"] is True
+    assert summary["portal_width_min_m"] == 0.0
+    assert "degenerate_portal_width" in summary["risk_flags"]
+    assert summary["parameters"][0]["portal_width_m"] == 0.0
+    assert "degenerate_portal_width" in summary["parameters"][0]["risk_flags"]
+
+
 def test_gcs_trajectory_report_handles_unavailable_pydrake(monkeypatch):
     import path_planner.drake_backend.gcs_trajectory as gcs_backend
 
@@ -350,6 +404,10 @@ def test_gcs_geometric_candidate_selects_lower_cost_collision_free_sampled_path(
     assert payload["gcs_candidate_cost_summary"]["terrain_path_cost"] == payload["gcs_candidate_path_cost"]
     assert payload["gcs_candidate_cost_summary"]["cost_delta_vs_baseline"] < 0.0
     assert payload["gcs_candidate_cost_summary"]["smoothness_proxy"] >= 0.0
+    assert payload["gcs_candidate_cost_summary"]["candidate_decision"] == "selected"
+    assert payload["gcs_candidate_cost_summary"]["decision_reason"] == "gcs_candidate_quality_improved"
+    assert payload["gcs_candidate_cost_summary"]["quality_gate"]["baseline_delta_improved"] is True
+    assert payload["gcs_candidate_cost_summary"]["terrain_cost_source"] == "sampled_unique_passable_cells"
 
 
 def test_gcs_geometric_candidate_blocks_when_direction_cone_was_not_evaluated():
@@ -481,6 +539,9 @@ def test_gcs_geometric_candidate_reports_cost_dominated_path_without_replacing_r
     assert payload["gcs_candidate_selected"] is False
     assert payload["gcs_candidate_fallback_reason"] == "cost_dominated"
     assert payload["gcs_candidate_cost_delta_vs_baseline"] > 0.0
+    assert payload["gcs_candidate_cost_summary"]["candidate_decision"] == "blocked"
+    assert payload["gcs_candidate_cost_summary"]["decision_reason"] == "cost_dominated"
+    assert payload["gcs_candidate_cost_summary"]["quality_gate"]["baseline_delta_improved"] is False
 
 
 def test_gcs_geometric_candidate_reports_duplicate_baseline_path():
@@ -1200,6 +1261,25 @@ def _unsafe_two_region_report(grid):
         gcs_ready_reason="convex_region_sequence_ready",
         regions=regions,
         pydrake_available=True,
+    )
+
+
+def _convex_region_for_bounds(grid, *, region_id, seed, min_cell, max_cell):
+    min_world = grid.spec.cell_to_world(min_cell)
+    max_world = grid.spec.cell_to_world(Cell(max_cell.x + 1, max_cell.y + 1))
+    return ConvexRegionSequenceItem(
+        region_id=region_id,
+        backend="fallback_box",
+        source="fallback_box",
+        seed_cell=seed,
+        seed_world=_cell_center(grid, seed),
+        min_cell=min_cell,
+        max_cell=max_cell,
+        min_world=min_world,
+        max_world=max_world,
+        hpolyhedron_a=((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)),
+        hpolyhedron_b=(max_world.x, -min_world.x, max_world.y, -min_world.y),
+        covered_path_indices=(region_id,),
     )
 
 
