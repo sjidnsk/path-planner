@@ -405,10 +405,48 @@ def test_gcs_control_point_report_solves_derivative_direction_cone_path():
     assert summary["objective_terms"] == [
         "segment_length_quadratic",
         "low_cost_anchor_quadratic",
+        "control_point_terrain_anchor_quadratic",
         "control_point_second_difference_quadratic",
     ]
     assert payload["gcs_trajectory_cost_summary"]["schema_version"] == "gcs_cost_summary/v1"
     assert payload["gcs_trajectory_cost_summary"]["terrain_path_cost"] > 0.0
+
+
+@pytest.mark.drake
+def test_gcs_control_point_report_exposes_terrain_cost_objective_proxy():
+    pytest.importorskip("pydrake")
+    grid = _candidate_grid(
+        [
+            [1.0, 8.0, 1.0, 1.0],
+            [1.0, 6.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    request = PlanRequest(start=Cell(0, 2), goal=Cell(3, 0))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    convex_report = build_convex_region_sequence_report(grid, plan, corridor)
+
+    report = build_gcs_control_point_trajectory_report(grid, convex_report, sample_count=9)
+    payload = report.to_route_fields()
+    constraint_summary = payload["gcs_trajectory_constraint_summary"]
+    cost_summary = payload["gcs_trajectory_cost_summary"]
+
+    assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert payload["gcs_trajectory_success"] is True
+    assert "control_point_terrain_anchor_quadratic" in constraint_summary["objective_terms"]
+    assert constraint_summary["objective_term_weights"]["control_point_terrain_anchor_quadratic"] > 0.0
+    assert constraint_summary["terrain_objective_source"] == (
+        "region_inverse_cost_weighted_passable_cell_centroid"
+    )
+    assert cost_summary["terrain_objective_source"] == (
+        "region_inverse_cost_weighted_passable_cell_centroid"
+    )
+    assert cost_summary["terrain_objective_weight"] > 0.0
+    assert cost_summary["terrain_objective_anchor_count"] == convex_report.region_count
+    assert cost_summary["control_point_terrain_cost"] > 0.0
+    assert cost_summary["sampled_terrain_cost"] == cost_summary["terrain_path_cost"]
+    assert cost_summary["terrain_objective_boundary"] == "proxy_not_continuous_field_integral"
 
 
 def test_gcs_control_point_report_handles_unavailable_pydrake(monkeypatch):
@@ -436,6 +474,8 @@ def test_gcs_control_point_report_handles_unavailable_pydrake(monkeypatch):
     assert payload["gcs_trajectory_constraint_summary"]["trajectory_parameterization"] == (
         "control_point_derivative_proxy"
     )
+    assert payload["gcs_trajectory_cost_summary"]["terrain_objective_source"] == "not_evaluated"
+    assert payload["gcs_trajectory_cost_summary"]["sampled_terrain_cost"] is None
 
 
 def test_gcs_control_point_report_is_optional_route_json_field_without_changing_route_semantics():
@@ -634,6 +674,42 @@ def test_gcs_geometric_candidate_reports_cost_dominated_path_without_replacing_r
     assert payload["gcs_candidate_cost_summary"]["candidate_decision"] == "blocked"
     assert payload["gcs_candidate_cost_summary"]["decision_reason"] == "cost_dominated"
     assert payload["gcs_candidate_cost_summary"]["quality_gate"]["baseline_delta_improved"] is False
+
+
+def test_gcs_geometric_candidate_blocks_when_high_cost_exposure_worsens():
+    grid = _candidate_grid(
+        [
+            [10.0, 10.0, 10.0, 10.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    baseline_cells = (Cell(0, 1), Cell(1, 1), Cell(2, 1), Cell(3, 1))
+    plan = _plan_from_cells(grid, baseline_cells, total_cost=50.0)
+    gcs_report = _gcs_report_from_points(
+        (
+            WorldPoint(0.5, 0.5),
+            WorldPoint(1.5, 0.5),
+            WorldPoint(2.5, 0.5),
+            WorldPoint(3.5, 0.5),
+        )
+    )
+
+    payload = build_gcs_geometric_candidate_report(
+        grid,
+        plan,
+        None,
+        gcs_report,
+        high_cost_threshold=3.0,
+    ).to_route_fields()
+
+    assert payload["gcs_candidate_available"] is True
+    assert payload["gcs_candidate_selected"] is False
+    assert payload["gcs_candidate_fallback_reason"] == "high_cost_exposure"
+    assert payload["gcs_candidate_cost_delta_vs_baseline"] < 0.0
+    assert payload["gcs_candidate_high_cost_exposure"] > 0.0
+    assert payload["gcs_candidate_cost_summary"]["baseline_high_cost_exposure"] == 0.0
+    assert payload["gcs_candidate_cost_summary"]["high_cost_exposure_delta_vs_baseline"] > 0.0
+    assert payload["gcs_candidate_cost_summary"]["quality_gate"]["high_cost_exposure_not_worse"] is False
 
 
 def test_gcs_geometric_candidate_reports_duplicate_baseline_path():
@@ -1759,6 +1835,155 @@ def test_gcs_motion_feasibility_batch_summary_flags_expected_mismatches():
     assert summary["expectation_failures"] == [
         {"case_id": "mismatch_case", "mismatch_fields": ["outcome", "decision_reason"]}
     ]
+
+
+def test_gcs_control_point_terrain_cost_batch_summary_flags_expected_mismatches():
+    from path_planner.drake_backend.gcs_cli_batch import (
+        build_gcs_control_point_terrain_cost_batch_summary,
+    )
+
+    selected_payload = {
+        "gcs_trajectory_attempted": True,
+        "gcs_trajectory_success": True,
+        "gcs_trajectory_backend": "pydrake_control_point_direction_cone_program",
+        "gcs_trajectory_reason": "control_point_direction_cone_solution_found",
+        "gcs_candidate_selected": True,
+        "gcs_candidate_available": True,
+        "gcs_candidate_fallback_reason": None,
+        "gcs_candidate_selection_reason": "gcs_candidate_quality_improved",
+        "gcs_candidate_cost_delta_vs_baseline": -4.0,
+        "gcs_candidate_high_cost_exposure": 0.0,
+        "gcs_candidate_cost_summary": {
+            "candidate_decision": "selected",
+            "decision_reason": "gcs_candidate_quality_improved",
+            "cost_delta_vs_baseline": -4.0,
+            "high_cost_exposure": 0.0,
+            "sampled_terrain_cost": 6.0,
+            "terrain_objective_source": "region_inverse_cost_weighted_passable_cell_centroid",
+            "terrain_objective_weight": 0.05,
+            "control_point_terrain_cost": 6.0,
+        },
+        "gcs_trajectory_cost_summary": {
+            "sampled_terrain_cost": 6.0,
+            "terrain_objective_source": "region_inverse_cost_weighted_passable_cell_centroid",
+            "terrain_objective_weight": 0.05,
+            "control_point_terrain_cost": 6.0,
+        },
+    }
+    unavailable_payload = {
+        "gcs_trajectory_attempted": False,
+        "gcs_trajectory_success": False,
+        "gcs_trajectory_backend": "pydrake_control_point_direction_cone_program",
+        "gcs_trajectory_reason": "pydrake_unavailable",
+        "gcs_candidate_selected": False,
+        "gcs_candidate_available": False,
+        "gcs_candidate_fallback_reason": "gcs_trajectory_failed",
+        "gcs_candidate_cost_summary": {
+            "candidate_decision": "blocked",
+            "decision_reason": "cost_not_evaluated",
+        },
+        "gcs_trajectory_cost_summary": {
+            "sampled_terrain_cost": None,
+            "terrain_objective_source": "not_evaluated",
+            "terrain_objective_weight": None,
+            "control_point_terrain_cost": None,
+        },
+    }
+
+    summary = build_gcs_control_point_terrain_cost_batch_summary(
+        [
+            {
+                "case_id": "selected_case",
+                "payload": selected_payload,
+                "expected": {"outcome": "selected", "decision_reason": "gcs_candidate_quality_improved"},
+            },
+            {
+                "case_id": "mismatch_case",
+                "payload": unavailable_payload,
+                "expected": {"outcome": "selected", "decision_reason": "gcs_candidate_quality_improved"},
+            },
+        ]
+    )
+
+    assert summary["schema_version"] == "gcs_control_point_terrain_cost_cli_batch/v1"
+    assert summary["case_count"] == 2
+    assert summary["selected_count"] == 1
+    assert summary["blocked_count"] == 1
+    assert summary["terrain_objective_evaluated_count"] == 1
+    assert summary["decision_reason_counts"]["gcs_candidate_quality_improved"] == 1
+    assert summary["decision_reason_counts"]["pydrake_unavailable"] == 1
+    assert summary["expectation_failures"] == [
+        {"case_id": "mismatch_case", "mismatch_fields": ["outcome", "decision_reason"]}
+    ]
+    selected = summary["cases"][0]
+    assert selected["trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert selected["terrain_objective_source"] == (
+        "region_inverse_cost_weighted_passable_cell_centroid"
+    )
+    assert selected["sampled_terrain_cost"] == 6.0
+    assert selected["control_point_terrain_cost"] == 6.0
+
+
+@pytest.mark.drake
+def test_gcs_control_point_terrain_cost_cli_batch_summarizes_route_json_cases(tmp_path):
+    pytest.importorskip("pydrake")
+    from path_planner.drake_backend.gcs_cli_batch import run_gcs_control_point_terrain_cost_cli_batch
+
+    output_dir = tmp_path / "control-point-terrain-batch"
+    summary_json = output_dir / "summary.json"
+
+    summary = run_gcs_control_point_terrain_cost_cli_batch(
+        output_dir=output_dir,
+        summary_json=summary_json,
+        python_executable=sys.executable,
+    )
+
+    assert summary_json.exists()
+    persisted = json.loads(summary_json.read_text(encoding="utf-8"))
+    assert persisted == summary
+    assert summary["schema_version"] == "gcs_control_point_terrain_cost_cli_batch/v1"
+    assert summary["case_count"] == 5
+    assert summary["selected_count"] >= 1
+    assert summary["blocked_count"] >= 3
+    assert summary["terrain_objective_evaluated_count"] >= 3
+    assert summary["expectation_failures"] == []
+    cases = {case["case_id"]: case for case in summary["cases"]}
+    assert set(cases) == {
+        "control_point_low_cost_selected",
+        "control_point_cost_dominated",
+        "control_point_high_cost_exposure_blocked",
+        "control_point_motion_infeasible",
+        "control_point_pydrake_unavailable",
+    }
+    assert cases["control_point_low_cost_selected"]["outcome"] == "selected"
+    assert cases["control_point_cost_dominated"]["decision_reason"] == "cost_dominated"
+    assert cases["control_point_high_cost_exposure_blocked"]["outcome"] == "blocked"
+    assert cases["control_point_high_cost_exposure_blocked"]["high_cost_exposure"] > 0.0
+    assert (
+        cases["control_point_high_cost_exposure_blocked"][
+            "high_cost_exposure_delta_vs_baseline"
+        ]
+        > 0.0
+    )
+    assert cases["control_point_motion_infeasible"]["decision_reason"] == "motion_infeasible"
+    assert cases["control_point_pydrake_unavailable"]["decision_reason"] == "pydrake_unavailable"
+    for case in summary["cases"]:
+        route_json = output_dir / case["route_json_path"]
+        route = json.loads(route_json.read_text(encoding="utf-8"))
+        assert route["trajectory_kind"] == "geometric_path"
+        assert route["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+        assert route["gcs_candidate_report_schema_version"] == "gcs_geometric_candidate_report/v1"
+        cost_summary = route["gcs_trajectory_cost_summary"]
+        if route["gcs_trajectory_attempted"]:
+            assert cost_summary["terrain_objective_source"] == (
+                "region_inverse_cost_weighted_passable_cell_centroid"
+            )
+            assert cost_summary["terrain_objective_weight"] > 0.0
+            assert cost_summary["control_point_terrain_cost"] is not None
+            assert cost_summary["sampled_terrain_cost"] == cost_summary["terrain_path_cost"]
+        else:
+            assert route["gcs_trajectory_reason"] == "pydrake_unavailable"
+            assert cost_summary["terrain_objective_source"] == "not_evaluated"
 
 
 @pytest.mark.drake

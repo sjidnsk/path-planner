@@ -81,11 +81,15 @@ def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     assert "--gcs-control-point-candidate" in content
     assert "trajectory_parameterization" in content
     assert "derivative_constraint_count" in content
+    assert "control_point_terrain_anchor_quadratic" in content
+    assert "terrain_objective_source" in content
     assert "control_point_second_difference_quadratic" in content
     assert "path_planner.drake_backend.gcs_cli_batch" in content
     assert "gcs_direction_cone_cli_scenario_batch/v1" in content
     assert "gcs_motion_feasibility_cli_batch/v1" in content
+    assert "gcs_control_point_terrain_cost_cli_batch/v1" in content
     assert "--batch-kind motion-feasibility" in content
+    assert "--batch-kind control-point-terrain-cost" in content
     assert "not an Ackermann trajectory optimizer" in content
     assert "does not yet implement full GCS graph search" in content
     assert "Bezier/B-spline GCS trajectory optimization" in content

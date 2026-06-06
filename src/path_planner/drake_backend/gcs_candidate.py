@@ -114,12 +114,18 @@ def build_gcs_geometric_candidate_report(
                 postprocess_cost=None,
                 cost_delta_vs_baseline=None,
                 cost_delta_vs_postprocess=None,
+                baseline_high_cost_exposure=None,
+                postprocess_high_cost_exposure=None,
+                high_cost_exposure_delta_vs_baseline=None,
+                high_cost_exposure_delta_vs_postprocess=None,
                 candidate_decision="blocked",
                 decision_reason="sampled_trajectory_collision",
                 quality_gate=_quality_gate_summary(
                     cost_delta_vs_baseline=None,
                     cost_delta_vs_postprocess=None,
                     overlap_ratio=None,
+                    high_cost_exposure_delta_vs_baseline=None,
+                    high_cost_exposure_delta_vs_postprocess=None,
                     duplicate_overlap_threshold=duplicate_overlap_threshold,
                     improvement_epsilon=improvement_epsilon,
                 ),
@@ -130,14 +136,83 @@ def build_gcs_geometric_candidate_report(
     if baseline_cost is None:
         baseline_cost = _cell_path_cost(grid, result.path_cells)
     postprocess_cost = _postprocess_path_cost(grid, postprocess)
+    baseline_high_cost_exposure = _cell_path_high_cost_exposure(
+        grid,
+        result.path_cells,
+        high_cost_threshold=high_cost_threshold,
+    )
+    postprocess_high_cost_exposure = _postprocess_high_cost_exposure(
+        grid,
+        postprocess,
+        high_cost_threshold=high_cost_threshold,
+    )
     cost_delta_vs_baseline = candidate.path_cost - baseline_cost
     cost_delta_vs_postprocess = None if postprocess_cost is None else candidate.path_cost - postprocess_cost
+    high_cost_exposure_delta_vs_baseline = candidate.high_cost_exposure - baseline_high_cost_exposure
+    high_cost_exposure_delta_vs_postprocess = (
+        None
+        if postprocess_high_cost_exposure is None
+        else candidate.high_cost_exposure - postprocess_high_cost_exposure
+    )
     overlap_ratio = _baseline_overlap_ratio(candidate.cells, result.path_cells)
-
-    if (
+    candidate_cost_improved = (
         cost_delta_vs_baseline < -improvement_epsilon
         and (cost_delta_vs_postprocess is None or cost_delta_vs_postprocess < -improvement_epsilon)
-    ):
+    )
+
+    high_cost_exposure_worse = (
+        high_cost_exposure_delta_vs_baseline > improvement_epsilon
+        or (
+            high_cost_exposure_delta_vs_postprocess is not None
+            and high_cost_exposure_delta_vs_postprocess > improvement_epsilon
+        )
+    )
+    if candidate_cost_improved and high_cost_exposure_worse:
+        return GcsGeometricCandidateReport(
+            attempted=True,
+            available=True,
+            selected=False,
+            selection_reason=None,
+            fallback_reason="high_cost_exposure",
+            path_length=candidate.path_length,
+            path_cost=candidate.path_cost,
+            collision_count=0,
+            high_cost_exposure=candidate.high_cost_exposure,
+            baseline_overlap_ratio=overlap_ratio,
+            cost_delta_vs_baseline=cost_delta_vs_baseline,
+            cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+            constraint_summary=_constraint_summary(
+                gcs_trajectory_report,
+                gcs_motion_feasibility_report,
+            ),
+            cost_summary=_candidate_cost_summary(
+                grid,
+                sampled_points,
+                candidate,
+                high_cost_threshold=high_cost_threshold,
+                baseline_cost=baseline_cost,
+                postprocess_cost=postprocess_cost,
+                cost_delta_vs_baseline=cost_delta_vs_baseline,
+                cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+                baseline_high_cost_exposure=baseline_high_cost_exposure,
+                postprocess_high_cost_exposure=postprocess_high_cost_exposure,
+                high_cost_exposure_delta_vs_baseline=high_cost_exposure_delta_vs_baseline,
+                high_cost_exposure_delta_vs_postprocess=high_cost_exposure_delta_vs_postprocess,
+                candidate_decision="blocked",
+                decision_reason="high_cost_exposure",
+                quality_gate=_quality_gate_summary(
+                    cost_delta_vs_baseline=cost_delta_vs_baseline,
+                    cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+                    overlap_ratio=overlap_ratio,
+                    high_cost_exposure_delta_vs_baseline=high_cost_exposure_delta_vs_baseline,
+                    high_cost_exposure_delta_vs_postprocess=high_cost_exposure_delta_vs_postprocess,
+                    duplicate_overlap_threshold=duplicate_overlap_threshold,
+                    improvement_epsilon=improvement_epsilon,
+                ),
+            ),
+        )
+
+    if candidate_cost_improved:
         return GcsGeometricCandidateReport(
             attempted=True,
             available=True,
@@ -164,12 +239,18 @@ def build_gcs_geometric_candidate_report(
                 postprocess_cost=postprocess_cost,
                 cost_delta_vs_baseline=cost_delta_vs_baseline,
                 cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+                baseline_high_cost_exposure=baseline_high_cost_exposure,
+                postprocess_high_cost_exposure=postprocess_high_cost_exposure,
+                high_cost_exposure_delta_vs_baseline=high_cost_exposure_delta_vs_baseline,
+                high_cost_exposure_delta_vs_postprocess=high_cost_exposure_delta_vs_postprocess,
                 candidate_decision="selected",
                 decision_reason=GCS_CANDIDATE_SELECTED_REASON,
                 quality_gate=_quality_gate_summary(
                     cost_delta_vs_baseline=cost_delta_vs_baseline,
                     cost_delta_vs_postprocess=cost_delta_vs_postprocess,
                     overlap_ratio=overlap_ratio,
+                    high_cost_exposure_delta_vs_baseline=high_cost_exposure_delta_vs_baseline,
+                    high_cost_exposure_delta_vs_postprocess=high_cost_exposure_delta_vs_postprocess,
                     duplicate_overlap_threshold=duplicate_overlap_threshold,
                     improvement_epsilon=improvement_epsilon,
                 ),
@@ -209,12 +290,18 @@ def build_gcs_geometric_candidate_report(
             postprocess_cost=postprocess_cost,
             cost_delta_vs_baseline=cost_delta_vs_baseline,
             cost_delta_vs_postprocess=cost_delta_vs_postprocess,
+            baseline_high_cost_exposure=baseline_high_cost_exposure,
+            postprocess_high_cost_exposure=postprocess_high_cost_exposure,
+            high_cost_exposure_delta_vs_baseline=high_cost_exposure_delta_vs_baseline,
+            high_cost_exposure_delta_vs_postprocess=high_cost_exposure_delta_vs_postprocess,
             candidate_decision="blocked",
             decision_reason=fallback_reason,
             quality_gate=_quality_gate_summary(
                 cost_delta_vs_baseline=cost_delta_vs_baseline,
                 cost_delta_vs_postprocess=cost_delta_vs_postprocess,
                 overlap_ratio=overlap_ratio,
+                high_cost_exposure_delta_vs_baseline=high_cost_exposure_delta_vs_baseline,
+                high_cost_exposure_delta_vs_postprocess=high_cost_exposure_delta_vs_postprocess,
                 duplicate_overlap_threshold=duplicate_overlap_threshold,
                 improvement_epsilon=improvement_epsilon,
             ),
@@ -330,6 +417,47 @@ def _postprocess_path_cost(grid: CostGrid, postprocess: PostprocessResult | None
     return None
 
 
+def _cell_path_high_cost_exposure(
+    grid: CostGrid,
+    cells: tuple[Cell, ...],
+    *,
+    high_cost_threshold: float,
+) -> float:
+    total = 0.0
+    previous: Cell | None = None
+    for cell in cells:
+        if cell == previous:
+            continue
+        previous = cell
+        if grid.is_passable(cell):
+            total += max(grid.cost_at(cell) - high_cost_threshold, 0.0)
+    return float(total)
+
+
+def _postprocess_high_cost_exposure(
+    grid: CostGrid,
+    postprocess: PostprocessResult | None,
+    *,
+    high_cost_threshold: float,
+) -> float | None:
+    if postprocess is None:
+        return None
+    if postprocess.smoothed_path.cells:
+        return _cell_path_high_cost_exposure(
+            grid,
+            postprocess.smoothed_path.cells,
+            high_cost_threshold=high_cost_threshold,
+        )
+    if postprocess.smoothed_path.world:
+        metrics = _path_metrics(
+            grid,
+            postprocess.smoothed_path.world,
+            high_cost_threshold=high_cost_threshold,
+        )
+        return metrics.high_cost_exposure
+    return None
+
+
 def _baseline_overlap_ratio(candidate_cells: tuple[Cell, ...], baseline_cells: tuple[Cell, ...]) -> float:
     if not candidate_cells:
         return 0.0
@@ -405,6 +533,10 @@ def _candidate_cost_summary(
     postprocess_cost: float | None,
     cost_delta_vs_baseline: float | None,
     cost_delta_vs_postprocess: float | None,
+    baseline_high_cost_exposure: float | None,
+    postprocess_high_cost_exposure: float | None,
+    high_cost_exposure_delta_vs_baseline: float | None,
+    high_cost_exposure_delta_vs_postprocess: float | None,
     candidate_decision: str,
     decision_reason: str,
     quality_gate: dict,
@@ -418,6 +550,10 @@ def _candidate_cost_summary(
     summary["postprocess_path_cost"] = postprocess_cost
     summary["cost_delta_vs_baseline"] = cost_delta_vs_baseline
     summary["cost_delta_vs_postprocess"] = cost_delta_vs_postprocess
+    summary["baseline_high_cost_exposure"] = baseline_high_cost_exposure
+    summary["postprocess_high_cost_exposure"] = postprocess_high_cost_exposure
+    summary["high_cost_exposure_delta_vs_baseline"] = high_cost_exposure_delta_vs_baseline
+    summary["high_cost_exposure_delta_vs_postprocess"] = high_cost_exposure_delta_vs_postprocess
     summary["candidate_decision"] = candidate_decision
     summary["decision_reason"] = decision_reason
     summary["quality_gate"] = quality_gate
@@ -440,6 +576,10 @@ def _empty_candidate_cost_summary() -> dict:
         "postprocess_path_cost": None,
         "cost_delta_vs_baseline": None,
         "cost_delta_vs_postprocess": None,
+        "baseline_high_cost_exposure": None,
+        "postprocess_high_cost_exposure": None,
+        "high_cost_exposure_delta_vs_baseline": None,
+        "high_cost_exposure_delta_vs_postprocess": None,
         "candidate_decision": "blocked",
         "decision_reason": "cost_not_evaluated",
         "quality_gate": {},
@@ -451,6 +591,8 @@ def _quality_gate_summary(
     cost_delta_vs_baseline: float | None,
     cost_delta_vs_postprocess: float | None,
     overlap_ratio: float | None,
+    high_cost_exposure_delta_vs_baseline: float | None,
+    high_cost_exposure_delta_vs_postprocess: float | None,
     duplicate_overlap_threshold: float,
     improvement_epsilon: float,
 ) -> dict:
@@ -466,9 +608,19 @@ def _quality_gate_summary(
         else overlap_ratio >= duplicate_overlap_threshold
         and abs(cost_delta_vs_baseline) <= improvement_epsilon
     )
+    high_cost_exposure_not_worse = (
+        None
+        if high_cost_exposure_delta_vs_baseline is None
+        else high_cost_exposure_delta_vs_baseline <= improvement_epsilon
+        and (
+            high_cost_exposure_delta_vs_postprocess is None
+            or high_cost_exposure_delta_vs_postprocess <= improvement_epsilon
+        )
+    )
     return {
         "baseline_delta_improved": baseline_delta_improved,
         "postprocess_delta_improved": postprocess_delta_improved,
+        "high_cost_exposure_not_worse": high_cost_exposure_not_worse,
         "duplicate_with_baseline": duplicate_with_baseline,
         "baseline_overlap_ratio": overlap_ratio,
         "duplicate_overlap_threshold": float(duplicate_overlap_threshold),

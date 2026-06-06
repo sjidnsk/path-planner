@@ -14,6 +14,9 @@ from .gcs_trajectory import FORCE_PYDRAKE_UNAVAILABLE_ENV
 
 GCS_CLI_SCENARIO_BATCH_SCHEMA_VERSION = "gcs_direction_cone_cli_scenario_batch/v1"
 GCS_MOTION_FEASIBILITY_CLI_BATCH_SCHEMA_VERSION = "gcs_motion_feasibility_cli_batch/v1"
+GCS_CONTROL_POINT_TERRAIN_COST_CLI_BATCH_SCHEMA_VERSION = (
+    "gcs_control_point_terrain_cost_cli_batch/v1"
+)
 
 
 @dataclass(frozen=True)
@@ -77,6 +80,31 @@ def run_gcs_motion_feasibility_cli_batch(
     return summary
 
 
+def run_gcs_control_point_terrain_cost_cli_batch(
+    *,
+    output_dir: str | Path,
+    summary_json: str | Path | None = None,
+    case_ids: tuple[str, ...] | list[str] | None = None,
+    python_executable: str | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    scenarios = _selected_scenarios(_control_point_terrain_cost_scenarios(), case_ids)
+    matrix_cases, case_metadata = _run_cli_route_cases(
+        output_dir=output_dir,
+        summary_json=summary_json,
+        scenarios=scenarios,
+        common_cli_args=("--gcs-control-point-candidate", "--gcs-motion-feasibility"),
+        python_executable=python_executable,
+        extra_env=extra_env,
+    )
+    summary = build_gcs_control_point_terrain_cost_batch_summary(matrix_cases)
+    summary["cli_module"] = "path_planner.cli"
+    for case in summary["cases"]:
+        case.update(case_metadata[case["case_id"]])
+    _write_summary(summary_json, output_dir, summary)
+    return summary
+
+
 def build_gcs_motion_feasibility_batch_summary(cases: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> dict[str, Any]:
     rows = [_motion_feasibility_case_summary(case) for case in cases]
     return {
@@ -87,6 +115,41 @@ def build_gcs_motion_feasibility_batch_summary(cases: list[dict[str, Any]] | tup
         "diagnostic_only_count": sum(1 for row in rows if row["outcome"] == "diagnostic_only"),
         "candidate_selected_count": sum(1 for row in rows if row["candidate_selected"]),
         "candidate_blocked_count": sum(1 for row in rows if not row["candidate_selected"]),
+        "decision_reason_counts": _counts(row["decision_reason"] for row in rows),
+        "fallback_reason_counts": _counts(row["fallback_reason"] for row in rows),
+        "expectation_failures": [
+            {"case_id": row["case_id"], "mismatch_fields": row["mismatch_fields"]}
+            for row in rows
+            if row["mismatch_fields"]
+        ],
+        "cases": rows,
+    }
+
+
+def build_gcs_control_point_terrain_cost_batch_summary(
+    cases: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    rows = [_control_point_terrain_cost_case_summary(case) for case in cases]
+    return {
+        "schema_version": GCS_CONTROL_POINT_TERRAIN_COST_CLI_BATCH_SCHEMA_VERSION,
+        "case_count": len(rows),
+        "selected_count": sum(1 for row in rows if row["outcome"] == "selected"),
+        "blocked_count": sum(1 for row in rows if row["outcome"] == "blocked"),
+        "terrain_objective_evaluated_count": sum(
+            1
+            for row in rows
+            if row["terrain_objective_source"] not in {None, "not_evaluated"}
+        ),
+        "high_cost_exposure_blocked_count": sum(
+            1
+            for row in rows
+            if row["outcome"] == "blocked" and (row["high_cost_exposure"] or 0.0) > 0.0
+        ),
+        "sampled_terrain_improved_count": sum(
+            1
+            for row in rows
+            if row["cost_delta_vs_baseline"] is not None and row["cost_delta_vs_baseline"] < 0.0
+        ),
         "decision_reason_counts": _counts(row["decision_reason"] for row in rows),
         "fallback_reason_counts": _counts(row["fallback_reason"] for row in rows),
         "expectation_failures": [
@@ -184,7 +247,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run GCS CLI scenario batch evidence")
     parser.add_argument(
         "--batch-kind",
-        choices=("direction-cone", "motion-feasibility"),
+        choices=("direction-cone", "motion-feasibility", "control-point-terrain-cost"),
         default="direction-cone",
         help="Batch evidence kind to run. Defaults to the direction-cone batch for backward compatibility.",
     )
@@ -204,6 +267,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.batch_kind == "motion-feasibility":
             summary = run_gcs_motion_feasibility_cli_batch(
+                output_dir=args.output_dir,
+                summary_json=args.summary_json,
+                case_ids=tuple(args.case) if args.case else None,
+            )
+        elif args.batch_kind == "control-point-terrain-cost":
+            summary = run_gcs_control_point_terrain_cost_cli_batch(
                 output_dir=args.output_dir,
                 summary_json=args.summary_json,
                 case_ids=tuple(args.case) if args.case else None,
@@ -299,6 +368,76 @@ def _motion_mismatch_fields(row: dict[str, Any], expected: dict[str, Any]) -> li
     if expected_reason is not None and row.get("decision_reason") != expected_reason:
         mismatches.append("decision_reason")
     return mismatches
+
+
+def _control_point_terrain_cost_case_summary(case: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(case.get("payload") or {})
+    expected = dict(case.get("expected") or {})
+    trajectory_cost = _mapping(payload.get("gcs_trajectory_cost_summary"))
+    candidate_cost = _mapping(payload.get("gcs_candidate_cost_summary"))
+    selected = bool(payload.get("gcs_candidate_selected", False))
+    outcome = "selected" if selected else "blocked"
+    decision_reason = _control_point_terrain_decision_reason(payload, candidate_cost)
+    fallback_reason = None if selected else decision_reason
+    row = {
+        "case_id": str(case.get("case_id") or "unnamed"),
+        "outcome": outcome,
+        "selected": selected,
+        "fallback_reason": fallback_reason,
+        "decision_reason": decision_reason,
+        "trajectory_backend": payload.get("gcs_trajectory_backend"),
+        "trajectory_attempted": payload.get("gcs_trajectory_attempted"),
+        "trajectory_success": payload.get("gcs_trajectory_success"),
+        "trajectory_reason": payload.get("gcs_trajectory_reason"),
+        "candidate_available": payload.get("gcs_candidate_available"),
+        "candidate_selected": selected,
+        "candidate_fallback_reason": payload.get("gcs_candidate_fallback_reason"),
+        "candidate_decision": candidate_cost.get("candidate_decision"),
+        "cost_delta_vs_baseline": payload.get(
+            "gcs_candidate_cost_delta_vs_baseline",
+            candidate_cost.get("cost_delta_vs_baseline"),
+        ),
+        "sampled_terrain_cost": trajectory_cost.get("sampled_terrain_cost"),
+        "control_point_terrain_cost": trajectory_cost.get("control_point_terrain_cost"),
+        "terrain_objective_source": trajectory_cost.get("terrain_objective_source"),
+        "terrain_objective_weight": trajectory_cost.get("terrain_objective_weight"),
+        "terrain_objective_anchor_count": trajectory_cost.get("terrain_objective_anchor_count"),
+        "terrain_objective_boundary": trajectory_cost.get("terrain_objective_boundary"),
+        "high_cost_exposure": payload.get(
+            "gcs_candidate_high_cost_exposure",
+            candidate_cost.get("high_cost_exposure"),
+        ),
+        "baseline_high_cost_exposure": candidate_cost.get("baseline_high_cost_exposure"),
+        "high_cost_exposure_delta_vs_baseline": candidate_cost.get(
+            "high_cost_exposure_delta_vs_baseline"
+        ),
+        "motion_status": payload.get("gcs_motion_feasibility_feasibility_status"),
+        "motion_fallback_reason": payload.get("gcs_motion_feasibility_fallback_reason"),
+    }
+    row["mismatch_fields"] = _motion_mismatch_fields(row, expected)
+    return row
+
+
+def _control_point_terrain_decision_reason(
+    payload: dict[str, Any],
+    candidate_cost: dict[str, Any],
+) -> str | None:
+    if payload.get("gcs_trajectory_reason") == "pydrake_unavailable":
+        return "pydrake_unavailable"
+    cost_reason = candidate_cost.get("decision_reason")
+    if cost_reason == "cost_not_evaluated":
+        cost_reason = None
+    reason = (
+        cost_reason
+        or payload.get("gcs_candidate_selection_reason")
+        or payload.get("gcs_candidate_fallback_reason")
+        or payload.get("gcs_trajectory_reason")
+    )
+    return str(reason) if reason is not None else None
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _counts(values) -> dict[str, int]:
@@ -495,6 +634,77 @@ def _motion_feasibility_scenarios() -> dict[str, GcsCliScenario]:
             case_id="pydrake_unavailable",
             request=straight_request,
             expected_outcome="diagnostic_only",
+            expected_decision_reason="pydrake_unavailable",
+            env={FORCE_PYDRAKE_UNAVAILABLE_ENV: "1"},
+        ),
+    }
+
+
+def _control_point_terrain_cost_scenarios() -> dict[str, GcsCliScenario]:
+    turn_request = _request(
+        "control_point_motion_infeasible",
+        cost=_filled_cost(width=8, height=4, value=1),
+        passable_mask=_full_mask(width=8, height=4),
+        start=[0, 3],
+        goal=[7, 0],
+    )
+    high_cost_exposure_request = _request(
+        "control_point_high_cost_exposure_blocked",
+        cost=[
+            [1, 10, 1, 1, 1],
+            [1, 1, 10, 1, 1],
+            [1, 1, 1, 1, 1],
+            [1, 1, 10, 1, 1],
+            [1, 1, 1, 1, 1],
+        ],
+        passable_mask=_full_mask(width=5, height=5),
+        start=[0, 4],
+        goal=[4, 0],
+    )
+    straight_request = _request(
+        "control_point_pydrake_unavailable",
+        cost=[
+            [1, 1, 1, 1],
+            [0, 1, 1, 1],
+            [1, 1, 1, 1],
+        ],
+        passable_mask=_full_mask(width=4, height=3),
+        start=[0, 1],
+        goal=[3, 1],
+    )
+    return {
+        "control_point_low_cost_selected": GcsCliScenario(
+            case_id="control_point_low_cost_selected",
+            request=_diagonal_open_request("control_point_low_cost_selected", size=28),
+            expected_outcome="selected",
+            expected_decision_reason="gcs_candidate_quality_improved",
+            cli_args=("--max-shortcut-cost", "0"),
+        ),
+        "control_point_cost_dominated": GcsCliScenario(
+            case_id="control_point_cost_dominated",
+            request=_diagonal_open_request("control_point_cost_dominated", size=10),
+            expected_outcome="blocked",
+            expected_decision_reason="cost_dominated",
+            cli_args=("--max-shortcut-cost", "0"),
+        ),
+        "control_point_high_cost_exposure_blocked": GcsCliScenario(
+            case_id="control_point_high_cost_exposure_blocked",
+            request=high_cost_exposure_request,
+            expected_outcome="blocked",
+            expected_decision_reason="cost_dominated",
+            cli_args=("--max-shortcut-cost", "0"),
+        ),
+        "control_point_motion_infeasible": GcsCliScenario(
+            case_id="control_point_motion_infeasible",
+            request=turn_request,
+            expected_outcome="blocked",
+            expected_decision_reason="motion_infeasible",
+            cli_args=("--max-shortcut-cost", "0", "--max-heading-change-deg", "1"),
+        ),
+        "control_point_pydrake_unavailable": GcsCliScenario(
+            case_id="control_point_pydrake_unavailable",
+            request=straight_request,
+            expected_outcome="blocked",
             expected_decision_reason="pydrake_unavailable",
             env={FORCE_PYDRAKE_UNAVAILABLE_ENV: "1"},
         ),

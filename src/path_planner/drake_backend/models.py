@@ -35,6 +35,7 @@ GCS_GEOMETRIC_CANDIDATE_FALLBACK_REASONS = frozenset(
         "cost_dominated",
         "path_duplicate_with_baseline",
         "no_quality_gain",
+        "high_cost_exposure",
         "sampled_trajectory_collision",
         "gcs_report_missing",
         "gcs_trajectory_failed",

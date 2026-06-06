@@ -85,8 +85,9 @@ Phase 8 provides a Drake IRIS/GCS framework prototype:
 - diagnostics include an IRIS / Region Graph Summary that labels this as a 2D workspace safe-region diagnostic, not a GCS trajectory or vehicle feasibility proof;
 - Phase 8.4 adds an opt-in fixed-sequence `pydrake_direction_cone_program` that emits `gcs_trajectory_report`, `gcs_candidate_report`, `gcs_motion_feasibility_report`, and direction-cone portal/cost diagnostics;
 - Phase 8.5 adds an opt-in `pydrake_control_point_direction_cone_program` for control-point derivative-proxy direction-cone diagnostics;
+- Phase 8.6 calibrates that control-point prototype with a deterministic terrain-cost proxy, reporting `terrain_objective_source`, `sampled_terrain_cost`, and `control_point_terrain_cost` without claiming a continuous terrain-field integral;
 - GCS direction-cone reports include `rho_source_counts`, `portal_width_min_m`, `support_width_min_m`, `constraint_tightness_min`, `trajectory_parameterization`, `control_point_count`, `derivative_constraint_count`, `candidate_decision`, `decision_reason`, and `quality_gate` so selected/blocked candidate decisions are machine-readable;
-- `path_planner.drake_backend.gcs_cli_batch` runs repeatable CLI scenario batches and writes `gcs_direction_cone_cli_scenario_batch/v1` and `gcs_motion_feasibility_cli_batch/v1` summaries from route JSON evidence;
+- `path_planner.drake_backend.gcs_cli_batch` runs repeatable CLI scenario batches and writes `gcs_direction_cone_cli_scenario_batch/v1`, `gcs_motion_feasibility_cli_batch/v1`, and `gcs_control_point_terrain_cost_cli_batch/v1` summaries from route JSON evidence;
 - `--optimize-trajectory` continues to mean the current fixed-corridor optimizer until a separate Drake backend switch is implemented;
 - the required fallback chain is Drake unavailable or infeasible -> current optimizer -> postprocess smoothed path -> raw A* path.
 
@@ -172,6 +173,7 @@ GCS direction-cone CLI batch evidence:
 ```bash
 python -m path_planner.drake_backend.gcs_cli_batch --output-dir outputs/gcs-cli-batch --summary-json outputs/gcs-cli-batch/summary.json
 python -m path_planner.drake_backend.gcs_cli_batch --batch-kind motion-feasibility --output-dir outputs/gcs-motion-batch --summary-json outputs/gcs-motion-batch/summary.json
+python -m path_planner.drake_backend.gcs_cli_batch --batch-kind control-point-terrain-cost --output-dir outputs/gcs-control-point-terrain-batch --summary-json outputs/gcs-control-point-terrain-batch/summary.json
 ```
 
 Expected outputs:
@@ -181,6 +183,7 @@ Expected outputs:
 - `outputs/demo/diagnostics.html`
 - `outputs/gcs-cli-batch/summary.json` when the batch runner is used
 - `outputs/gcs-motion-batch/summary.json` when the motion-feasibility batch runner is used
+- `outputs/gcs-control-point-terrain-batch/summary.json` when the control-point terrain-cost batch runner is used
 
 The route JSON preserves Phase 1 fields and adds a `postprocess` object with
 `platform_profile`, `constraint_warnings`, `corridor_report`, `raw_path`,
@@ -221,15 +224,22 @@ either fixed-sequence `pydrake_direction_cone_program` or the opt-in
 The control-point backend constrains successive control-point differences as a
 derivative proxy and records `trajectory_parameterization`,
 `control_point_count`, `derivative_proxy`, `derivative_constraint_count`,
-`control_point_region_containment_count`, and `objective_terms` such as
-`segment_length_quadratic`, `low_cost_anchor_quadratic`, and
+`control_point_region_containment_count`, `objective_term_weights`,
+`terrain_objective_source`, and `objective_terms` such as
+`segment_length_quadratic`, `low_cost_anchor_quadratic`,
+`control_point_terrain_anchor_quadratic`, and
 `control_point_second_difference_quadratic`. Its
 direction-cone summary also reports portal/support/rho fields such as
 `rho_source_counts`, `portal_width_min_m`, `support_width_min_m`, and
-`constraint_tightness_min`. Candidate cost summaries report
-`candidate_decision`, `decision_reason`, and `quality_gate` so each replacement
-or blocking decision can be audited from JSON. These reports remain 2D
-geometric candidate diagnostics and do not prove Ackermann feasibility.
+`constraint_tightness_min`. Control-point cost summaries split the sampled
+post-hoc terrain evidence from the solver proxy with `sampled_terrain_cost`,
+`control_point_terrain_cost`, `terrain_objective_weight`, and
+`terrain_objective_boundary=proxy_not_continuous_field_integral`. Candidate
+cost summaries report `candidate_decision`, `decision_reason`,
+`cost_delta_vs_baseline`, `high_cost_exposure`,
+`baseline_high_cost_exposure`, and `quality_gate` so each replacement or
+blocking decision can be audited from JSON. These reports remain 2D geometric
+candidate diagnostics and do not prove Ackermann feasibility.
 The CLI batch runner generates small request JSON files, invokes
 `path_planner.cli` for each case, and summarizes selected/blocked decisions from
 the resulting route JSON. Its summary schema is
@@ -243,6 +253,12 @@ direction-cone-success-but-motion-blocked, and pydrake-unavailable route JSON
 cases. The motion batch records heading and turning-radius diagnostics,
 candidate selected/blocked state, fallback reasons, and expectation failures.
 It is a regression gate for sampled geometric candidates, not an Ackermann trajectory optimizer.
+With `--batch-kind control-point-terrain-cost`, the runner emits
+`gcs_control_point_terrain_cost_cli_batch/v1` summaries for control-point
+low-cost selected, cost-dominated, high-cost exposure blocked,
+motion-infeasible, and pydrake-unavailable route JSON cases. This batch is a
+terrain-cost calibration gate for the fixed-sequence control-point prototype,
+not full GCS graph search or production Bezier/B-spline optimization.
 When `--simulate-tracking` is enabled, the route JSON also includes a top-level
 `tracking_simulation_report` object with `simulated_path`, `config`, `metrics`,
 and `safety_report`.
