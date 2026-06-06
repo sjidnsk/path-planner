@@ -21,7 +21,13 @@ CONVEX_REGION_SEQUENCE_SCHEMA_VERSION = "convex_region_sequence_report/v1"
 CONVEX_REGION_BACKENDS = frozenset({"workspace_iris", "fallback_box"})
 CONVEX_REGION_SOURCES = frozenset({"iris", "fallback_box"})
 GCS_TRAJECTORY_REPORT_SCHEMA_VERSION = "gcs_trajectory_report/v1"
-GCS_TRAJECTORY_BACKENDS = frozenset({"pydrake_gcs", "pydrake_direction_cone_program"})
+GCS_TRAJECTORY_BACKENDS = frozenset(
+    {
+        "pydrake_gcs",
+        "pydrake_direction_cone_program",
+        "pydrake_control_point_direction_cone_program",
+    }
+)
 GCS_GEOMETRIC_CANDIDATE_REPORT_SCHEMA_VERSION = "gcs_geometric_candidate_report/v1"
 GCS_GEOMETRIC_CANDIDATE_SELECTION_REASONS = frozenset({"gcs_candidate_quality_improved"})
 GCS_GEOMETRIC_CANDIDATE_FALLBACK_REASONS = frozenset(

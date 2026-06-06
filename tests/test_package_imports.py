@@ -77,6 +77,11 @@ def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     assert "rho_source_counts" in content
     assert "candidate_decision" in content
     assert "quality_gate" in content
+    assert "pydrake_control_point_direction_cone_program" in content
+    assert "--gcs-control-point-candidate" in content
+    assert "trajectory_parameterization" in content
+    assert "derivative_constraint_count" in content
+    assert "control_point_second_difference_quadratic" in content
     assert "path_planner.drake_backend.gcs_cli_batch" in content
     assert "gcs_direction_cone_cli_scenario_batch/v1" in content
     assert "gcs_motion_feasibility_cli_batch/v1" in content

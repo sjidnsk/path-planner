@@ -16,6 +16,7 @@ from path_planner.drake_backend import (
     IrisRegion,
     IrisRegionReport,
     build_convex_region_sequence_report,
+    build_gcs_control_point_trajectory_report,
     build_gcs_curvature_constrained_candidate_report,
     build_gcs_geometric_candidate_report,
     build_gcs_motion_feasibility_report,
@@ -370,6 +371,96 @@ def test_gcs_trajectory_report_is_optional_route_json_field_without_changing_rou
     assert payload["gcs_trajectory_attempted"] is True
     assert payload["gcs_trajectory_success"] is True
     assert payload["gcs_trajectory_sample_count"] == 5
+
+
+def test_gcs_control_point_report_solves_derivative_direction_cone_path():
+    pytest.importorskip("pydrake")
+    grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    convex_report = build_convex_region_sequence_report(grid, plan, corridor)
+
+    report = build_gcs_control_point_trajectory_report(grid, convex_report, sample_count=7)
+    payload = report.to_route_fields()
+    summary = payload["gcs_trajectory_constraint_summary"]
+
+    assert payload["gcs_trajectory_report_schema_version"] == "gcs_trajectory_report/v1"
+    assert payload["gcs_trajectory_attempted"] is True
+    assert payload["gcs_trajectory_success"] is True
+    assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert payload["gcs_trajectory_reason"] == "control_point_direction_cone_solution_found"
+    assert payload["gcs_trajectory_sample_count"] == 7
+    assert payload["gcs_trajectory_collision_count"] == 0
+    assert payload["gcs_trajectory_region_count"] == convex_report.region_count
+    assert summary["constraint_model"] == "direction_cone"
+    assert summary["trajectory_parameterization"] == "control_point_derivative_proxy"
+    assert summary["backend_enforced"] is True
+    assert summary["enforcing_backend"] == "pydrake_control_point_mathematical_program"
+    assert summary["solver_constraint_count"] > 0
+    assert summary["control_point_count"] == convex_report.region_count
+    assert summary["derivative_constraint_count"] == 3 * (convex_report.region_count - 1)
+    assert summary["control_point_region_containment_count"] >= convex_report.region_count
+    assert summary["derivative_proxy"] == "successive_control_point_difference"
+    assert summary["objective_terms"] == [
+        "segment_length_quadratic",
+        "low_cost_anchor_quadratic",
+        "control_point_second_difference_quadratic",
+    ]
+    assert payload["gcs_trajectory_cost_summary"]["schema_version"] == "gcs_cost_summary/v1"
+    assert payload["gcs_trajectory_cost_summary"]["terrain_path_cost"] > 0.0
+
+
+def test_gcs_control_point_report_handles_unavailable_pydrake(monkeypatch):
+    import path_planner.drake_backend.gcs_control_point_trajectory as control_backend
+
+    grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    convex_report = build_convex_region_sequence_report(grid, plan, corridor)
+
+    def unavailable():
+        raise ImportError("simulated missing pydrake")
+
+    monkeypatch.setattr(control_backend, "_load_gcs_dependencies", unavailable)
+
+    payload = build_gcs_control_point_trajectory_report(grid, convex_report).to_route_fields()
+
+    assert payload["gcs_trajectory_attempted"] is False
+    assert payload["gcs_trajectory_success"] is False
+    assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert payload["gcs_trajectory_reason"] == "pydrake_unavailable"
+    assert "simulated missing pydrake" in payload["gcs_trajectory_result_status"]
+    assert payload["gcs_trajectory_constraint_summary"]["evaluated"] is False
+    assert payload["gcs_trajectory_constraint_summary"]["trajectory_parameterization"] == (
+        "control_point_derivative_proxy"
+    )
+
+
+def test_gcs_control_point_report_is_optional_route_json_field_without_changing_route_semantics():
+    pytest.importorskip("pydrake")
+    grid = make_grid(np.ones((3, 4), dtype=bool), resolution=1.0)
+    request = PlanRequest(start=Cell(0, 1), goal=Cell(3, 1))
+    plan = AStarPlanner().plan(grid, request)
+    corridor = build_corridor(grid, plan.path_cells, radius_cells=1)
+    convex_report = build_convex_region_sequence_report(grid, plan, corridor)
+    gcs_report = build_gcs_control_point_trajectory_report(grid, convex_report, sample_count=5)
+
+    payload = route_result_to_json_dict(
+        plan,
+        grid.spec,
+        convex_region_sequence_report=convex_report,
+        gcs_trajectory_report=gcs_report,
+    )
+
+    assert payload["schema_version"] == "path-planner-route/v1"
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert payload["gcs_trajectory_constraint_summary"]["trajectory_parameterization"] == (
+        "control_point_derivative_proxy"
+    )
 
 
 def test_gcs_geometric_candidate_selects_lower_cost_collision_free_sampled_path():
@@ -1277,6 +1368,219 @@ def test_cli_gcs_geometric_candidate_is_opt_in_and_writes_candidate_report(tmp_p
         assert payload["gcs_trajectory_reason"] == "pydrake_unavailable"
         assert direction_cone["evaluated"] is False
     assert "gcs_candidate_available" in completed.stdout
+
+
+@pytest.mark.drake
+def test_cli_gcs_control_point_candidate_is_opt_in_and_writes_reports(tmp_path):
+    pytest.importorskip("pydrake")
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map_corridor.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--drake-iris-regions",
+            "--gcs-control-point-candidate",
+            "--gcs-motion-feasibility",
+            "--max-heading-change-deg",
+            "120",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["reachable"] is True
+    assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert payload["gcs_trajectory_constraint_summary"]["trajectory_parameterization"] == (
+        "control_point_derivative_proxy"
+    )
+    assert payload["gcs_trajectory_constraint_summary"]["backend_enforced"] is True
+    assert payload["gcs_candidate_report_schema_version"] == "gcs_geometric_candidate_report/v1"
+    assert payload["gcs_candidate_cost_summary"]["candidate_decision"] in {"selected", "blocked"}
+    assert "decision_reason" in payload["gcs_candidate_cost_summary"]
+    assert payload["gcs_motion_feasibility_report_schema_version"] == "gcs_motion_feasibility_report/v1"
+    assert "gcs_trajectory_backend" in completed.stdout
+    assert "gcs_candidate_available" in completed.stdout
+
+
+def test_cli_gcs_control_point_candidate_forces_pydrake_unavailable(tmp_path):
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    env["PATH_PLANNER_FORCE_PYDRAKE_UNAVAILABLE"] = "1"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            "examples/demo_map_corridor.json",
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--gcs-control-point-candidate",
+            "--gcs-motion-feasibility",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert payload["gcs_trajectory_attempted"] is False
+    assert payload["gcs_trajectory_reason"] == "pydrake_unavailable"
+    assert payload["gcs_motion_feasibility_feasibility_status"] == "diagnostic_only"
+    assert payload["gcs_candidate_fallback_reason"] == "gcs_trajectory_failed"
+    assert "pydrake_unavailable" in completed.stdout
+
+
+@pytest.mark.drake
+def test_cli_gcs_control_point_candidate_still_blocks_motion_infeasible_candidate(tmp_path):
+    pytest.importorskip("pydrake")
+    request_json = tmp_path / "request.json"
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    request_json.write_text(
+        json.dumps(
+            {
+                "schema_version": "path-planner-request/v1",
+                "grid": {
+                    "width": 8,
+                    "height": 4,
+                    "resolution": 1.0,
+                    "origin": [0.0, 0.0],
+                    "frame_id": "control_point_motion_blocked",
+                },
+                "cost": [[1 for _ in range(8)] for _ in range(4)],
+                "passable_mask": [[True for _ in range(8)] for _ in range(4)],
+                "start": [0, 3],
+                "goal": [7, 0],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            str(request_json),
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--gcs-control-point-candidate",
+            "--gcs-motion-feasibility",
+            "--max-heading-change-deg",
+            "1",
+            "--max-shortcut-cost",
+            "0",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+    assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert payload["gcs_motion_feasibility_feasibility_status"] == "infeasible"
+    assert payload["gcs_motion_feasibility_heading_violation_count"] > 0
+    assert payload["gcs_candidate_selected"] is False
+    assert payload["gcs_candidate_fallback_reason"] == "motion_infeasible"
+
+
+@pytest.mark.drake
+def test_cli_gcs_control_point_candidate_blocks_tight_turning_radius_candidate(tmp_path):
+    pytest.importorskip("pydrake")
+    request_json = tmp_path / "request.json"
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    request_json.write_text(
+        json.dumps(
+            {
+                "schema_version": "path-planner-request/v1",
+                "grid": {
+                    "width": 8,
+                    "height": 4,
+                    "resolution": 1.0,
+                    "origin": [0.0, 0.0],
+                    "frame_id": "control_point_tight_radius_blocked",
+                },
+                "cost": [[1 for _ in range(8)] for _ in range(4)],
+                "passable_mask": [[True for _ in range(8)] for _ in range(4)],
+                "start": [0, 3],
+                "goal": [7, 0],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            str(request_json),
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--gcs-control-point-candidate",
+            "--gcs-motion-feasibility",
+            "--max-heading-change-deg",
+            "120",
+            "--min-turning-radius",
+            "20",
+            "--max-shortcut-cost",
+            "0",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+
+    assert payload["gcs_trajectory_backend"] == "pydrake_control_point_direction_cone_program"
+    assert payload["gcs_motion_feasibility_feasibility_status"] == "infeasible"
+    assert payload["gcs_motion_feasibility_fallback_reason"] == "curvature_constraint_violation"
+    assert payload["gcs_motion_feasibility_curvature_violation_count"] > 0
+    assert payload["gcs_candidate_selected"] is False
+    assert payload["gcs_candidate_fallback_reason"] == "motion_infeasible"
 
 
 @pytest.mark.drake

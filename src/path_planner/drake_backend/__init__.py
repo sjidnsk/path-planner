@@ -1,6 +1,7 @@
 """Optional Drake backend boundary for workspace IRIS prototypes."""
 
 from .corridor_regions import build_convex_region_sequence_report
+from .gcs_control_point_trajectory import build_gcs_control_point_trajectory_report
 from .gcs_curvature_constrained_candidate import build_gcs_curvature_constrained_candidate_report
 from .gcs_candidate import build_gcs_geometric_candidate_report
 from .gcs_motion_feasibility import build_gcs_motion_feasibility_report
@@ -27,6 +28,7 @@ __all__ = [
     "IrisRegion",
     "IrisRegionReport",
     "build_convex_region_sequence_report",
+    "build_gcs_control_point_trajectory_report",
     "build_gcs_curvature_constrained_candidate_report",
     "build_gcs_geometric_candidate_report",
     "build_gcs_motion_feasibility_report",

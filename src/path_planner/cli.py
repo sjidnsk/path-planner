@@ -8,6 +8,7 @@ from path_planner.adapters import load_plan_input, route_result_to_json_dict
 from path_planner.diagnostics import render_diagnostics
 from path_planner.drake_backend import (
     build_convex_region_sequence_report,
+    build_gcs_control_point_trajectory_report,
     build_gcs_curvature_constrained_candidate_report,
     build_gcs_geometric_candidate_report,
     build_gcs_motion_feasibility_report,
@@ -98,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--gcs-geometric-candidate",
         action="store_true",
         help="Compare optional Drake GCS sampled trajectory as a geometric candidate",
+    )
+    parser.add_argument(
+        "--gcs-control-point-candidate",
+        action="store_true",
+        help="Compare optional control-point direction-cone GCS sampled trajectory as a geometric candidate",
     )
     parser.add_argument(
         "--gcs-motion-feasibility",
@@ -255,15 +261,27 @@ def main(argv: list[str] | None = None) -> int:
     if (
         args.gcs_trajectory_smoke
         or args.gcs_geometric_candidate
+        or args.gcs_control_point_candidate
         or args.gcs_motion_feasibility
         or args.gcs_curvature_constrained_candidate
     ):
-        gcs_trajectory_report = build_gcs_trajectory_report(
-            grid,
-            convex_region_sequence_report,
-        )
+        if args.gcs_control_point_candidate:
+            gcs_trajectory_report = build_gcs_control_point_trajectory_report(
+                grid,
+                convex_region_sequence_report,
+            )
+        else:
+            gcs_trajectory_report = build_gcs_trajectory_report(
+                grid,
+                convex_region_sequence_report,
+            )
     gcs_motion_feasibility_report = None
-    if args.gcs_geometric_candidate or args.gcs_motion_feasibility or args.gcs_curvature_constrained_candidate:
+    if (
+        args.gcs_geometric_candidate
+        or args.gcs_control_point_candidate
+        or args.gcs_motion_feasibility
+        or args.gcs_curvature_constrained_candidate
+    ):
         gcs_motion_feasibility_report = build_gcs_motion_feasibility_report(
             gcs_trajectory_report,
             min_turning_radius_m=platform_profile.effective_min_turning_radius_m,
@@ -271,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
             max_curvature=args.max_curvature,
         )
     gcs_candidate_report = None
-    if args.gcs_geometric_candidate:
+    if args.gcs_geometric_candidate or args.gcs_control_point_candidate:
         gcs_candidate_report = build_gcs_geometric_candidate_report(
             grid,
             result,
@@ -362,6 +380,9 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "gcs_trajectory_reason": (
                     gcs_trajectory_report.reason if gcs_trajectory_report is not None else None
+                ),
+                "gcs_trajectory_backend": (
+                    gcs_trajectory_report.backend if gcs_trajectory_report is not None else None
                 ),
                 "gcs_geometric_candidate": gcs_candidate_report is not None,
                 "gcs_candidate_available": (
