@@ -68,6 +68,7 @@ class ChannelAwarePlanReport:
     baseline: dict[str, Any]
     channel_candidate: dict[str, Any]
     comparison: dict[str, Any]
+    execution_alignment: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +80,7 @@ class ChannelAwarePlanReport:
             "baseline": self.baseline,
             "channel_candidate": self.channel_candidate,
             "comparison": self.comparison,
+            "execution_alignment": dict(self.execution_alignment),
         }
 
 
@@ -245,6 +247,17 @@ class ChannelAwareAStarPlanner:
             baseline=baseline_summary,
             channel_candidate=candidate_summary,
             comparison=comparison,
+            execution_alignment={
+                "schema_version": "channel-aware-route-execution-alignment/v1",
+                "postprocess_seed": (
+                    "selected_backend_result"
+                    if selected_backend == CHANNEL_AWARE_ASTAR_BACKEND
+                    else "baseline_result"
+                ),
+                "selected_seed_postprocess_rebuilt": selected_backend == CHANNEL_AWARE_ASTAR_BACKEND,
+                "default_route_replacement_verified": False,
+                "verification_scope": "opt_in_audit_only",
+            },
         )
 
     def _fallback_reason(

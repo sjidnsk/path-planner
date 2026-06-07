@@ -234,7 +234,12 @@ def test_cli_channel_aware_astar_backend_writes_additive_planning_report(tmp_pat
     assert backend_report["comparison"]["path_changed"] is True
     assert backend_report["comparison"]["channel_cost_delta"] < 0.0
     assert backend_report["channel_candidate"]["cost_terms"]["high_cost_exposure_proxy"] > 0.0
+    assert backend_report["execution_alignment"]["postprocess_seed"] == "selected_backend_result"
+    assert backend_report["execution_alignment"]["default_route_replacement_verified"] is False
+    assert backend_report["execution_alignment"]["verification_scope"] == "opt_in_audit_only"
     assert any(cell[1] == 1 for cell in payload["geometric_path"]["cells"])
+    assert payload["postprocess"]["raw_path"]["cells"] == payload["geometric_path"]["cells"]
+    assert any(cell[1] == 1 for cell in payload["postprocess"]["raw_path"]["cells"])
     stdout_payload = json.loads(completed.stdout)
     assert stdout_payload["planning_backend"] == "channel_aware_astar"
     assert stdout_payload["planning_backend_fallback_reason"] is None

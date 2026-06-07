@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     postprocess = run_postprocess(
         grid,
-        baseline_result,
+        result,
         corridor_radius_cells=args.corridor_radius_cells,
         max_curvature=args.max_curvature,
         max_shortcut_cost=args.max_shortcut_cost,
