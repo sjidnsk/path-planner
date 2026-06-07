@@ -163,6 +163,83 @@ def test_cli_region_graph_guided_backend_writes_additive_planning_report(tmp_pat
     assert stdout_payload["planning_backend_fallback_reason"] == backend_report["fallback_reason"]
 
 
+def test_cli_channel_aware_astar_backend_writes_additive_planning_report(tmp_path):
+    input_json = tmp_path / "channel_request.json"
+    output_json = tmp_path / "route.json"
+    output_dir = tmp_path / "report"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    input_json.write_text(
+        json.dumps(
+            {
+                "schema_version": "path-planner-request/v1",
+                "grid": {"width": 5, "height": 5, "resolution": 1.0},
+                "start": [0, 2],
+                "goal": [4, 2],
+                "cost": [
+                    [1, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
+                    [1, 1, 1, 1, 1],
+                    [1, 9, 9, 9, 1],
+                    [1, 1, 1, 1, 1],
+                ],
+                "passable_mask": [[True, True, True, True, True] for _ in range(5)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "path_planner.cli",
+            "--input",
+            str(input_json),
+            "--output-json",
+            str(output_json),
+            "--output-dir",
+            str(output_dir),
+            "--planning-backend",
+            "channel_aware_astar",
+            "--channel-aware-neighborhood-mean-weight",
+            "3.0",
+            "--channel-aware-neighborhood-max-weight",
+            "1.0",
+            "--channel-aware-high-cost-exposure-weight",
+            "2.0",
+            "--channel-aware-blocked-nearby-weight",
+            "0.0",
+            "--channel-aware-clearance-weight",
+            "0.0",
+            "--channel-aware-smoothness-weight",
+            "0.0",
+            "--channel-aware-high-cost-threshold",
+            "4.0",
+        ],
+        check=True,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    payload = json.loads(output_json.read_text(encoding="utf-8"))
+    backend_report = payload["planning_backend_report"]
+
+    assert payload["schema_version"] == "path-planner-route/v1"
+    assert payload["trajectory_kind"] == "geometric_path"
+    assert backend_report["requested_backend"] == "channel_aware_astar"
+    assert backend_report["status"] == "selected"
+    assert backend_report["selected_backend"] == "channel_aware_astar"
+    assert backend_report["comparison"]["path_changed"] is True
+    assert backend_report["comparison"]["channel_cost_delta"] < 0.0
+    assert backend_report["channel_candidate"]["cost_terms"]["high_cost_exposure_proxy"] > 0.0
+    assert any(cell[1] == 1 for cell in payload["geometric_path"]["cells"])
+    stdout_payload = json.loads(completed.stdout)
+    assert stdout_payload["planning_backend"] == "channel_aware_astar"
+    assert stdout_payload["planning_backend_fallback_reason"] is None
+
+
 def test_cli_demo_with_tracking_simulation_writes_report(tmp_path):
     output_json = tmp_path / "route.json"
     output_dir = tmp_path / "report"

@@ -21,6 +21,7 @@ from path_planner.platform import DEFAULT_PLATFORM_KEY, load_planner_platform_pr
 from path_planner.postprocess import run_postprocess
 from path_planner.regions import build_region_graph_report
 from path_planner.search import ASTAR_BACKEND, REGION_GRAPH_GUIDED_BACKEND, AStarPlanner, RegionGraphGuidedPlanner
+from path_planner.search import CHANNEL_AWARE_ASTAR_BACKEND, ChannelAwareAStarConfig, ChannelAwareAStarPlanner
 from path_planner.search import build_planning_grid
 from path_planner.tracking import TrackingSimulationConfig, simulate_tracking
 
@@ -160,10 +161,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--planning-backend",
-        choices=(ASTAR_BACKEND, REGION_GRAPH_GUIDED_BACKEND),
+        choices=(ASTAR_BACKEND, REGION_GRAPH_GUIDED_BACKEND, CHANNEL_AWARE_ASTAR_BACKEND),
         default=ASTAR_BACKEND,
-        help="Planning backend to use; region_graph_guided is opt-in and falls back to A* when not better",
+        help=(
+            "Planning backend to use; channel_aware_astar and region_graph_guided are opt-in "
+            "and fall back to A* when not better"
+        ),
     )
+    parser.add_argument("--channel-aware-neighborhood-radius-cells", type=int, default=1)
+    parser.add_argument("--channel-aware-center-weight", type=float, default=1.0)
+    parser.add_argument("--channel-aware-neighborhood-mean-weight", type=float, default=0.25)
+    parser.add_argument("--channel-aware-neighborhood-max-weight", type=float, default=0.1)
+    parser.add_argument("--channel-aware-high-cost-exposure-weight", type=float, default=0.5)
+    parser.add_argument("--channel-aware-blocked-nearby-weight", type=float, default=0.5)
+    parser.add_argument("--channel-aware-clearance-weight", type=float, default=0.25)
+    parser.add_argument("--channel-aware-smoothness-weight", type=float, default=0.05)
+    parser.add_argument("--channel-aware-high-cost-threshold", type=float, default=4.0)
     return parser
 
 
@@ -179,6 +192,23 @@ def main(argv: list[str] | None = None) -> int:
     planning_grid = build_planning_grid(grid, platform_profile=platform_profile)
     baseline_result = AStarPlanner().plan(planning_grid, request)
     result = baseline_result
+    planning_backend_report = None
+    if args.planning_backend == CHANNEL_AWARE_ASTAR_BACKEND:
+        outcome = ChannelAwareAStarPlanner(
+            ChannelAwareAStarConfig(
+                neighborhood_radius_cells=args.channel_aware_neighborhood_radius_cells,
+                center_cell_weight=args.channel_aware_center_weight,
+                neighborhood_mean_weight=args.channel_aware_neighborhood_mean_weight,
+                neighborhood_max_weight=args.channel_aware_neighborhood_max_weight,
+                high_cost_exposure_weight=args.channel_aware_high_cost_exposure_weight,
+                blocked_nearby_weight=args.channel_aware_blocked_nearby_weight,
+                clearance_weight=args.channel_aware_clearance_weight,
+                smoothness_weight=args.channel_aware_smoothness_weight,
+                high_cost_threshold=args.channel_aware_high_cost_threshold,
+            )
+        ).plan(planning_grid, request, baseline_result=baseline_result)
+        planning_backend_report = outcome.report
+        result = outcome.result
     max_speed_mps = (
         args.max_speed_mps
         if args.max_speed_mps is not None
@@ -210,7 +240,6 @@ def main(argv: list[str] | None = None) -> int:
         platform_profile=platform_profile,
         iris_region_report=iris_region_report,
     )
-    planning_backend_report = None
     if args.planning_backend == REGION_GRAPH_GUIDED_BACKEND:
         outcome = RegionGraphGuidedPlanner().plan(
             planning_grid,
