@@ -113,6 +113,26 @@ def make_baseline_result(grid, path_cells, total_cost):
     )
 
 
+def test_region_guided_transition_rejects_diagonal_when_one_side_is_blocked():
+    grid = make_grid(
+        np.ones((2, 2)),
+        passable=[
+            [True, False],
+            [True, True],
+        ],
+    )
+    request = PlanRequest(start=Cell(0, 0), goal=Cell(1, 1))
+
+    allowed = RegionGraphGuidedPlanner()._transition_is_safe(
+        grid,
+        request,
+        Cell(0, 0),
+        Cell(1, 1),
+    )
+
+    assert allowed is False
+
+
 def test_region_graph_guided_selects_better_sampled_region_candidate():
     grid = make_grid(
         [

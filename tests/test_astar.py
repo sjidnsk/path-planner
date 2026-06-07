@@ -52,6 +52,20 @@ def test_astar_prevents_diagonal_corner_cutting():
     assert result.failure_reason is FailureReason.UNREACHABLE
 
 
+def test_astar_prevents_diagonal_corner_cutting_when_one_side_is_blocked():
+    mask = np.array(
+        [
+            [True, False],
+            [True, True],
+        ]
+    )
+    grid = grid_from(np.ones((2, 2)), mask)
+    result = AStarPlanner().plan(grid, PlanRequest(start=Cell(0, 0), goal=Cell(1, 1)))
+
+    assert result.success is True
+    assert result.path_cells == (Cell(0, 0), Cell(0, 1), Cell(1, 1))
+
+
 def test_astar_reports_blocked_start_and_goal():
     mask = np.array([[False, True], [True, False]])
     grid = grid_from(np.ones((2, 2)), mask)

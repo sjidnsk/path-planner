@@ -277,8 +277,14 @@ class ChannelAwareAStarPlanner:
         exposure_delta = comparison["high_cost_exposure_delta"]
         if channel_delta is not None and channel_delta < -1.0e-9:
             return None
-        if exposure_delta is not None and exposure_delta < -1.0e-9:
+        if (
+            exposure_delta is not None
+            and exposure_delta < -1.0e-9
+            and (channel_delta is None or channel_delta <= 1.0e-9)
+        ):
             return None
+        if exposure_delta is not None and exposure_delta < -1.0e-9:
+            return "channel_candidate_quality_regression"
         return "channel_candidate_not_lower_risk"
 
     def _path_summary(self, grid: CostGrid | PlanningGrid, result: PlanResult) -> dict[str, Any]:

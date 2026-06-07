@@ -2502,7 +2502,7 @@ class RegionGraphGuidedPlanner:
         if dx != 0 and dy != 0 and request.prevent_corner_cutting:
             side_a = Cell(previous.x + dx, previous.y)
             side_b = Cell(previous.x, previous.y + dy)
-            if not grid.is_passable(side_a) and not grid.is_passable(side_b):
+            if not grid.is_passable(side_a) or not grid.is_passable(side_b):
                 return False
         return True
 

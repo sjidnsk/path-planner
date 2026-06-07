@@ -1801,7 +1801,7 @@ def test_gcs_cli_scenario_batch_summarizes_route_json_cases(tmp_path):
     assert summary["decision_reason_counts"]["gcs_candidate_quality_improved"] == 1
     assert summary["decision_reason_counts"]["cost_dominated"] == 1
     assert summary["decision_reason_counts"]["path_duplicate_with_baseline"] == 1
-    assert summary["decision_reason_counts"]["sampled_trajectory_collision"] == 1
+    assert summary["decision_reason_counts"]["direction_cone_constraint_violation"] == 1
     assert summary["decision_reason_counts"]["motion_infeasible"] == 1
     assert summary["decision_reason_counts"]["degenerate_portal_width"] == 1
     assert summary["decision_reason_counts"]["pydrake_unavailable"] == 1
@@ -1810,13 +1810,15 @@ def test_gcs_cli_scenario_batch_summarizes_route_json_cases(tmp_path):
         "open_corridor_selected",
         "cost_dominated_diagonal",
         "duplicate_baseline",
-        "sampled_trajectory_collision",
+        "direction_cone_obstacle_detour",
         "motion_infeasible_turn",
         "degenerate_portal",
         "pydrake_unavailable",
     }
     assert cases["open_corridor_selected"]["outcome"] == "selected"
     assert cases["open_corridor_selected"]["fallback_reason"] is None
+    assert cases["direction_cone_obstacle_detour"]["fallback_reason"] == "direction_cone_constraint_violation"
+    assert cases["direction_cone_obstacle_detour"]["direction_cone_status"] == "violated"
     assert cases["degenerate_portal"]["fallback_reason"] == "direction_cone_constraint_violation"
     assert "degenerate_portal_width" in cases["degenerate_portal"]["direction_cone_risk_flags"]
     for case in summary["cases"]:

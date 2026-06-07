@@ -92,7 +92,7 @@ class AStarPlanner:
             if is_diagonal and request.prevent_corner_cutting:
                 side_a = Cell(cell.x + dx, cell.y)
                 side_b = Cell(cell.x, cell.y + dy)
-                if not grid.is_passable(side_a) and not grid.is_passable(side_b):
+                if not grid.is_passable(side_a) or not grid.is_passable(side_b):
                     continue
             result.append((neighbor, math.sqrt(2.0) if is_diagonal else 1.0))
         return result

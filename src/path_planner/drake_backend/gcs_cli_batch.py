@@ -496,10 +496,10 @@ def _builtin_scenarios() -> dict[str, GcsCliScenario]:
             expected_decision_reason="path_duplicate_with_baseline",
             cli_args=("--max-shortcut-cost", "0"),
         ),
-        "sampled_trajectory_collision": GcsCliScenario(
-            case_id="sampled_trajectory_collision",
+        "direction_cone_obstacle_detour": GcsCliScenario(
+            case_id="direction_cone_obstacle_detour",
             request=_request(
-                "sampled_trajectory_collision",
+                "direction_cone_obstacle_detour",
                 cost=[
                     [1, 1, 1],
                     [1, 1, 1],
@@ -514,7 +514,7 @@ def _builtin_scenarios() -> dict[str, GcsCliScenario]:
                 goal=[2, 1],
             ),
             expected_outcome="blocked",
-            expected_decision_reason="sampled_trajectory_collision",
+            expected_decision_reason="direction_cone_constraint_violation",
         ),
         "motion_infeasible_turn": GcsCliScenario(
             case_id="motion_infeasible_turn",
