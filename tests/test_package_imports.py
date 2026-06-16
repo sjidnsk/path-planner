@@ -10,7 +10,7 @@ def test_readme_uses_shared_conda_environment_without_editable_install():
     readme = Path(__file__).resolve().parents[1] / "README.md"
     content = readme.read_text(encoding="utf-8")
 
-    assert "D:\\conda_envs\\lunar-explorer" in content
+    assert "conda activate lunar-explorer" in content
     assert "PYTHONPATH=src" in content
     assert "pip install -e" not in content
 

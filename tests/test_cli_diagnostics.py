@@ -13,6 +13,8 @@ from path_planner.platform import load_planner_platform_profile
 from path_planner.postprocess import run_postprocess
 from path_planner.search import AStarPlanner
 
+DEMO_MAP_CORRIDOR = str(Path(__file__).resolve().parents[1] / "examples" / "demo_map_corridor.json")
+
 
 def test_render_diagnostics_writes_png_and_html(tmp_path):
     spec = GridSpec(width=3, height=3, resolution=1.0)
@@ -61,7 +63,7 @@ def test_cli_demo_writes_json_png_and_html(tmp_path):
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -131,7 +133,7 @@ def test_cli_region_graph_guided_backend_writes_additive_planning_report(tmp_pat
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -257,7 +259,7 @@ def test_cli_demo_with_tracking_simulation_writes_report(tmp_path):
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -304,7 +306,7 @@ def test_cli_demo_with_trajectory_optimization_writes_report(tmp_path):
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -355,7 +357,7 @@ def test_cli_demo_with_trajectory_optimization_writes_report(tmp_path):
 
 
 def test_corridor_demo_map_is_complex_and_keeps_corridor_feasible():
-    grid, request = load_plan_input("examples/demo_map_corridor.json")
+    grid, request = load_plan_input(DEMO_MAP_CORRIDOR)
     result = AStarPlanner().plan(grid, request)
     postprocess = run_postprocess(
         grid,

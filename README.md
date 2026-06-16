@@ -117,7 +117,7 @@ GCS backend.
 ## Development Environment
 
 ```powershell
-conda activate D:\conda_envs\lunar-explorer
+conda activate lunar-explorer
 $env:PYTHONPATH='src'
 ```
 
@@ -158,7 +158,7 @@ Optional platform arguments:
 
 ```powershell
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform yutu2 --safety-margin-m 0.1
-python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform-config D:\codex\project\lunar-path-planning\dev-platform-constraints\configs\platforms\yutu2.json
+python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --platform-config ../dev-platform-constraints/configs/platforms/yutu2.json
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --tracking-error-bound-m 0.1 --min-speed-mps 0.01
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --lookahead-m 0.75 --time-step-s 0.2
 python -m path_planner.cli --input examples/demo_map_corridor.json --output-json outputs/demo/route.json --output-dir outputs/demo --simulate-tracking --optimize-trajectory

@@ -30,6 +30,8 @@ from path_planner.postprocess import build_corridor, run_postprocess
 from path_planner.postprocess.models import CorridorResult, CorridorSection
 from path_planner.search import AStarPlanner
 
+DEMO_MAP_CORRIDOR = str(Path(__file__).resolve().parents[1] / "examples" / "demo_map_corridor.json")
+
 
 def make_grid(mask, resolution=1.0):
     passable = np.asarray(mask, dtype=bool)
@@ -1363,7 +1365,7 @@ def test_cli_drake_iris_regions_writes_optional_report_without_changing_route_se
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -1421,7 +1423,7 @@ def test_cli_gcs_trajectory_smoke_writes_optional_report_without_changing_route_
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -1466,7 +1468,7 @@ def test_cli_gcs_geometric_candidate_is_opt_in_and_writes_candidate_report(tmp_p
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -1522,7 +1524,7 @@ def test_cli_gcs_control_point_candidate_is_opt_in_and_writes_reports(tmp_path):
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -1569,7 +1571,7 @@ def test_cli_gcs_control_point_candidate_forwards_calibration_parameters(tmp_pat
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -1624,7 +1626,7 @@ def test_cli_gcs_control_point_candidate_forces_pydrake_unavailable(tmp_path):
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -2214,7 +2216,7 @@ def test_cli_gcs_motion_feasibility_is_opt_in_and_writes_report(tmp_path):
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
@@ -2258,7 +2260,7 @@ def test_cli_gcs_curvature_constrained_candidate_is_opt_in_and_writes_report(tmp
             "-m",
             "path_planner.cli",
             "--input",
-            "examples/demo_map_corridor.json",
+            DEMO_MAP_CORRIDOR,
             "--output-json",
             str(output_json),
             "--output-dir",
