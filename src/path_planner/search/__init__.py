@@ -8,6 +8,17 @@ from .channel_aware import (
     ChannelAwarePlanOutcome,
     ChannelAwarePlanReport,
 )
+from .hybrid_astar import (
+    HYBRID_ASTAR_POSE_PATH,
+    HybridAStarPlanner,
+    MotionPrimitive,
+    Pose2D,
+    PoseCostBreakdown,
+    PosePathDiagnostics,
+    PosePlanRequest,
+    PosePlanResult,
+    default_scout_mini_primitives,
+)
 from .planning_grid import (
     PLATFORM_AWARE_ASTAR,
     STANDARD_GRID_ASTAR,
@@ -34,7 +45,15 @@ __all__ = [
     "ChannelAwareAStarPlanner",
     "ChannelAwarePlanOutcome",
     "ChannelAwarePlanReport",
+    "HYBRID_ASTAR_POSE_PATH",
+    "HybridAStarPlanner",
+    "MotionPrimitive",
     "PLATFORM_AWARE_ASTAR",
+    "Pose2D",
+    "PoseCostBreakdown",
+    "PosePathDiagnostics",
+    "PosePlanRequest",
+    "PosePlanResult",
     "REGION_GRAPH_GUIDED_BACKEND",
     "SAMPLED_REGION_PATH_BACKEND",
     "STANDARD_GRID_ASTAR",
@@ -46,4 +65,5 @@ __all__ = [
     "SampledRegionPathReport",
     "SearchTerrainLayers",
     "build_planning_grid",
+    "default_scout_mini_primitives",
 ]
