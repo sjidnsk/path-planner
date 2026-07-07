@@ -117,6 +117,7 @@ class PosePlanRequest:
     reverse_penalty_weight: float = 0.5
     turn_penalty_weight: float = 0.05
     terrain_cost_weight: float = 1.0
+    closed_key_xy_resolution_m: float | None = None
 
     def __post_init__(self) -> None:
         if self.theta_bin_count <= 0:
@@ -135,6 +136,8 @@ class PosePlanRequest:
             raise ValueError("max_angular_speed_radps must be positive")
         if self.footprint_length_m <= 0.0 or self.footprint_width_m <= 0.0:
             raise ValueError("footprint dimensions must be positive")
+        if self.closed_key_xy_resolution_m is not None and self.closed_key_xy_resolution_m <= 0.0:
+            raise ValueError("closed_key_xy_resolution_m must be positive when provided")
 
 
 @dataclass(frozen=True)
@@ -254,7 +257,12 @@ class HybridAStarPlanner:
 
         primitives = self._custom_primitives or default_scout_mini_primitives(request)
         grid_cost_to_goal = _grid_cost_to_goal(grid, request.goal)
-        start_key = self._key(grid.spec, request.start, request.theta_bin_count)
+        start_key = self._key(
+            grid.spec,
+            request.start,
+            request.theta_bin_count,
+            request.closed_key_xy_resolution_m,
+        )
         start_node = _Node(request.start.normalized(), (), None, None, 0.0, PoseCostBreakdown())
         nodes: dict[tuple[int, int, int], _Node] = {start_key: start_node}
         best_cost: dict[tuple[int, int, int], float] = {start_key: 0.0}
@@ -289,7 +297,7 @@ class HybridAStarPlanner:
                 outcome = self._apply_primitive(grid, request, current.pose, primitive)
                 if outcome is None:
                     continue
-                key = self._key(grid.spec, outcome.pose, request.theta_bin_count)
+                key = self._key(grid.spec, outcome.pose, request.theta_bin_count, request.closed_key_xy_resolution_m)
                 new_cost = current.cost + outcome.breakdown.total
                 if new_cost >= best_cost.get(key, math.inf):
                     continue
@@ -405,11 +413,23 @@ class HybridAStarPlanner:
         heading = abs(_angle_diff(pose.theta_rad, request.goal.theta_rad))
         return distance <= request.position_tolerance_m and heading <= request.theta_tolerance_rad
 
-    def _key(self, spec: GridSpec, pose: Pose2D, theta_bin_count: int) -> tuple[int, int, int]:
-        cell = spec.world_to_cell(WorldPoint(pose.x_m, pose.y_m))
+    def _key(
+        self,
+        spec: GridSpec,
+        pose: Pose2D,
+        theta_bin_count: int,
+        xy_resolution_m: float | None = None,
+    ) -> tuple[int, int, int]:
+        if xy_resolution_m is None:
+            cell = spec.world_to_cell(WorldPoint(pose.x_m, pose.y_m))
+            x_key = cell.x
+            y_key = cell.y
+        else:
+            x_key = int(math.floor((pose.x_m - spec.origin[0]) / float(xy_resolution_m)))
+            y_key = int(math.floor((pose.y_m - spec.origin[1]) / float(xy_resolution_m)))
         theta = _normalize_angle(pose.theta_rad)
         theta_bin = int(round(theta / (2.0 * math.pi / float(theta_bin_count)))) % theta_bin_count
-        return (cell.x, cell.y, theta_bin)
+        return (x_key, y_key, theta_bin)
 
     def _heuristic(
         self,
@@ -496,6 +516,11 @@ class HybridAStarPlanner:
             footprint_width_m=request.footprint_width_m,
             footprint_safety_margin_m=request.footprint_safety_margin_m,
             primitives=tuple(primitive.name for primitive in primitives),
+            dominance_key_policy=(
+                "xy_resolution_m_theta_bin/v1"
+                if request.closed_key_xy_resolution_m is not None
+                else "single_best_pose_per_cell_theta_bin"
+            ),
         )
 
 
