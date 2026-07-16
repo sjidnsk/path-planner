@@ -1667,3 +1667,43 @@ def test_missing_nonhold_field_is_sanitized_before_primitive_audit(field_name) -
     assert result.reason_code == "primitive_structure_mismatch"
     assert result.failed_primitive_index == 0
     assert result.checked_cell_count > 0
+
+
+def test_moving_primitive_renamed_hold_keeps_full_sweep_and_terrain_priority() -> None:
+    profile, start, control, primitive, _ = _straight_fixture(duration_s=1.0)
+    base = _snapshot()
+    start_cells = conservative_wheel_pose_cells(
+        start,
+        base.geometry,
+        body_length_m=profile.body_length_m,
+        body_width_m=profile.body_width_m,
+        safety_margin_m=profile.footprint_safety_margin_m,
+    )
+    sweep_cells = conservative_wheel_sweep_cells(
+        start,
+        control,
+        base.geometry,
+        body_length_m=profile.body_length_m,
+        body_width_m=profile.body_width_m,
+        safety_margin_m=profile.footprint_safety_margin_m,
+    )
+    blocked = Cell(4, 1)
+    assert len(start_cells) == 9
+    assert len(sweep_cells) == 15
+    assert blocked not in start_cells
+    assert blocked in sweep_cells
+    snapshot = _snapshot(hard_cells=(blocked,))
+    object.__setattr__(primitive, "control_name", "hold")
+
+    result = validate_route_l2(
+        _route(primitive),
+        _request(snapshot, profile, primitive.start_state, primitive.end_state),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "terrain_hard_obstacle"
+    assert result.failed_cell == blocked
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == len(sweep_cells)

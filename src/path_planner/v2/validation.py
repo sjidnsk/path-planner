@@ -950,11 +950,7 @@ def _audit_typed_primitive(
     fields = _read_typed_primitive_fields(primitive)
     samples = fields.samples
     declared_count = len(samples) if type(samples) is tuple else 0
-    declared_hold = (
-        type(samples) is tuple and declared_count == 1
-    ) or (
-        type(fields.control_name) is str and fields.control_name == "hold"
-    )
+    declared_hold = type(samples) is tuple and declared_count == 1
     if declared_hold:
         return _audit_hold(fields, index, deadline)
 
