@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from math import isfinite
+from math import isclose, isfinite
 from numbers import Real
 from typing import TYPE_CHECKING
 
@@ -23,6 +23,18 @@ class PlatformKindV2(_OrderedValueEnum):
     WHEEL = "wheel"
     LEGGED = "legged"
     HOPPER = "hopper"
+
+
+class PrimitiveKindV2(_OrderedValueEnum):
+    WHEEL_MOTION = "wheel_motion"
+    LEG_STEP = "leg_step"
+    BALLISTIC_JUMP = "ballistic_jump"
+
+
+class ValidationLevelV2(_OrderedValueEnum):
+    L0 = "L0"
+    L1 = "L1"
+    L2 = "L2"
 
 
 class AcceleratorPolicyV2(_OrderedValueEnum):
@@ -72,6 +84,15 @@ def _nonnegative_integer(value: object, name: str) -> None:
         raise ValueError(f"{name} must be nonnegative")
 
 
+def _strict_bool(value: object, name: str) -> None:
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be bool")
+
+
+def _costs_match(left: float, right: float) -> bool:
+    return isclose(left, right, rel_tol=1e-12, abs_tol=1e-12)
+
+
 @dataclass(frozen=True, slots=True)
 class PoseStateV2:
     x_m: float
@@ -108,36 +129,187 @@ class ResourceBudgetV2:
 
 
 @dataclass(frozen=True, slots=True)
+class RoutePrimitiveV2:
+    kind: PrimitiveKindV2
+    start_state: PoseStateV2
+    end_state: PoseStateV2
+    duration_s: float
+    distance_m: float
+    energy_cost: float
+    observation_contribution: float
+    validation_level: ValidationLevelV2
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, PrimitiveKindV2):
+            raise TypeError("kind must be PrimitiveKindV2")
+        if not isinstance(self.start_state, PoseStateV2):
+            raise TypeError("start_state must be PoseStateV2")
+        if not isinstance(self.end_state, PoseStateV2):
+            raise TypeError("end_state must be PoseStateV2")
+        for name in ("duration_s", "distance_m", "energy_cost", "observation_contribution"):
+            object.__setattr__(self, name, _nonnegative_float(getattr(self, name), name))
+        if not isinstance(self.validation_level, ValidationLevelV2):
+            raise TypeError("validation_level must be ValidationLevelV2")
+
+
+_PRIMITIVE_KIND_BY_PLATFORM = {
+    PlatformKindV2.WHEEL: PrimitiveKindV2.WHEEL_MOTION,
+    PlatformKindV2.LEGGED: PrimitiveKindV2.LEG_STEP,
+    PlatformKindV2.HOPPER: PrimitiveKindV2.BALLISTIC_JUMP,
+}
+
+
+@dataclass(frozen=True, slots=True)
 class TypedRouteV2:
     platform_kind: PlatformKindV2
-    states: tuple[PoseStateV2, ...]
+    primitives: tuple[RoutePrimitiveV2, ...]
     total_cost: float
     is_complete: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.platform_kind, PlatformKindV2):
             raise TypeError("platform_kind must be PlatformKindV2")
-        if not isinstance(self.states, tuple):
-            raise TypeError("states must be a tuple")
-        if not self.states:
-            raise ValueError("states must be nonempty")
-        if any(not isinstance(state, PoseStateV2) for state in self.states):
-            raise TypeError("states must contain only PoseStateV2 values")
+        if not isinstance(self.primitives, tuple):
+            raise TypeError("primitives must be a tuple")
+        if not self.primitives:
+            raise ValueError("primitives must be nonempty")
+        if any(not isinstance(primitive, RoutePrimitiveV2) for primitive in self.primitives):
+            raise TypeError("primitives must contain only RoutePrimitiveV2 values")
+        expected_kind = _PRIMITIVE_KIND_BY_PLATFORM[self.platform_kind]
+        if any(primitive.kind is not expected_kind for primitive in self.primitives):
+            raise ValueError("all primitive kinds must match the route platform")
+        for previous, current in zip(self.primitives, self.primitives[1:], strict=False):
+            if previous.end_state != current.start_state:
+                raise ValueError("route primitive endpoints must be connected")
         object.__setattr__(self, "total_cost", _nonnegative_float(self.total_cost, "total_cost"))
-        if not isinstance(self.is_complete, bool):
-            raise TypeError("is_complete must be bool")
+        _strict_bool(self.is_complete, "is_complete")
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationProjectionV2:
+    source: str
+    sample_states: tuple[PoseStateV2, ...]
+    expected_new_observed_cells: float
+    expected_information_gain: float
+
+    def __post_init__(self) -> None:
+        _nonempty_string(self.source, "source")
+        if not isinstance(self.sample_states, tuple):
+            raise TypeError("sample_states must be a tuple")
+        if any(not isinstance(state, PoseStateV2) for state in self.sample_states):
+            raise TypeError("sample_states must contain only PoseStateV2 values")
+        for name in ("expected_new_observed_cells", "expected_information_gain"):
+            object.__setattr__(self, name, _nonnegative_float(getattr(self, name), name))
+
+
+@dataclass(frozen=True, slots=True)
+class CostBreakdownV2:
+    distance_cost: float
+    risk_cost: float
+    energy_cost: float
+    time_cost: float
+    total_cost: float
+
+    def __post_init__(self) -> None:
+        component_names = ("distance_cost", "risk_cost", "energy_cost", "time_cost")
+        for name in (*component_names, "total_cost"):
+            object.__setattr__(self, name, _nonnegative_float(getattr(self, name), name))
+        component_total = sum(getattr(self, name) for name in component_names)
+        if not _costs_match(self.total_cost, component_total):
+            raise ValueError("total_cost must match the cost components")
+
+
+@dataclass(frozen=True, slots=True)
+class SearchTelemetryV2:
+    expanded_states: int
+    generated_primitives: int
+    rejected_l0: int
+    rejected_l1: int
+    rejected_l2: int
+    elapsed_s: float
+    timed_out: bool
+    accelerator_used: bool
+    ackermann_feasible_claimed: bool
+    termination_reason: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "expanded_states",
+            "generated_primitives",
+            "rejected_l0",
+            "rejected_l1",
+            "rejected_l2",
+        ):
+            _nonnegative_integer(getattr(self, name), name)
+        object.__setattr__(self, "elapsed_s", _nonnegative_float(self.elapsed_s, "elapsed_s"))
+        for name in ("timed_out", "accelerator_used", "ackermann_feasible_claimed"):
+            _strict_bool(getattr(self, name), name)
+        _nonempty_string(self.termination_reason, "termination_reason")
+
+
+@dataclass(frozen=True, slots=True)
+class CacheEvidenceV2:
+    cache_namespace: str
+    cache_key: str
+    hit: bool
+
+    def __post_init__(self) -> None:
+        _nonempty_string(self.cache_namespace, "cache_namespace")
+        _nonempty_string(self.cache_key, "cache_key")
+        _strict_bool(self.hit, "hit")
+
+
+def _validate_failure_detail_scalar(value: object) -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError("failure evidence detail floats must be finite")
+        return
+    raise TypeError("failure evidence detail values must be JSON scalar values")
+
+
+@dataclass(frozen=True, slots=True)
+class FailureEvidenceV2:
+    stage: str
+    checks: tuple[str, ...]
+    details: tuple[tuple[str, str | int | float | bool | None], ...]
+
+    def __post_init__(self) -> None:
+        _nonempty_string(self.stage, "stage")
+        if not isinstance(self.checks, tuple):
+            raise TypeError("checks must be a tuple")
+        for check in self.checks:
+            _nonempty_string(check, "check")
+        if not isinstance(self.details, tuple):
+            raise TypeError("details must be a tuple")
+
+        keys: list[str] = []
+        for detail in self.details:
+            if not isinstance(detail, tuple) or len(detail) != 2:
+                raise TypeError("details must contain immutable (key, scalar) tuples")
+            key, value = detail
+            _nonempty_string(key, "detail key")
+            _validate_failure_detail_scalar(value)
+            keys.append(key)
+        if len(keys) != len(set(keys)):
+            raise ValueError("failure evidence detail keys must be unique")
+        if keys != sorted(keys):
+            raise ValueError("failure evidence detail keys must be sorted")
 
 
 @dataclass(frozen=True, slots=True)
 class ValidationEvidenceV2:
     validator_id: str
+    level: ValidationLevelV2
     passed: bool
     checks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _nonempty_string(self.validator_id, "validator_id")
-        if not isinstance(self.passed, bool):
-            raise TypeError("passed must be bool")
+        if not isinstance(self.level, ValidationLevelV2):
+            raise TypeError("level must be ValidationLevelV2")
+        _strict_bool(self.passed, "passed")
         if not isinstance(self.checks, tuple):
             raise TypeError("checks must be a tuple")
         for check in self.checks:
@@ -180,20 +352,41 @@ class PlanningRequestV2:
 @dataclass(frozen=True, slots=True)
 class PlanningSuccessV2:
     request_id: str
+    platform_kind: PlatformKindV2
     route: TypedRouteV2
+    observation_projection: ObservationProjectionV2
+    cost_breakdown: CostBreakdownV2
     validation_evidence: ValidationEvidenceV2
+    search_telemetry: SearchTelemetryV2
+    cache_evidence: CacheEvidenceV2
     schema_version: str = PLANNING_SCHEMA_VERSION_V2
 
     def __post_init__(self) -> None:
         _nonempty_string(self.request_id, "request_id")
+        if not isinstance(self.platform_kind, PlatformKindV2):
+            raise TypeError("platform_kind must be PlatformKindV2")
         if not isinstance(self.route, TypedRouteV2):
             raise TypeError("route must be TypedRouteV2")
+        if self.route.platform_kind is not self.platform_kind:
+            raise ValueError("route platform must match result platform")
         if not self.route.is_complete:
             raise ValueError("successful route must be complete")
+        if not isinstance(self.observation_projection, ObservationProjectionV2):
+            raise TypeError("observation_projection must be ObservationProjectionV2")
+        if not isinstance(self.cost_breakdown, CostBreakdownV2):
+            raise TypeError("cost_breakdown must be CostBreakdownV2")
         if not isinstance(self.validation_evidence, ValidationEvidenceV2):
             raise TypeError("validation_evidence must be ValidationEvidenceV2")
         if not self.validation_evidence.passed:
             raise ValueError("successful route validation must have passed")
+        if self.validation_evidence.level is not ValidationLevelV2.L2:
+            raise ValueError("successful route validation must be L2")
+        if not isinstance(self.search_telemetry, SearchTelemetryV2):
+            raise TypeError("search_telemetry must be SearchTelemetryV2")
+        if not isinstance(self.cache_evidence, CacheEvidenceV2):
+            raise TypeError("cache_evidence must be CacheEvidenceV2")
+        if not _costs_match(self.route.total_cost, self.cost_breakdown.total_cost):
+            raise ValueError("route total_cost must match cost_breakdown total_cost")
         if self.schema_version != PLANNING_SCHEMA_VERSION_V2:
             raise ValueError(f"schema_version must be {PLANNING_SCHEMA_VERSION_V2}")
 
@@ -201,15 +394,24 @@ class PlanningSuccessV2:
 @dataclass(frozen=True, slots=True)
 class PlanningFailureV2:
     request_id: str
+    platform_kind: PlatformKindV2 | None
     category: FailureCategoryV2
     reason_code: str
+    evidence: FailureEvidenceV2
+    search_telemetry: SearchTelemetryV2
     schema_version: str = PLANNING_SCHEMA_VERSION_V2
 
     def __post_init__(self) -> None:
         _nonempty_string(self.request_id, "request_id")
+        if self.platform_kind is not None and not isinstance(self.platform_kind, PlatformKindV2):
+            raise TypeError("platform_kind must be PlatformKindV2 or None")
         if not isinstance(self.category, FailureCategoryV2):
             raise TypeError("category must be FailureCategoryV2")
         _nonempty_string(self.reason_code, "reason_code")
+        if not isinstance(self.evidence, FailureEvidenceV2):
+            raise TypeError("evidence must be FailureEvidenceV2")
+        if not isinstance(self.search_telemetry, SearchTelemetryV2):
+            raise TypeError("search_telemetry must be SearchTelemetryV2")
         if self.schema_version != PLANNING_SCHEMA_VERSION_V2:
             raise ValueError(f"schema_version must be {PLANNING_SCHEMA_VERSION_V2}")
 
