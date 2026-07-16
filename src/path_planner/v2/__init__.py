@@ -32,7 +32,10 @@ from path_planner.v2.profiles import (
     WHEEL_RELATIVE_ENERGY_PROXY_ID_V2,
     WheelProfileV2,
 )
-from path_planner.v2.providers import WheelMotionPrimitiveV2
+from path_planner.v2.providers import (
+    WheelMotionPrimitiveV2,
+    WheelPrimitiveProviderV2,
+)
 from path_planner.v2.validation import (
     WheelValidationResultV2,
     validate_route_l2,
@@ -64,6 +67,7 @@ __all__ = [
     "ValidationLevelV2",
     "WHEEL_RELATIVE_ENERGY_PROXY_ID_V2",
     "WheelMotionPrimitiveV2",
+    "WheelPrimitiveProviderV2",
     "WheelProfileV2",
     "WheelValidationResultV2",
     "canonical_json_bytes",
