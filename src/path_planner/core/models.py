@@ -43,6 +43,7 @@ class FailureReason(str, Enum):
     UNREACHABLE = "unreachable"
     MAX_ITERATIONS = "max_iterations"
     TIMEOUT = "timeout"
+    VALIDATOR_ERROR = "validator_error"
 
 
 @dataclass(frozen=True)
