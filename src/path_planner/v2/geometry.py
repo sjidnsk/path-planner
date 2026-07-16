@@ -33,6 +33,20 @@ def _nonnegative_real(value: object, name: str) -> float:
     return normalized
 
 
+def _deadline_expired(deadline_checker: Callable[[], bool]) -> bool:
+    expired = deadline_checker()
+    if type(expired) is not bool:
+        raise TypeError("deadline_checker must return exact bool")
+    return expired
+
+
+def _raise_if_deadline_expired(
+    deadline_checker: Callable[[], bool] | None,
+) -> None:
+    if deadline_checker is not None and _deadline_expired(deadline_checker):
+        raise TimeoutError("wheel sweep deadline expired")
+
+
 def _motion_bound(
     primitive: MotionPrimitive,
     *,
@@ -108,31 +122,76 @@ def conservative_wheel_pose_cells(
     expansion = _nonnegative_real(expansion_m, "expansion_m")
 
     cell_square_radius = geometry.resolution_m / sqrt(2.0)
-    half_length = nextafter(
+    raw_half_length = _finite_real(
         length / 2.0 + margin + expansion + cell_square_radius,
-        float("inf"),
+        "derived half_length",
     )
-    half_width = nextafter(
+    raw_half_width = _finite_real(
         width / 2.0 + margin + expansion + cell_square_radius,
-        float("inf"),
+        "derived half_width",
+    )
+    half_length = _finite_real(
+        nextafter(raw_half_length, float("inf")),
+        "closed half_length",
+    )
+    half_width = _finite_real(
+        nextafter(raw_half_width, float("inf")),
+        "closed half_width",
     )
     cos_t = cos(heading)
     sin_t = sin(heading)
-    extent_x = nextafter(
+    raw_extent_x = _finite_real(
         abs(cos_t) * half_length + abs(sin_t) * half_width,
-        float("inf"),
+        "derived extent_x",
     )
-    extent_y = nextafter(
+    raw_extent_y = _finite_real(
         abs(sin_t) * half_length + abs(cos_t) * half_width,
-        float("inf"),
+        "derived extent_y",
+    )
+    extent_x = _finite_real(
+        nextafter(raw_extent_x, float("inf")),
+        "closed extent_x",
+    )
+    extent_y = _finite_real(
+        nextafter(raw_extent_y, float("inf")),
+        "closed extent_y",
     )
     resolution = geometry.resolution_m
     origin_x, origin_y = geometry.origin
 
-    min_x = floor((pose_x - extent_x - origin_x) / resolution - 0.5)
-    max_x = ceil((pose_x + extent_x - origin_x) / resolution - 0.5)
-    min_y = floor((pose_y - extent_y - origin_y) / resolution - 0.5)
-    max_y = ceil((pose_y + extent_y - origin_y) / resolution - 0.5)
+    normalized_min_x = _finite_real(
+        (pose_x - extent_x - origin_x) / resolution - 0.5,
+        "normalized min_x",
+    )
+    normalized_max_x = _finite_real(
+        (pose_x + extent_x - origin_x) / resolution - 0.5,
+        "normalized max_x",
+    )
+    normalized_min_y = _finite_real(
+        (pose_y - extent_y - origin_y) / resolution - 0.5,
+        "normalized min_y",
+    )
+    normalized_max_y = _finite_real(
+        (pose_y + extent_y - origin_y) / resolution - 0.5,
+        "normalized max_y",
+    )
+    min_x = floor(normalized_min_x)
+    max_x = ceil(normalized_max_x)
+    min_y = floor(normalized_min_y)
+    max_y = ceil(normalized_max_y)
+
+    candidate_width = max_x - min_x + 1
+    candidate_height = max_y - min_y + 1
+    candidate_count = candidate_width * candidate_height
+    if (
+        candidate_width > MAX_REPLAY_STEPS
+        or candidate_height > MAX_REPLAY_STEPS
+        or candidate_count > MAX_REPLAY_STEPS
+    ):
+        raise ValueError(
+            "wheel pose candidate enumeration must not exceed "
+            f"public bound {MAX_REPLAY_STEPS}"
+        )
 
     cells: set[Cell] = set()
     for y in range(min_y, max_y + 1):
@@ -180,22 +239,31 @@ def conservative_wheel_sweep_cells(
         body_width_m=body_width_m,
         safety_margin_m=safety_margin_m,
     )
-    interval_dt = duration / float(steps)
+    interval_dt = _positive_real(
+        duration / float(steps),
+        "derived interval_dt",
+    )
+    replay_dt = nextafter(interval_dt, float("inf"))
+    if not isfinite(replay_dt):
+        replay_dt = interval_dt
+    replay_deadline_checker = (
+        None
+        if deadline_checker is None
+        else lambda: _deadline_expired(deadline_checker)
+    )
     transition = replay_motion_primitive(
         start,
         primitive,
-        interval_dt,
-        deadline_checker=deadline_checker,
+        replay_dt,
+        deadline_checker=replay_deadline_checker,
     )
-    interval_expansion = point_speed_bound * interval_dt
+    interval_expansion = _nonnegative_real(
+        point_speed_bound * interval_dt,
+        "derived interval expansion",
+    )
     cells: set[Cell] = set()
     for pose in transition.samples[:-1]:
-        if deadline_checker is not None:
-            expired = deadline_checker()
-            if type(expired) is not bool:
-                raise TypeError("deadline_checker must return exact bool")
-            if expired:
-                raise TimeoutError("wheel sweep deadline expired")
+        _raise_if_deadline_expired(deadline_checker)
         cells.update(
             conservative_wheel_pose_cells(
                 pose,
@@ -206,6 +274,7 @@ def conservative_wheel_sweep_cells(
                 expansion_m=interval_expansion,
             )
         )
+    _raise_if_deadline_expired(deadline_checker)
     cells.update(
         conservative_wheel_pose_cells(
             transition.end,
@@ -216,4 +285,5 @@ def conservative_wheel_sweep_cells(
             expansion_m=0.0,
         )
     )
+    _raise_if_deadline_expired(deadline_checker)
     return tuple(sorted(cells, key=lambda cell: (cell.y, cell.x)))

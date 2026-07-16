@@ -1,9 +1,15 @@
-from math import ceil, cos, floor, hypot, nextafter, pi, sin, sqrt
+from math import ceil, cos, floor, hypot, isfinite, nextafter, pi, sin, sqrt
 
 import pytest
 
+import path_planner.v2.geometry as geometry_module
 from path_planner.core import Cell
-from path_planner.search import MotionPrimitive, Pose2D, replay_motion_primitive
+from path_planner.search import (
+    MotionPrimitive,
+    Pose2D,
+    PoseTransition,
+    replay_motion_primitive,
+)
 from path_planner.v2.geometry import (
     conservative_wheel_pose_cells,
     conservative_wheel_sweep_cells,
@@ -112,6 +118,120 @@ def test_dense_sweep_checks_deadline_during_public_replay() -> None:
 
 
 @pytest.mark.parametrize(
+    "checks",
+    [
+        (False, False, True),
+        (False, False, False, True),
+    ],
+)
+def test_idle_sweep_checks_deadline_before_endpoint_and_return(checks) -> None:
+    values = iter(checks)
+
+    with pytest.raises(TimeoutError, match="deadline"):
+        conservative_wheel_sweep_cells(
+            Pose2D(1.25, 1.25, 0.0),
+            MotionPrimitive("idle", 0.0, 0.0, 0.1),
+            FineGridGeometryV2(width=6, height=6, frame_id="moon"),
+            body_length_m=0.612,
+            body_width_m=0.580,
+            safety_margin_m=0.0,
+            deadline_checker=lambda: next(values),
+        )
+
+
+def test_idle_sweep_endpoint_deadline_requires_exact_bool() -> None:
+    values = iter((False, False, 1))
+
+    with pytest.raises(TypeError, match="exact bool"):
+        conservative_wheel_sweep_cells(
+            Pose2D(1.25, 1.25, 0.0),
+            MotionPrimitive("idle", 0.0, 0.0, 0.1),
+            FineGridGeometryV2(width=6, height=6, frame_id="moon"),
+            body_length_m=0.612,
+            body_width_m=0.580,
+            safety_margin_m=0.0,
+            deadline_checker=lambda: next(values),
+        )
+
+
+def test_exact_public_replay_cap_remains_executable(monkeypatch) -> None:
+    primitive = MotionPrimitive("at_cap", 62_500.0, 0.0, 0.1)
+    observed = {}
+
+    def replay_at_cap(start, control, integration_dt_s, *, deadline_checker=None):
+        replay = replay_motion_primitive(
+            start,
+            control,
+            integration_dt_s,
+            deadline_checker=deadline_checker,
+        )
+        observed["integration_dt_s"] = integration_dt_s
+        observed["steps"] = len(replay.samples) - 1
+        return PoseTransition(
+            start=start,
+            primitive=control,
+            samples=(start, start),
+            end=start,
+            distance_m=0.0,
+            absolute_heading_change_rad=0.0,
+        )
+
+    monkeypatch.setattr(geometry_module, "replay_motion_primitive", replay_at_cap)
+
+    cells = conservative_wheel_sweep_cells(
+        Pose2D(1.25, 1.25, 0.0),
+        primitive,
+        FineGridGeometryV2(width=6, height=6, frame_id="moon"),
+        body_length_m=0.612,
+        body_width_m=0.580,
+        safety_margin_m=0.0,
+    )
+
+    assert dense_wheel_replay_step_count(
+        primitive,
+        body_length_m=0.612,
+        body_width_m=0.580,
+        safety_margin_m=0.0,
+        resolution_m=0.5,
+    ) == 100_000
+    assert observed["integration_dt_s"] > 0.1 / 100_000
+    assert observed["steps"] == 100_000
+    assert cells
+
+
+def test_one_step_max_finite_interval_does_not_promote_replay_dt_to_infinity(
+    monkeypatch,
+) -> None:
+    duration = float.fromhex("0x1.fffffffffffffp+1023")
+    observed = {}
+
+    def capture_replay(start, control, integration_dt_s, *, deadline_checker=None):
+        observed["integration_dt_s"] = integration_dt_s
+        return PoseTransition(
+            start=start,
+            primitive=control,
+            samples=(start, start),
+            end=start,
+            distance_m=0.0,
+            absolute_heading_change_rad=0.0,
+        )
+
+    monkeypatch.setattr(geometry_module, "replay_motion_primitive", capture_replay)
+
+    conservative_wheel_sweep_cells(
+        Pose2D(1.25, 1.25, 0.0),
+        MotionPrimitive("max_duration_idle", 0.0, 0.0, duration),
+        FineGridGeometryV2(width=6, height=6, frame_id="moon"),
+        body_length_m=0.612,
+        body_width_m=0.580,
+        safety_margin_m=0.0,
+    )
+
+    assert isfinite(observed["integration_dt_s"])
+    assert observed["integration_dt_s"] == duration
+
+
+@pytest.mark.parametrize(
     ("overrides", "error", "message"),
     [
         ({"body_length_m": True}, TypeError, "body_length_m"),
@@ -133,6 +253,42 @@ def test_dense_replay_rejects_invalid_geometry_inputs(overrides, error, message)
         dense_wheel_replay_step_count(
             MotionPrimitive("forward", 1.0, 0.0, 1.0),
             **values,
+        )
+
+
+def test_pose_contact_rejects_nonfinite_normalized_bounds() -> None:
+    geometry = FineGridGeometryV2(
+        width=2,
+        height=2,
+        origin=(-1.0e308, -1.0e308),
+        frame_id="moon",
+    )
+
+    with pytest.raises(ValueError, match="finite"):
+        conservative_wheel_pose_cells(
+            Pose2D(1.0e308, 1.0e308, 0.0),
+            geometry,
+            body_length_m=0.612,
+            body_width_m=0.580,
+            safety_margin_m=0.0,
+        )
+
+
+def test_pose_contact_rejects_candidate_enumeration_above_public_bound(
+    monkeypatch,
+) -> None:
+    def forbidden_range(*_args):
+        raise AssertionError("candidate range entered before bound check")
+
+    monkeypatch.setattr(geometry_module, "range", forbidden_range, raising=False)
+
+    with pytest.raises(ValueError, match="candidate.*100000"):
+        conservative_wheel_pose_cells(
+            Pose2D(1.25, 1.25, 0.0),
+            FineGridGeometryV2(width=2, height=2, frame_id="moon"),
+            body_length_m=1.0e9,
+            body_width_m=0.580,
+            safety_margin_m=0.0,
         )
 
 
