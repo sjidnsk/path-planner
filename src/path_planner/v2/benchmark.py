@@ -34,7 +34,10 @@ def _seed(value: object) -> None:
 def _nonnegative_float(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
         raise TypeError(f"{name} must be a finite real number")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be finite") from exc
     if not isfinite(normalized):
         raise ValueError(f"{name} must be finite")
     if normalized < 0.0:
@@ -174,6 +177,13 @@ class ExactMapQualityRowV2:
         if self.provider_success != (self.provider_resource_cost is not None):
             raise ValueError(
                 "provider resource cost must be present exactly when provider succeeds"
+            )
+        if (
+            self.provider_resource_cost is not None
+            and self.provider_resource_cost < self.optimum_resource_cost
+        ):
+            raise ValueError(
+                "provider_resource_cost must be at least optimum_resource_cost"
             )
         if self.provider_complete_l2 and not self.provider_success:
             raise ValueError("provider complete L2 requires provider success")

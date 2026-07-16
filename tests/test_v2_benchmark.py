@@ -107,6 +107,37 @@ def test_row_parsing_preserves_independent_labels_and_provider_results_separatel
     assert quality.provider_resource_cost == 5.0
 
 
+@pytest.mark.parametrize("provider_resource_cost", [0.0, 5.0])
+def test_exact_row_rejects_success_cost_below_the_independent_optimum(
+    provider_resource_cost,
+):
+    v2 = _v2()
+
+    with pytest.raises(ValueError, match="provider_resource_cost.*optimum_resource_cost"):
+        v2.ExactMapQualityRowV2.from_dict(
+            _exact_payload(
+                optimum_resource_cost=10.0,
+                optimum_independent=True,
+                provider_resource_cost=provider_resource_cost,
+            )
+        )
+
+
+@pytest.mark.parametrize("provider_resource_cost", [10.0, 11.0])
+def test_exact_row_accepts_optimum_and_one_point_one_cost_ratio(provider_resource_cost):
+    v2 = _v2()
+    row = v2.ExactMapQualityRowV2.from_dict(
+        _exact_payload(
+            optimum_resource_cost=10.0,
+            provider_resource_cost=provider_resource_cost,
+        )
+    )
+
+    summary = v2.aggregate_exact_map_quality_v2([row])
+
+    assert summary.max_resource_cost_ratio == provider_resource_cost / 10.0
+
+
 @pytest.mark.parametrize(
     ("factory_name", "payload_factory"),
     [
@@ -147,6 +178,22 @@ def test_rows_reject_bool_number_confusion_and_invalid_numeric_values(factory_na
     v2 = _v2()
 
     with pytest.raises((TypeError, ValueError)):
+        getattr(v2, factory_name).from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("factory_name", "payload"),
+    [
+        ("PrimitiveAuditRowV2", _primitive_payload(runtime_ms=10**400)),
+        ("ExactMapQualityRowV2", _exact_payload(optimum_resource_cost=10**400)),
+        ("ExactMapQualityRowV2", _exact_payload(provider_resource_cost=10**400)),
+        ("StandardEpisodeRowV2", _standard_payload(runtime_ms=10**400)),
+    ],
+)
+def test_rows_normalize_float_overflow_to_a_stable_finite_value_error(factory_name, payload):
+    v2 = _v2()
+
+    with pytest.raises(ValueError, match="finite"):
         getattr(v2, factory_name).from_dict(payload)
 
 
