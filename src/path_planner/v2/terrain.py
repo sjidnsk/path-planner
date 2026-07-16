@@ -195,23 +195,18 @@ def _canonical_layer_copy(
     dtype: np.dtype,
     shape: tuple[int, int],
 ) -> np.ndarray:
-    if dtype == _BOOL:
-        source = np.asarray(value)
-        try:
-            source_is_finite = np.isfinite(source)
-        except TypeError as exc:
-            raise TypeError(f"{name} values must be finite numeric or bool values") from exc
-        if not np.all(source_is_finite):
-            raise ValueError(f"{name} values must be finite")
-    layer = np.array(value, dtype=dtype, order="C", copy=True)
+    source = np.asarray(value)
+    if dtype == _BOOL and source.dtype != _BOOL:
+        raise TypeError(f"{name} must have exact bool dtype")
+    layer = np.array(source, dtype=dtype, order="C", copy=True)
     if layer.ndim != 2:
         raise ValueError(f"{name} must be 2-D")
     if layer.shape != shape:
         raise ValueError(f"{name} shape {layer.shape} must match geometry shape {shape}")
     if dtype == _FLOAT64_LE and not np.all(np.isfinite(layer)):
         raise ValueError(f"{name} values must be finite")
-    layer.setflags(write=False)
-    return layer
+    immutable_bytes = layer.tobytes(order="C")
+    return np.frombuffer(immutable_bytes, dtype=dtype).reshape(shape)
 
 
 @dataclass(frozen=True, slots=True)

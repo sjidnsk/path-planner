@@ -140,6 +140,31 @@ def test_query_requires_cell_and_safety_query_is_frozen_and_slotted():
         query.passed = False
 
 
+def test_anchor_query_and_cached_identity_survive_all_layer_mutation_attempts():
+    terrain, snapshot, anchor = _anchor()
+    cell = Cell(0, 0)
+    query_before = anchor.query(cell)
+    hash_before = terrain.snapshot_hash(snapshot)
+
+    for name in (
+        "elevation_m",
+        "slope_deg",
+        "traversable_mask",
+        "hard_obstacle_mask",
+        "observed_mask",
+        "confidence",
+    ):
+        layer = getattr(snapshot, name)
+        with pytest.raises(ValueError, match="read-only"):
+            layer.flat[0] = layer.flat[0]
+        with pytest.raises(ValueError, match="WRITEABLE"):
+            layer.setflags(write=True)
+
+    assert anchor.query(cell) == query_before
+    assert terrain.snapshot_hash(snapshot) == hash_before
+    assert anchor.query(cell).snapshot_hash == terrain.snapshot_hash(snapshot)
+
+
 def test_validate_cells_supports_generator_and_preserves_duplicate_order():
     _, _, anchor = _anchor()
     cells = (Cell(0, 0), Cell(0, 0), Cell(1, 0))

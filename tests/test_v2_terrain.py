@@ -38,9 +38,9 @@ def _layer_values(shape=(2, 3)):
     return {
         "elevation_m": np.arange(np.prod(shape), dtype=np.float32).reshape(shape),
         "slope_deg": np.full(shape, 12.5, dtype=np.float32),
-        "traversable_mask": np.ones(shape, dtype=np.uint8),
-        "hard_obstacle_mask": np.zeros(shape, dtype=np.uint8),
-        "observed_mask": np.ones(shape, dtype=np.uint8),
+        "traversable_mask": np.ones(shape, dtype=bool),
+        "hard_obstacle_mask": np.zeros(shape, dtype=bool),
+        "observed_mask": np.ones(shape, dtype=bool),
         "confidence": np.full(shape, 0.75, dtype=np.float32),
     }
 
@@ -291,9 +291,32 @@ def test_snapshot_deep_copies_canonicalizes_and_freezes_every_layer():
         "confidence",
     ],
 )
+def test_snapshot_layer_write_flags_cannot_be_reenabled(layer_name):
+    terrain = _terrain()
+    snapshot = _snapshot(terrain)
+    layer = getattr(snapshot, layer_name)
+
+    with pytest.raises(ValueError, match="WRITEABLE"):
+        layer.setflags(write=True)
+    with pytest.raises(ValueError, match="read-only"):
+        layer.flat[0] = layer.flat[0]
+
+
+@pytest.mark.parametrize(
+    "layer_name",
+    [
+        "elevation_m",
+        "slope_deg",
+        "traversable_mask",
+        "hard_obstacle_mask",
+        "observed_mask",
+        "confidence",
+    ],
+)
 def test_snapshot_rejects_non_2d_layers(layer_name):
     terrain = _terrain()
-    bad = np.zeros(6)
+    dtype = bool if layer_name.endswith("_mask") else float
+    bad = np.zeros(6, dtype=dtype)
 
     with pytest.raises(ValueError, match="2-D"):
         _snapshot(terrain, **{layer_name: bad})
@@ -312,7 +335,8 @@ def test_snapshot_rejects_non_2d_layers(layer_name):
 )
 def test_snapshot_rejects_mismatched_layer_shapes(layer_name):
     terrain = _terrain()
-    bad = np.zeros((2, 2))
+    dtype = bool if layer_name.endswith("_mask") else float
+    bad = np.zeros((2, 2), dtype=dtype)
 
     with pytest.raises(ValueError, match="shape"):
         _snapshot(terrain, **{layer_name: bad})
@@ -333,17 +357,45 @@ def test_snapshot_rejects_nonfinite_numeric_layers(layer_name, value):
     "layer_name",
     ["traversable_mask", "hard_obstacle_mask", "observed_mask"],
 )
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
-def test_snapshot_rejects_nonfinite_mask_sources_before_boolean_conversion(
+@pytest.mark.parametrize(
+    ("dtype", "value"),
+    [
+        (np.uint8, 0),
+        (np.uint8, 1),
+        (np.int64, 2),
+        (np.int64, -1),
+        (np.float64, 0.0),
+        (np.float64, 1.0),
+        (np.float64, 0.5),
+        (np.float64, float("nan")),
+        (np.float64, float("inf")),
+        (np.float64, float("-inf")),
+        (object, True),
+    ],
+)
+def test_snapshot_rejects_every_nonbool_mask_dtype(
     layer_name,
+    dtype,
     value,
 ):
     terrain = _terrain()
-    bad = np.zeros((2, 3))
+    bad = np.zeros((2, 3), dtype=dtype)
     bad[0, 0] = value
 
-    with pytest.raises(ValueError, match="finite"):
+    with pytest.raises(TypeError, match="bool dtype"):
         _snapshot(terrain, **{layer_name: bad})
+
+
+def test_snapshot_accepts_python_nested_bool_lists_as_exact_bool_masks():
+    terrain = _terrain()
+    layers = _layer_values()
+    for name in ("traversable_mask", "hard_obstacle_mask", "observed_mask"):
+        layers[name] = layers[name].tolist()
+
+    snapshot = _snapshot(terrain, **layers)
+
+    for name in ("traversable_mask", "hard_obstacle_mask", "observed_mask"):
+        assert getattr(snapshot, name).dtype == np.dtype(np.bool_)
 
 
 @pytest.mark.parametrize("value", [-0.1, -np.nextafter(0.0, 1.0)])
