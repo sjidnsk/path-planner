@@ -5,8 +5,10 @@ import numpy as np
 import pytest
 
 import path_planner.v2 as v2
+import path_planner.v2.validation as validation_module
 from path_planner.core import Cell
 from path_planner.search import MotionPrimitive, Pose2D, replay_motion_primitive
+from path_planner.search.hybrid_astar import MAX_REPLAY_STEPS
 from path_planner.v2.contracts import (
     AcceleratorPolicyV2,
     ObjectiveProfileV2,
@@ -513,7 +515,7 @@ def test_route_rejects_tampered_anchor_query_contract(
 
     assert result.reason_code == "terrain_query_contract_mismatch"
     assert result.checked_cell_count == 1
-    assert result.failed_cell == requested_cells[0]
+    assert result.failed_cell is None
     assert result.failed_primitive_index == 0
 
 
@@ -1247,3 +1249,327 @@ def test_deadline_during_query_returns_timeout_without_passing_evidence(monkeypa
     assert result.reason_code == "planning_deadline_expired"
     assert result.evidence.passed is False
     assert result.checked_cell_count == 1
+
+
+@pytest.mark.parametrize("hard_obstacle", [False, True])
+def test_extreme_finite_goal_headings_are_reduced_before_subtraction_and_keep_terrain_priority(
+    hard_obstacle,
+) -> None:
+    max_finite = float.fromhex("0x1.fffffffffffffp+1023")
+    profile = _wheel_profile(heading_tolerance_rad=pi)
+    state = PoseStateV2(1.25, 1.25, max_finite)
+    goal = PoseStateV2(1.25, 1.25, -max_finite)
+    hold = _hold(state)
+    base = _snapshot()
+    contacted = conservative_wheel_pose_cells(
+        Pose2D(state.x_m, state.y_m, state.heading_rad),
+        base.geometry,
+        body_length_m=profile.body_length_m,
+        body_width_m=profile.body_width_m,
+        safety_margin_m=profile.footprint_safety_margin_m,
+    )
+    snapshot = _snapshot(hard_cells=(contacted[0],) if hard_obstacle else ())
+
+    result = validate_route_l2(
+        _route(hold),
+        _request(snapshot, profile, state, goal),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == (
+        "terrain_hard_obstacle" if hard_obstacle else "route_l2_valid"
+    )
+    assert result.evidence.passed is (not hard_obstacle)
+
+
+class _AttributeErrorClock:
+    def __call__(self):
+        raise AttributeError("tampered clock")
+
+
+@pytest.mark.parametrize("entry_point", ["route", "transition"])
+@pytest.mark.parametrize(
+    "clock",
+    [
+        lambda: True,
+        lambda: float("nan"),
+        lambda: float("inf"),
+        lambda: 10**400,
+        _AttributeErrorClock(),
+    ],
+    ids=["bool", "nan", "inf", "huge", "attribute-error"],
+)
+def test_tampered_exact_deadline_clock_fails_with_stable_contract_reason(
+    entry_point,
+    clock,
+) -> None:
+    profile, _, _, primitive, transition = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    deadline = _deadline()
+    object.__setattr__(deadline, "_monotonic_clock", clock)
+
+    if entry_point == "route":
+        result = validate_route_l2(
+            _route(primitive),
+            _request(snapshot, profile, primitive.start_state, primitive.end_state),
+            FineSafetyAnchorV2(snapshot),
+            profile,
+            deadline,
+        )
+    else:
+        result = validate_wheel_transition_l2(
+            transition,
+            FineSafetyAnchorV2(snapshot),
+            profile,
+            deadline,
+        )
+
+    assert result.reason_code == "planning_deadline_contract_mismatch"
+    assert result.timed_out is False
+    assert result.checked_cell_count == 0
+
+
+@pytest.mark.parametrize("entry_point", ["route", "transition"])
+@pytest.mark.parametrize("tamper_kind", ["geometry", "layer-shape", "confidence-range"])
+def test_tampered_exact_snapshot_fails_closed_without_hash_or_index_exception(
+    entry_point,
+    tamper_kind,
+) -> None:
+    profile, _, _, primitive, transition = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    anchor = FineSafetyAnchorV2(snapshot)
+    request = _request(snapshot, profile, primitive.start_state, primitive.end_state)
+    if tamper_kind == "geometry":
+        object.__setattr__(snapshot, "geometry", object())
+    elif tamper_kind == "layer-shape":
+        object.__setattr__(snapshot, "slope_deg", np.zeros((1, 1), dtype=np.float64))
+    else:
+        confidence = np.full(snapshot.confidence.shape, 2.0, dtype=np.float64)
+        confidence.setflags(write=False)
+        object.__setattr__(snapshot, "confidence", confidence)
+
+    if entry_point == "route":
+        result = validate_route_l2(
+            _route(primitive), request, anchor, profile, _deadline()
+        )
+    else:
+        result = validate_wheel_transition_l2(
+            transition, anchor, profile, _deadline()
+        )
+
+    assert result.reason_code == "terrain_snapshot_hash_mismatch"
+    assert result.checked_cell_count == 0
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [TypeError, ValueError, OverflowError, AttributeError, IndexError],
+)
+def test_anchor_query_expected_exceptions_become_stable_contract_failure(
+    monkeypatch,
+    error_type,
+) -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+
+    def broken_query(*_args, **_kwargs):
+        raise error_type("tampered query")
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", broken_query)
+    result = validate_route_l2(
+        _route(primitive),
+        _request(snapshot, profile, primitive.start_state, primitive.end_state),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "terrain_query_contract_mismatch"
+    assert result.checked_cell_count == 1
+    assert result.failed_cell is None
+    assert result.failed_primitive_index == 0
+
+
+def test_snapshot_mutation_during_query_is_detected_after_cell_scan(monkeypatch) -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    anchor = FineSafetyAnchorV2(snapshot)
+    original_query = FineSafetyAnchorV2.query
+    calls = 0
+
+    def mutate_after_query(self, cell, max_slope_deg=30.0):
+        nonlocal calls
+        query = original_query(self, cell, max_slope_deg)
+        calls += 1
+        if calls == 1:
+            elevation = np.ones(snapshot.elevation_m.shape, dtype=np.float64)
+            elevation.setflags(write=False)
+            object.__setattr__(snapshot, "elevation_m", elevation)
+        return query
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", mutate_after_query)
+    result = validate_route_l2(
+        _route(primitive),
+        _request(snapshot, profile, primitive.start_state, primitive.end_state),
+        anchor,
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "terrain_snapshot_hash_mismatch"
+    assert result.checked_cell_count > 0
+    assert result.failed_cell is None
+
+
+def test_snapshot_provenance_scan_observes_deadline_without_rebuilding(
+    monkeypatch,
+) -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    anchor = FineSafetyAnchorV2(snapshot)
+    object.__setattr__(
+        snapshot.provenance,
+        "details",
+        (("a", 1), ("b", 2), ("c", 3)),
+    )
+
+    class DetailClock:
+        calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            return 0.0 if self.calls < 4 else 1.0
+
+    original_replace = validation_module.replace
+
+    def forbid_provenance_replace(value, *args, **kwargs):
+        if type(value) is TerrainProvenanceV2:
+            raise AssertionError("provenance must be reaudited without rebuilding")
+        return original_replace(value, *args, **kwargs)
+
+    monkeypatch.setattr(validation_module, "replace", forbid_provenance_replace)
+    result = validate_route_l2(
+        _route(primitive),
+        _request(snapshot, profile, primitive.start_state, primitive.end_state),
+        anchor,
+        profile,
+        _deadline(DetailClock()),
+    )
+
+    assert result.reason_code == "planning_deadline_expired"
+    assert result.checked_cell_count == 0
+
+
+class _ExplodingEquality:
+    def __eq__(self, _other):
+        raise AssertionError("untrusted equality executed")
+
+    def __ne__(self, _other):
+        raise AssertionError("untrusted inequality executed")
+
+
+def test_route_prescan_never_executes_untrusted_state_equality() -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    request = _request(snapshot, profile, primitive.start_state, primitive.end_state)
+    object.__setattr__(primitive, "start_state", _ExplodingEquality())
+
+    result = validate_route_l2(
+        _route(primitive),
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "primitive_structure_mismatch"
+    assert result.failed_primitive_index == 0
+
+
+def test_declared_sample_budget_is_rejected_before_replay(monkeypatch) -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    object.__setattr__(primitive, "samples", (primitive.start_state,) * 2)
+    snapshot = _snapshot()
+
+    def forbidden_replay(*_args, **_kwargs):
+        raise AssertionError("replay must not run after declared budget is exhausted")
+
+    monkeypatch.setattr(validation_module, "replay_motion_primitive", forbidden_replay)
+    result = validate_route_l2(
+        _route(primitive),
+        _request(
+            snapshot,
+            profile,
+            primitive.start_state,
+            primitive.end_state,
+            max_route_states=1,
+        ),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "route_state_budget_exceeded"
+    assert result.checked_cell_count == 0
+
+
+def test_declared_samples_above_public_replay_cap_fail_as_resource_error() -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    object.__setattr__(
+        primitive,
+        "samples",
+        (primitive.start_state,) * (MAX_REPLAY_STEPS + 2),
+    )
+    snapshot = _snapshot()
+
+    result = validate_route_l2(
+        _route(primitive),
+        _request(
+            snapshot,
+            profile,
+            primitive.start_state,
+            primitive.end_state,
+            max_route_states=MAX_REPLAY_STEPS + 2,
+        ),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "route_state_budget_exceeded"
+    assert result.checked_cell_count == 0
+
+
+@pytest.mark.parametrize(
+    ("reason_code", "failed_cell", "failed_index", "checked_count"),
+    [
+        ("terrain_unknown", None, 0, 1),
+        ("terrain_unknown", Cell(0, 0), 0, 0),
+        ("terrain_unknown", Cell(True, 0), 0, 1),
+        ("primitive_structure_mismatch", Cell(0, 0), 0, 1),
+    ],
+)
+def test_validation_result_rejects_inconsistent_terrain_failure_metadata(
+    reason_code,
+    failed_cell,
+    failed_index,
+    checked_count,
+) -> None:
+    evidence = v2.ValidationEvidenceV2(
+        validator_id=WHEEL_ROUTE_VALIDATOR_ID_V2,
+        level=ValidationLevelV2.L2,
+        passed=False,
+        checks=(reason_code,),
+    )
+
+    with pytest.raises(ValueError):
+        WheelValidationResultV2(
+            evidence=evidence,
+            reason_code=reason_code,
+            timed_out=False,
+            failed_cell=failed_cell,
+            failed_primitive_index=failed_index,
+            checked_cell_count=checked_count,
+        )

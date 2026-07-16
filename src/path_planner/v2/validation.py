@@ -4,6 +4,8 @@ from dataclasses import dataclass, replace
 from math import hypot, isclose, isfinite, pi, remainder
 from numbers import Real
 
+import numpy as np
+
 from path_planner.core import Cell
 from path_planner.search import (
     MotionPrimitive,
@@ -11,6 +13,7 @@ from path_planner.search import (
     PoseTransition,
     replay_motion_primitive,
 )
+from path_planner.search.hybrid_astar import MAX_REPLAY_STEPS
 from path_planner.v2.contracts import (
     PlanningRequestV2,
     PlatformKindV2,
@@ -29,14 +32,26 @@ from path_planner.v2.profiles import PlatformProfileV2, WheelProfileV2
 from path_planner.v2.providers.wheel import WheelMotionPrimitiveV2
 from path_planner.v2.runtime import PlanningDeadlineV2
 from path_planner.v2.terrain import (
+    FineGridGeometryV2,
     FineSafetyAnchorV2,
     SafetyQueryV2,
+    SYNTHETIC_TERRAIN_SOURCE_KIND_V2,
+    TerrainProvenanceV2,
+    TerrainSnapshotV2,
     snapshot_hash,
 )
 
 
 WHEEL_TRANSITION_VALIDATOR_ID_V2 = "path-planner-v2-wheel-transition-l2/v1"
 WHEEL_ROUTE_VALIDATOR_ID_V2 = "path-planner-v2-wheel-route-l2/v1"
+_MAX_DECLARED_ROUTE_STATES = MAX_REPLAY_STEPS + 1
+_EXPECTED_CONTRACT_EXCEPTIONS = (
+    TypeError,
+    ValueError,
+    OverflowError,
+    AttributeError,
+    IndexError,
+)
 
 _TERRAIN_FAILURE_PRIORITY = {
     "terrain_out_of_bounds": 0,
@@ -49,6 +64,7 @@ _TERRAIN_QUERY_REASON_CODES = frozenset({"terrain_safe", *_TERRAIN_FAILURE_PRIOR
 _COMMON_FAILURE_REASON_CODES = frozenset(
     {
         "planning_deadline_expired",
+        "planning_deadline_contract_mismatch",
         "terrain_out_of_bounds",
         "terrain_unknown",
         "terrain_hard_obstacle",
@@ -116,28 +132,42 @@ class WheelValidationResultV2:
         if self.evidence.level is not ValidationLevelV2.L2:
             raise ValueError("evidence must be L2")
         validator_id = self.evidence.validator_id
+        if type(validator_id) is not str:
+            raise TypeError("evidence validator_id must be exact str")
         if validator_id not in _VALIDATOR_REASON_CODES:
             raise ValueError("evidence validator_id must be a stable wheel L2 validator")
-        if not isinstance(self.reason_code, str) or not self.reason_code.strip():
+        if type(self.reason_code) is not str or not self.reason_code.strip():
             raise ValueError("reason_code must be a nonempty string")
         if self.reason_code not in _VALIDATOR_REASON_CODES[validator_id]:
             raise ValueError("reason_code is not valid for the wheel L2 validator")
         if type(self.timed_out) is not bool:
             raise TypeError("timed_out must be bool")
-        if self.failed_cell is not None and type(self.failed_cell) is not Cell:
-            raise TypeError("failed_cell must be exact Cell or None")
+        if type(self.evidence.passed) is not bool:
+            raise TypeError("evidence passed must be bool")
+        if (
+            type(self.evidence.checks) is not tuple
+            or len(self.evidence.checks) != 1
+            or type(self.evidence.checks[0]) is not str
+        ):
+            raise TypeError("evidence checks must be one exact string in a tuple")
+        if self.failed_cell is not None:
+            if type(self.failed_cell) is not Cell:
+                raise TypeError("failed_cell must be exact Cell or None")
+            try:
+                exact_coordinates = (
+                    type(self.failed_cell.x) is int
+                    and type(self.failed_cell.y) is int
+                )
+            except AttributeError:
+                exact_coordinates = False
+            if not exact_coordinates:
+                raise ValueError("failed_cell coordinates must be exact integers")
         if self.failed_primitive_index is not None:
-            if (
-                isinstance(self.failed_primitive_index, bool)
-                or not isinstance(self.failed_primitive_index, int)
-            ):
+            if type(self.failed_primitive_index) is not int:
                 raise TypeError("failed_primitive_index must be an integer or None")
             if self.failed_primitive_index < 0:
                 raise ValueError("failed_primitive_index must be nonnegative")
-        if isinstance(self.checked_cell_count, bool) or not isinstance(
-            self.checked_cell_count,
-            int,
-        ):
+        if type(self.checked_cell_count) is not int:
             raise TypeError("checked_cell_count must be an integer")
         if self.checked_cell_count < 0:
             raise ValueError("checked_cell_count must be nonnegative")
@@ -147,14 +177,23 @@ class WheelValidationResultV2:
             self.failed_cell is not None or self.failed_primitive_index is not None
         ):
             raise ValueError("timeout result must not carry failure metadata")
-        if self.failed_cell is not None and self.failed_primitive_index is None:
-            raise ValueError("failed_cell requires failed_primitive_index")
         if self.evidence.checks != (self.reason_code,):
             raise ValueError("evidence checks must contain the exact reason_code")
         if self.evidence.passed is not (
             self.reason_code == _PASS_REASON_BY_VALIDATOR[validator_id]
         ):
             raise ValueError("evidence passed must agree with the reason_code")
+        if self.failed_cell is not None and self.failed_primitive_index is None:
+            raise ValueError("failed_cell requires failed_primitive_index")
+        if self.reason_code in _TERRAIN_FAILURE_PRIORITY:
+            if self.failed_cell is None or self.failed_primitive_index is None:
+                raise ValueError(
+                    "terrain failure requires failed_cell and failed_primitive_index"
+                )
+            if self.checked_cell_count < 1:
+                raise ValueError("terrain failure requires at least one checked cell")
+        elif self.failed_cell is not None:
+            raise ValueError("non-terrain failure must not carry failed_cell")
         if self.evidence.passed:
             if self.timed_out:
                 raise ValueError("passing evidence cannot be timed out")
@@ -192,6 +231,10 @@ class _TerrainFailure:
         )
 
 
+class _DeadlineContractError(RuntimeError):
+    pass
+
+
 def _finite_real(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
         raise TypeError(f"{name} must be a finite real number")
@@ -202,6 +245,207 @@ def _finite_real(value: object, name: str) -> float:
     if not isfinite(normalized):
         raise ValueError(f"{name} must be finite")
     return normalized
+
+
+def _deadline_expired(deadline: PlanningDeadlineV2) -> bool:
+    try:
+        if (
+            type(deadline.started_monotonic_s) is not float
+            or type(deadline.deadline_monotonic_s) is not float
+        ):
+            raise TypeError("planning deadline timestamps must be exact floats")
+        started = _finite_real(
+            deadline.started_monotonic_s,
+            "deadline started_monotonic_s",
+        )
+        cutoff = _finite_real(
+            deadline.deadline_monotonic_s,
+            "deadline deadline_monotonic_s",
+        )
+        if cutoff < started or not callable(deadline._monotonic_clock):
+            raise ValueError("planning deadline fields are inconsistent")
+        expired = deadline.expired
+    except _EXPECTED_CONTRACT_EXCEPTIONS as exc:
+        raise _DeadlineContractError("planning deadline contract mismatch") from exc
+    if type(expired) is not bool:
+        raise _DeadlineContractError("planning deadline must return exact bool")
+    return expired
+
+
+def _raise_if_deadline_expired(deadline: PlanningDeadlineV2) -> None:
+    if _deadline_expired(deadline):
+        raise TimeoutError("wheel validation deadline expired")
+
+
+def _deadline_contract(
+    validator_id: str,
+    checked_cell_count: int,
+    *,
+    failed_primitive_index: int | None = None,
+) -> WheelValidationResultV2:
+    return _result(
+        validator_id,
+        "planning_deadline_contract_mismatch",
+        failed_primitive_index=failed_primitive_index,
+        checked_cell_count=checked_cell_count,
+    )
+
+
+def _pose_from_public_pose(pose: object) -> Pose2D:
+    if type(pose) is not Pose2D:
+        raise TypeError("pose must be exact Pose2D")
+    return Pose2D(
+        _finite_real(pose.x_m, "pose x_m"),
+        _finite_real(pose.y_m, "pose y_m"),
+        _finite_real(pose.theta_rad, "pose theta_rad"),
+    )
+
+
+def _poses_equal(left: Pose2D, right: Pose2D) -> bool:
+    return (
+        left.x_m == right.x_m
+        and left.y_m == right.y_m
+        and left.theta_rad == right.theta_rad
+    )
+
+
+_SNAPSHOT_LAYER_DTYPES = (
+    ("elevation_m", np.dtype("<f8")),
+    ("slope_deg", np.dtype("<f8")),
+    ("traversable_mask", np.dtype(np.bool_)),
+    ("hard_obstacle_mask", np.dtype(np.bool_)),
+    ("observed_mask", np.dtype(np.bool_)),
+    ("confidence", np.dtype("<f8")),
+)
+
+
+def _has_immutable_bytes_storage(layer: np.ndarray) -> bool:
+    current: object = layer
+    while type(current) is np.ndarray:
+        if current.flags.writeable:
+            return False
+        current = current.base
+    return type(current) is bytes
+
+
+def _reaudit_terrain_snapshot(
+    snapshot: object,
+    deadline: PlanningDeadlineV2,
+) -> bool:
+    if type(snapshot) is not TerrainSnapshotV2:
+        return False
+    try:
+        _raise_if_deadline_expired(deadline)
+        geometry = snapshot.geometry
+        provenance = snapshot.provenance
+        if type(geometry) is not FineGridGeometryV2:
+            return False
+        if type(provenance) is not TerrainProvenanceV2:
+            return False
+        if (
+            type(geometry.width) is not int
+            or type(geometry.height) is not int
+            or type(geometry.origin) is not tuple
+            or len(geometry.origin) != 2
+            or any(type(value) is not float for value in geometry.origin)
+            or type(geometry.frame_id) is not str
+            or type(geometry.resolution_m) is not float
+        ):
+            return False
+        replace(geometry)
+        if (
+            type(provenance.source_kind) is not str
+            or type(provenance.source_id) is not str
+            or type(provenance.source_hash) is not str
+            or type(provenance.physical_obstacle_cells_written) is not bool
+            or type(provenance.details) is not tuple
+            or not provenance.source_kind.strip()
+            or not provenance.source_id.strip()
+            or not provenance.source_hash.strip()
+            or (
+                provenance.source_kind == SYNTHETIC_TERRAIN_SOURCE_KIND_V2
+                and provenance.physical_obstacle_cells_written is not False
+            )
+        ):
+            return False
+        previous_key: str | None = None
+        for detail in provenance.details:
+            _raise_if_deadline_expired(deadline)
+            if type(detail) is not tuple or len(detail) != 2:
+                return False
+            key, value = detail
+            if (
+                type(key) is not str
+                or not key.strip()
+                or (previous_key is not None and key <= previous_key)
+            ):
+                return False
+            if value is not None and type(value) not in (str, bool, int, float):
+                return False
+            if type(value) is float and not isfinite(value):
+                return False
+            previous_key = key
+        shape = geometry.shape
+        layers: dict[str, np.ndarray] = {}
+        for name, dtype in _SNAPSHOT_LAYER_DTYPES:
+            _raise_if_deadline_expired(deadline)
+            layer = getattr(snapshot, name)
+            if (
+                type(layer) is not np.ndarray
+                or layer.dtype != dtype
+                or layer.ndim != 2
+                or layer.shape != shape
+                or not layer.flags.c_contiguous
+                or not _has_immutable_bytes_storage(layer)
+            ):
+                return False
+            layers[name] = layer
+            if dtype == np.dtype("<f8") and not bool(np.all(np.isfinite(layer))):
+                return False
+        if bool(np.any(layers["slope_deg"] < 0.0)):
+            return False
+        _raise_if_deadline_expired(deadline)
+        confidence = layers["confidence"]
+        if bool(np.any((confidence < 0.0) | (confidence > 1.0))):
+            return False
+        _raise_if_deadline_expired(deadline)
+        if bool(
+            np.any(layers["traversable_mask"] & layers["hard_obstacle_mask"])
+        ):
+            return False
+        _raise_if_deadline_expired(deadline)
+    except _DeadlineContractError:
+        raise
+    except TimeoutError:
+        raise
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
+        return False
+    return True
+
+
+def _safe_snapshot_hash(
+    snapshot: object,
+    deadline: PlanningDeadlineV2,
+) -> str | None:
+    if not _reaudit_terrain_snapshot(snapshot, deadline):
+        return None
+    try:
+        _raise_if_deadline_expired(deadline)
+        digest = snapshot_hash(snapshot)
+        _raise_if_deadline_expired(deadline)
+    except _DeadlineContractError:
+        raise
+    except TimeoutError:
+        raise
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
+        return None
+    if (
+        type(digest) is not str
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        return None
+    return digest
 
 
 def _pose_from_state(state: object) -> Pose2D:
@@ -235,7 +479,7 @@ def _reaudit_wheel_profile(
             return None
         profile = replace(wheel_profile.profile)
         return replace(wheel_profile, profile=profile)
-    except (TypeError, ValueError, OverflowError, AttributeError):
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
         return None
 
 
@@ -247,11 +491,38 @@ def _route_state_budget(request: PlanningRequestV2) -> int | None:
         max_route_states = budget.max_route_states
     except AttributeError:
         return None
-    if isinstance(max_route_states, bool) or not isinstance(max_route_states, int):
+    if type(max_route_states) is not int:
         return None
     if max_route_states < 0:
         return None
     return max_route_states
+
+
+def _declared_route_state_overflow(
+    primitives: tuple[object, ...],
+    max_route_states: int,
+    deadline: PlanningDeadlineV2,
+) -> int | None:
+    _raise_if_deadline_expired(deadline)
+    if len(primitives) > MAX_REPLAY_STEPS:
+        return MAX_REPLAY_STEPS
+    hard_limit = min(max_route_states, _MAX_DECLARED_ROUTE_STATES)
+    declared_route_states = 0
+    for index, primitive in enumerate(primitives):
+        _raise_if_deadline_expired(deadline)
+        declared_count = 0
+        if type(primitive) is WheelMotionPrimitiveV2:
+            samples = primitive.samples
+            if type(samples) is tuple:
+                declared_count = len(samples)
+                if declared_count > _MAX_DECLARED_ROUTE_STATES:
+                    return index
+        declared_route_states += (
+            declared_count if index == 0 else max(0, declared_count - 1)
+        )
+        if declared_route_states > hard_limit:
+            return index
+    return None
 
 
 def _result(
@@ -308,7 +579,7 @@ def _new_control(
 
     expected_reverse = speed < 0.0
     expected_turn = speed == 0.0 and angular_speed != 0.0
-    name_valid = isinstance(name, str) and bool(name.strip())
+    name_valid = type(name) is str and bool(name.strip())
     flags_valid = type(reverse) is bool and type(turn_in_place) is bool
     normalized_name = name if name_valid else "invalid_wheel_control"
     normalized_reverse = reverse if type(reverse) is bool else expected_reverse
@@ -361,7 +632,7 @@ def _replay(
         start,
         control,
         wheel_profile.integration_dt_s,
-        deadline_checker=lambda: deadline.expired,
+        deadline_checker=lambda: _deadline_expired(deadline),
     )
 
 
@@ -371,11 +642,7 @@ def _audit_public_transition(
     deadline: PlanningDeadlineV2,
 ) -> _AuditedMotion:
     try:
-        start = Pose2D(
-            _finite_real(transition.start.x_m, "transition start x_m"),
-            _finite_real(transition.start.y_m, "transition start y_m"),
-            _finite_real(transition.start.theta_rad, "transition start theta_rad"),
-        )
+        start = _pose_from_public_pose(transition.start)
     except (AttributeError, TypeError, ValueError):
         return _AuditedMotion(
             0,
@@ -413,20 +680,38 @@ def _audit_public_transition(
         return _AuditedMotion(0, start, None, None, False, None, 0, reason)
     replay = _replay(start, control, wheel_profile, deadline)
     try:
+        declared_samples = transition.samples
         exact_samples = (
-            isinstance(transition.samples, tuple)
-            and all(type(sample) is Pose2D for sample in transition.samples)
-            and transition.samples == replay.samples
+            type(declared_samples) is tuple
+            and len(declared_samples) == len(replay.samples)
         )
-        exact_end = type(transition.end) is Pose2D and transition.end == replay.end
+        if exact_samples:
+            for declared, expected in zip(
+                declared_samples,
+                replay.samples,
+                strict=True,
+            ):
+                _raise_if_deadline_expired(deadline)
+                try:
+                    normalized = _pose_from_public_pose(declared)
+                except _EXPECTED_CONTRACT_EXCEPTIONS:
+                    exact_samples = False
+                    break
+                if not _poses_equal(normalized, expected):
+                    exact_samples = False
+                    break
+        try:
+            declared_end = _pose_from_public_pose(transition.end)
+            exact_end = _poses_equal(declared_end, replay.end)
+        except _EXPECTED_CONTRACT_EXCEPTIONS:
+            exact_end = False
         distance = _finite_real(transition.distance_m, "transition distance_m")
         heading_change = _finite_real(
             transition.absolute_heading_change_rad,
             "transition absolute_heading_change_rad",
         )
         replay_matches = (
-            transition.start == start
-            and exact_samples
+            exact_samples
             and exact_end
             and isclose(distance, replay.distance_m, rel_tol=1.0e-12, abs_tol=1.0e-12)
             and isclose(
@@ -436,7 +721,11 @@ def _audit_public_transition(
                 abs_tol=1.0e-12,
             )
         )
-    except (AttributeError, TypeError, ValueError):
+    except _DeadlineContractError:
+        raise
+    except TimeoutError:
+        raise
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
         replay_matches = False
     if not replay_matches:
         reason = reason or "primitive_replay_mismatch"
@@ -452,7 +741,11 @@ def _audit_public_transition(
     )
 
 
-def _audit_hold(primitive: WheelMotionPrimitiveV2, index: int) -> _AuditedMotion:
+def _audit_hold(
+    primitive: WheelMotionPrimitiveV2,
+    index: int,
+    deadline: PlanningDeadlineV2,
+) -> _AuditedMotion:
     try:
         start = _pose_from_state(primitive.start_state)
     except (TypeError, ValueError):
@@ -467,11 +760,21 @@ def _audit_hold(primitive: WheelMotionPrimitiveV2, index: int) -> _AuditedMotion
             "primitive_hold_contract_mismatch",
         )
     try:
+        _raise_if_deadline_expired(deadline)
+        samples = primitive.samples
+        sample = (
+            _pose_from_state(samples[0])
+            if type(samples) is tuple and len(samples) == 1
+            else None
+        )
+        end = _pose_from_state(primitive.end_state)
         valid = (
             primitive.kind is PrimitiveKindV2.WHEEL_MOTION
+            and type(primitive.control_name) is str
             and primitive.control_name == "hold"
-            and primitive.samples == (primitive.start_state,)
-            and primitive.end_state == primitive.start_state
+            and sample is not None
+            and _poses_equal(sample, start)
+            and _poses_equal(end, start)
             and _finite_real(primitive.duration_s, "hold duration_s") == 0.0
             and _finite_real(primitive.distance_m, "hold distance_m") == 0.0
             and _finite_real(primitive.energy_cost, "hold energy_cost") == 0.0
@@ -486,7 +789,11 @@ def _audit_hold(primitive: WheelMotionPrimitiveV2, index: int) -> _AuditedMotion
             and primitive.turn_in_place is False
             and primitive.validation_level is ValidationLevelV2.L2
         )
-    except (TypeError, ValueError):
+    except _DeadlineContractError:
+        raise
+    except TimeoutError:
+        raise
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
         valid = False
     return _AuditedMotion(
         index,
@@ -517,8 +824,8 @@ def _audit_typed_primitive(
             0,
             "wheel_primitive_type_mismatch",
         )
-    if isinstance(primitive.samples, tuple) and len(primitive.samples) == 1:
-        return _audit_hold(primitive, index)
+    if type(primitive.samples) is tuple and len(primitive.samples) == 1:
+        return _audit_hold(primitive, index, deadline)
 
     try:
         start = _pose_from_state(primitive.start_state)
@@ -586,17 +893,35 @@ def _audit_typed_primitive(
             declared_count,
             reason or "primitive_replay_mismatch",
         )
-    expected_samples = tuple(
-        PoseStateV2(sample.x_m, sample.y_m, sample.theta_rad)
-        for sample in replay.samples
-    )
     try:
+        declared_samples = primitive.samples
         replay_matches = (
-            isinstance(primitive.samples, tuple)
-            and all(type(sample) is PoseStateV2 for sample in primitive.samples)
-            and primitive.samples == expected_samples
-            and type(primitive.end_state) is PoseStateV2
-            and primitive.end_state == expected_samples[-1]
+            type(declared_samples) is tuple
+            and len(declared_samples) == len(replay.samples)
+        )
+        if replay_matches:
+            for declared, expected in zip(
+                declared_samples,
+                replay.samples,
+                strict=True,
+            ):
+                _raise_if_deadline_expired(deadline)
+                try:
+                    normalized = _pose_from_state(declared)
+                except _EXPECTED_CONTRACT_EXCEPTIONS:
+                    replay_matches = False
+                    break
+                if not _poses_equal(normalized, expected):
+                    replay_matches = False
+                    break
+        try:
+            declared_end = _pose_from_state(primitive.end_state)
+            end_matches = _poses_equal(declared_end, replay.end)
+        except _EXPECTED_CONTRACT_EXCEPTIONS:
+            end_matches = False
+        replay_matches = (
+            replay_matches
+            and end_matches
             and isclose(
                 _finite_real(primitive.distance_m, "distance_m"),
                 replay.distance_m,
@@ -604,9 +929,16 @@ def _audit_typed_primitive(
                 abs_tol=1.0e-12,
             )
         )
-    except (TypeError, ValueError):
+    except _DeadlineContractError:
+        raise
+    except TimeoutError:
+        raise
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
         replay_matches = False
-    if primitive.control_name == "hold" or not replay_matches:
+    if (
+        type(primitive.control_name) is str
+        and primitive.control_name == "hold"
+    ) or not replay_matches:
         reason = reason or "primitive_replay_mismatch"
     return _AuditedMotion(
         index,
@@ -632,8 +964,7 @@ def _motion_cells(
     if audited.start is None:
         return ()
     if audited.hold:
-        if deadline.expired:
-            raise TimeoutError("wheel validation deadline expired")
+        _raise_if_deadline_expired(deadline)
         cells = conservative_wheel_pose_cells(
             audited.start,
             anchor.snapshot.geometry,
@@ -641,8 +972,7 @@ def _motion_cells(
             body_width_m=wheel_profile.body_width_m,
             safety_margin_m=wheel_profile.footprint_safety_margin_m,
         )
-        if deadline.expired:
-            raise TimeoutError("wheel validation deadline expired")
+        _raise_if_deadline_expired(deadline)
         return cells
     if audited.control is None:
         return ()
@@ -653,7 +983,7 @@ def _motion_cells(
         body_length_m=wheel_profile.body_length_m,
         body_width_m=wheel_profile.body_width_m,
         safety_margin_m=wheel_profile.footprint_safety_margin_m,
-        deadline_checker=lambda: deadline.expired,
+        deadline_checker=lambda: _deadline_expired(deadline),
     )
 
 
@@ -668,12 +998,30 @@ def _query_cells(
     checked = 0
     for audited, cells in motions_and_cells:
         for cell in cells:
-            if deadline.expired:
-                return best, checked, _timeout(validator_id, checked)
-            query = anchor.query(cell, 30.0)
+            try:
+                if _deadline_expired(deadline):
+                    return best, checked, _timeout(validator_id, checked)
+            except _DeadlineContractError:
+                return best, checked, _deadline_contract(validator_id, checked)
             checked += 1
-            if deadline.expired:
-                return best, checked, _timeout(validator_id, checked)
+            try:
+                query = anchor.query(cell, 30.0)
+            except _EXPECTED_CONTRACT_EXCEPTIONS:
+                return (
+                    best,
+                    checked,
+                    _result(
+                        validator_id,
+                        "terrain_query_contract_mismatch",
+                        failed_primitive_index=audited.index,
+                        checked_cell_count=checked,
+                    ),
+                )
+            try:
+                if _deadline_expired(deadline):
+                    return best, checked, _timeout(validator_id, checked)
+            except _DeadlineContractError:
+                return best, checked, _deadline_contract(validator_id, checked)
             if type(query) is not SafetyQueryV2:
                 return (
                     best,
@@ -681,29 +1029,50 @@ def _query_cells(
                     _result(
                         validator_id,
                         "terrain_query_contract_mismatch",
-                        failed_cell=cell,
                         failed_primitive_index=audited.index,
                         checked_cell_count=checked,
                     ),
                 )
-            if query.snapshot_hash != expected_snapshot_hash:
-                return (
-                    best,
-                    checked,
-                    _result(
-                        validator_id,
-                        "terrain_snapshot_hash_mismatch",
-                        failed_cell=cell,
-                        failed_primitive_index=audited.index,
-                        checked_cell_count=checked,
-                    ),
+            try:
+                query_cell = query.cell
+                query_cell_matches = (
+                    type(query_cell) is Cell
+                    and type(query_cell.x) is int
+                    and type(query_cell.y) is int
+                    and query_cell.x == cell.x
+                    and query_cell.y == cell.y
                 )
-            query_contract_matches = (
-                query.cell == cell
-                and query.validation_level is ValidationLevelV2.L2
-                and query.reason_code in _TERRAIN_QUERY_REASON_CODES
-                and query.passed is (query.reason_code == "terrain_safe")
-            )
+                reason_code = query.reason_code
+                returned_hash = query.snapshot_hash
+                query_contract_matches = (
+                    query_cell_matches
+                    and type(query.passed) is bool
+                    and type(reason_code) is str
+                    and reason_code in _TERRAIN_QUERY_REASON_CODES
+                    and query.passed is (reason_code == "terrain_safe")
+                    and query.validation_level is ValidationLevelV2.L2
+                    and type(returned_hash) is str
+                    and len(returned_hash) == 64
+                    and not any(
+                        character not in "0123456789abcdef"
+                        for character in returned_hash
+                    )
+                )
+                if query.slope_deg is not None:
+                    slope = _finite_real(query.slope_deg, "query slope_deg")
+                    query_contract_matches = query_contract_matches and slope >= 0.0
+                if query.confidence is not None:
+                    confidence = _finite_real(
+                        query.confidence,
+                        "query confidence",
+                    )
+                    query_contract_matches = (
+                        query_contract_matches and 0.0 <= confidence <= 1.0
+                    )
+            except _EXPECTED_CONTRACT_EXCEPTIONS:
+                query_contract_matches = False
+                returned_hash = None
+                reason_code = None
             if not query_contract_matches:
                 return (
                     best,
@@ -711,17 +1080,51 @@ def _query_cells(
                     _result(
                         validator_id,
                         "terrain_query_contract_mismatch",
-                        failed_cell=cell,
                         failed_primitive_index=audited.index,
                         checked_cell_count=checked,
                     ),
                 )
-            if query.reason_code in _TERRAIN_FAILURE_PRIORITY:
-                candidate = _TerrainFailure(query.reason_code, cell, audited.index)
+            if returned_hash != expected_snapshot_hash:
+                return (
+                    best,
+                    checked,
+                    _result(
+                        validator_id,
+                        "terrain_snapshot_hash_mismatch",
+                        failed_primitive_index=audited.index,
+                        checked_cell_count=checked,
+                    ),
+                )
+            if reason_code in _TERRAIN_FAILURE_PRIORITY:
+                candidate = _TerrainFailure(reason_code, cell, audited.index)
                 if best is None or candidate.key < best.key:
                     best = candidate
-    if deadline.expired:
+    try:
+        if _deadline_expired(deadline):
+            return best, checked, _timeout(validator_id, checked)
+        current_snapshot_hash = _safe_snapshot_hash(anchor.snapshot, deadline)
+    except TimeoutError:
         return best, checked, _timeout(validator_id, checked)
+    except _DeadlineContractError:
+        return best, checked, _deadline_contract(validator_id, checked)
+    try:
+        cached_snapshot_hash = anchor._snapshot_hash
+    except AttributeError:
+        cached_snapshot_hash = None
+    if (
+        current_snapshot_hash != expected_snapshot_hash
+        or type(cached_snapshot_hash) is not str
+        or cached_snapshot_hash != expected_snapshot_hash
+    ):
+        return (
+            best,
+            checked,
+            _result(
+                validator_id,
+                "terrain_snapshot_hash_mismatch",
+                checked_cell_count=checked,
+            ),
+        )
     return best, checked, None
 
 
@@ -734,8 +1137,11 @@ def validate_wheel_transition_l2(
     if type(transition) is not PoseTransition:
         raise TypeError("transition must be exact PoseTransition")
     _validate_entry_types(anchor, wheel_profile, deadline)
-    if deadline.expired:
-        return _timeout(WHEEL_TRANSITION_VALIDATOR_ID_V2, 0)
+    try:
+        if _deadline_expired(deadline):
+            return _timeout(WHEEL_TRANSITION_VALIDATOR_ID_V2, 0)
+    except _DeadlineContractError:
+        return _deadline_contract(WHEEL_TRANSITION_VALIDATOR_ID_V2, 0)
     audited_profile = _reaudit_wheel_profile(wheel_profile)
     if audited_profile is None:
         return _result(
@@ -743,15 +1149,25 @@ def validate_wheel_transition_l2(
             "wheel_profile_contract_mismatch",
         )
     wheel_profile = audited_profile
-    expected_hash = snapshot_hash(anchor.snapshot)
-    if deadline.expired:
+    try:
+        expected_hash = _safe_snapshot_hash(anchor.snapshot, deadline)
+    except TimeoutError:
         return _timeout(WHEEL_TRANSITION_VALIDATOR_ID_V2, 0)
+    except _DeadlineContractError:
+        return _deadline_contract(WHEEL_TRANSITION_VALIDATOR_ID_V2, 0)
+    if expected_hash is None:
+        return _result(
+            WHEEL_TRANSITION_VALIDATOR_ID_V2,
+            "terrain_snapshot_hash_mismatch",
+        )
     try:
         audited = _audit_public_transition(transition, wheel_profile, deadline)
         cells = _motion_cells(audited, anchor, wheel_profile, deadline)
     except TimeoutError:
         return _timeout(WHEEL_TRANSITION_VALIDATOR_ID_V2, 0)
-    except (TypeError, ValueError):
+    except _DeadlineContractError:
+        return _deadline_contract(WHEEL_TRANSITION_VALIDATOR_ID_V2, 0)
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
         audited = _AuditedMotion(
             0,
             None,
@@ -808,8 +1224,11 @@ def validate_route_l2(
     if type(request) is not PlanningRequestV2:
         raise TypeError("request must be exact PlanningRequestV2")
     _validate_entry_types(anchor, wheel_profile, deadline)
-    if deadline.expired:
-        return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+    try:
+        if _deadline_expired(deadline):
+            return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+    except _DeadlineContractError:
+        return _deadline_contract(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
     audited_profile = _reaudit_wheel_profile(wheel_profile)
     if audited_profile is None:
         return _result(
@@ -830,14 +1249,21 @@ def validate_route_l2(
             "terrain_snapshot_identity_mismatch",
         )
     try:
-        request_hash = snapshot_hash(request.terrain_snapshot)
-        anchor_hash = snapshot_hash(anchor.snapshot)
-    except (TypeError, ValueError):
+        request_hash = _safe_snapshot_hash(request.terrain_snapshot, deadline)
+        anchor_hash = _safe_snapshot_hash(anchor.snapshot, deadline)
+    except TimeoutError:
+        return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+    except _DeadlineContractError:
+        return _deadline_contract(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+    if request_hash is None or anchor_hash is None:
         return _result(WHEEL_ROUTE_VALIDATOR_ID_V2, "terrain_snapshot_hash_mismatch")
     if request_hash != anchor_hash:
         return _result(WHEEL_ROUTE_VALIDATOR_ID_V2, "terrain_snapshot_hash_mismatch")
-    if deadline.expired:
-        return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+    try:
+        if _deadline_expired(deadline):
+            return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+    except _DeadlineContractError:
+        return _deadline_contract(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
 
     structural: tuple[str, int | None] | None = None
 
@@ -848,7 +1274,13 @@ def validate_route_l2(
 
     if route.platform_kind is not PlatformKindV2.WHEEL:
         record("wheel_platform_identity_mismatch")
-    if request.platform_profile_id != wheel_profile.profile.profile_id:
+    request_profile_id = request.platform_profile_id
+    audited_profile_id = wheel_profile.profile.profile_id
+    if (
+        type(request_profile_id) is not str
+        or type(audited_profile_id) is not str
+        or request_profile_id != audited_profile_id
+    ):
         record("wheel_profile_identity_mismatch")
     if route.is_complete is not True:
         record("route_incomplete")
@@ -863,28 +1295,31 @@ def validate_route_l2(
         request_goal = None
         record("route_goal_contract_mismatch")
     primitives = route.primitives
-    if not isinstance(primitives, tuple) or not primitives:
+    if type(primitives) is not tuple or not primitives:
         record("route_structure_mismatch")
         primitives = ()
-    if primitives and request_start is not None:
-        try:
-            if primitives[0].start_state != request.start_state:
-                record("route_start_mismatch", 0)
-        except AttributeError:
-            record("route_start_mismatch", 0)
-    for index in range(1, len(primitives)):
-        try:
-            if primitives[index - 1].end_state != primitives[index].start_state:
-                record("route_connectivity_mismatch", index)
-        except AttributeError:
-            record("route_connectivity_mismatch", index)
+    try:
+        overflow_index = _declared_route_state_overflow(
+            primitives,
+            max_route_states,
+            deadline,
+        )
+    except TimeoutError:
+        return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+    except _DeadlineContractError:
+        return _deadline_contract(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+    if overflow_index is not None:
+        return _result(
+            WHEEL_ROUTE_VALIDATOR_ID_V2,
+            "route_state_budget_exceeded",
+            failed_primitive_index=overflow_index,
+        )
 
     audited_motions: list[_AuditedMotion] = []
     route_state_count = 0
     for index, primitive in enumerate(primitives):
-        if deadline.expired:
-            return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
         try:
+            _raise_if_deadline_expired(deadline)
             audited = _audit_typed_primitive(
                 primitive,
                 index,
@@ -893,36 +1328,50 @@ def validate_route_l2(
             )
         except TimeoutError:
             return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+        except _DeadlineContractError:
+            return _deadline_contract(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
         audited_motions.append(audited)
-        if audited.reason_code is not None:
-            record(audited.reason_code, index)
         route_state_count += audited.route_state_count if index == 0 else max(
             0,
             audited.route_state_count - 1,
         )
-        if route_state_count > max_route_states:
+        if route_state_count > min(max_route_states, _MAX_DECLARED_ROUTE_STATES):
             return _result(
                 WHEEL_ROUTE_VALIDATOR_ID_V2,
                 "route_state_budget_exceeded",
                 failed_primitive_index=index,
             )
 
-    for index in range(1, len(primitives)):
+    if primitives and request_start is not None:
+        first_start = audited_motions[0].start
+        if first_start is not None and not _poses_equal(first_start, request_start):
+            record("route_start_mismatch", 0)
+
+    for index in range(1, len(audited_motions)):
         try:
-            declared_connected = (
-                primitives[index - 1].end_state == primitives[index].start_state
-            )
-        except AttributeError:
-            declared_connected = False
+            _raise_if_deadline_expired(deadline)
+        except TimeoutError:
+            return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+        except _DeadlineContractError:
+            return _deadline_contract(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
         previous_actual = audited_motions[index - 1].actual_end
         current_start = audited_motions[index].start
-        actual_connected = (
+        if (
             previous_actual is not None
             and current_start is not None
-            and previous_actual == current_start
-        )
-        if not declared_connected or not actual_connected:
+            and not _poses_equal(previous_actual, current_start)
+        ):
             record("route_connectivity_mismatch", index)
+
+    for audited in audited_motions:
+        try:
+            _raise_if_deadline_expired(deadline)
+        except TimeoutError:
+            return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+        except _DeadlineContractError:
+            return _deadline_contract(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+        if audited.reason_code is not None:
+            record(audited.reason_code, audited.index)
 
     if (
         primitives
@@ -934,9 +1383,9 @@ def validate_route_l2(
             final.x_m - request_goal.x_m,
             final.y_m - request_goal.y_m,
         )
-        heading_error = abs(
-            remainder(final.theta_rad - request_goal.theta_rad, 2.0 * pi)
-        )
+        final_heading = remainder(final.theta_rad, 2.0 * pi)
+        goal_heading = remainder(request_goal.theta_rad, 2.0 * pi)
+        heading_error = abs(remainder(final_heading - goal_heading, 2.0 * pi))
         if (
             position_error > wheel_profile.profile.goal_position_tolerance_m
             or heading_error > wheel_profile.profile.goal_heading_tolerance_rad
@@ -946,10 +1395,13 @@ def validate_route_l2(
     motions_and_cells: list[tuple[_AuditedMotion, tuple[Cell, ...]]] = []
     for audited in audited_motions:
         try:
+            _raise_if_deadline_expired(deadline)
             cells = _motion_cells(audited, anchor, wheel_profile, deadline)
         except TimeoutError:
             return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
-        except (TypeError, ValueError):
+        except _DeadlineContractError:
+            return _deadline_contract(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+        except _EXPECTED_CONTRACT_EXCEPTIONS:
             record("primitive_sweep_unavailable", audited.index)
             cells = ()
         motions_and_cells.append((audited, cells))
