@@ -651,3 +651,19 @@ def test_plan_v2_remains_opt_in_and_v1_route_schema_is_unchanged() -> None:
 
     assert "plan_v2" not in path_planner.__dict__
     assert route["schema_version"] == "path-planner-route/v1"
+
+
+def test_gate3_accelerator_contracts_are_public_only_under_v2_namespace() -> None:
+    expected = {
+        "HIERARCHY_SCALES_V2",
+        "ConservativeHierarchyV2",
+        "HierarchyCellHintV2",
+        "HierarchyContractErrorV2",
+        "HierarchyHintStatusV2",
+        "SearchQueueEntryV2",
+        "StableSearchQueueV2",
+    }
+
+    assert expected <= set(v2.__all__)
+    assert all(name in v2.__dict__ for name in expected)
+    assert all(name not in path_planner.__dict__ for name in expected)
