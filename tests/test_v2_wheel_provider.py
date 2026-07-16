@@ -1179,3 +1179,56 @@ def test_deadline_expiring_after_final_l2_pass_replaces_success_with_timeout(
         "route_validation",
     )
     assert failure.search_telemetry.timed_out is True
+
+
+def test_deadline_expiring_during_route_construction_replaces_success_with_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _wheel_profile(
+        reverse_enabled=False,
+        turn_in_place_enabled=False,
+        min_turning_radius_m=2.0,
+        max_angular_speed_radps=1.0,
+    )
+    snapshot = _snapshot()
+    start = PoseStateV2(3.25, 3.25, 0.0)
+    goal = PoseStateV2(4.25, 3.25, 0.0)
+    captured: dict[str, object]
+
+    class SwitchClock:
+        expired = False
+
+        def __call__(self) -> float:
+            return 2.0 if self.expired else 0.0
+
+    clock = SwitchClock()
+    deadline = PlanningDeadlineV2(0.0, 1.0, clock)
+
+    def search(*_args, **_kwargs):
+        forward = next(
+            item for item in captured["primitives"] if item.name == "forward"
+        )
+        return _hybrid_success((forward,))
+
+    captured = _install_hybrid(monkeypatch, search)
+    real_replace = wheel_module.replace
+
+    def replace_then_expire(*args, **kwargs):
+        result = real_replace(*args, **kwargs)
+        clock.expired = True
+        return result
+
+    monkeypatch.setattr(wheel_module, "replace", replace_then_expire)
+    outcome = _provider(profile).plan(
+        _request(profile, snapshot, start, goal),
+        FineSafetyAnchorV2(snapshot),
+        deadline,
+    )
+
+    failure = _assert_failure(
+        outcome,
+        FailureCategoryV2.TIMEOUT,
+        "planning_deadline_expired",
+        "route_construction",
+    )
+    assert failure.search_telemetry.timed_out is True

@@ -778,7 +778,7 @@ class WheelPrimitiveProviderV2:
                     "start_equals_goal" if hybrid_result is None else "success"
                 ),
             )
-            return PlanningSuccessV2(
+            success = PlanningSuccessV2(
                 request_id=request.request_id,
                 platform_kind=PlatformKindV2.WHEEL,
                 route=route,
@@ -792,6 +792,14 @@ class WheelPrimitiveProviderV2:
                     hit=False,
                 ),
             )
+            if deadline.expired:
+                return _timeout_failure(
+                    request,
+                    deadline,
+                    stage,
+                    result=hybrid_result,
+                )
+            return success
         except Exception as exc:
             return _failure(
                 request,
