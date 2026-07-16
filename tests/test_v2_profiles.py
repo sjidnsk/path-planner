@@ -6,8 +6,10 @@ import pytest
 from path_planner.v2.contracts import PlatformKindV2
 from path_planner.v2.profiles import (
     PLATFORM_PROFILE_SCHEMA_VERSION_V2,
+    WHEEL_RELATIVE_ENERGY_PROXY_ID_V2,
     PlatformProfileRegistryV2,
     PlatformProfileV2,
+    WheelProfileV2,
 )
 from path_planner.v2.providers import PrimitiveProviderV2
 
@@ -118,3 +120,66 @@ def test_provider_protocol_is_runtime_checkable_and_exposes_profile_and_plan() -
     assert isinstance(provider, PrimitiveProviderV2)
     assert provider.profile is profile
     assert callable(provider.plan)
+
+
+def test_wheel_profile_freezes_platform_geometry_and_relative_energy_contract() -> None:
+    profile = _profile()
+    wheel = WheelProfileV2(profile=profile)
+
+    assert wheel.profile is profile
+    assert wheel.steering_model == "differential_skid_steer"
+    assert (wheel.body_length_m, wheel.body_width_m) == (0.612, 0.580)
+    assert wheel.profile.max_traversable_slope_deg == 30.0
+    assert wheel.reverse_enabled is True
+    assert wheel.turn_in_place_enabled is True
+    assert wheel.relative_energy_proxy_id == WHEEL_RELATIVE_ENERGY_PROXY_ID_V2
+    assert wheel.energy_normalization > 0.0
+    assert wheel.time_normalization_s > 0.0
+    assert not hasattr(wheel, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        wheel.body_length_m = 1.0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error", "message"),
+    [
+        ({"profile": _profile(platform_kind=PlatformKindV2.LEGGED)}, ValueError, "wheel"),
+        (
+            {"profile": _profile(max_traversable_slope_deg=nextafter(30.0, float("inf")))},
+            ValueError,
+            "30.0",
+        ),
+        ({"steering_model": "ackermann"}, ValueError, "steering_model"),
+        ({"body_length_m": 0.611}, ValueError, "0.612"),
+        ({"body_width_m": 0.581}, ValueError, "0.580"),
+        ({"footprint_safety_margin_m": True}, TypeError, "finite"),
+        ({"footprint_safety_margin_m": -0.1}, ValueError, "nonnegative"),
+        ({"reverse_enabled": 1}, TypeError, "bool"),
+        ({"turn_in_place_enabled": 0}, TypeError, "bool"),
+        ({"min_turning_radius_m": float("nan")}, ValueError, "finite"),
+        ({"theta_bin_count": True}, TypeError, "integer"),
+        ({"theta_bin_count": 0}, ValueError, "positive"),
+        ({"primitive_duration_s": 0.0}, ValueError, "positive"),
+        ({"integration_dt_s": float("inf")}, ValueError, "finite"),
+        ({"max_speed_mps": -1.0}, ValueError, "positive"),
+        ({"max_angular_speed_radps": 0.0}, ValueError, "positive"),
+        ({"relative_energy_proxy_id": "unversioned"}, ValueError, "versioned"),
+        ({"relative_energy_proxy_id": "physical_energy/v1"}, ValueError, "relative-energy"),
+        ({"translation_energy_per_m": -0.1}, ValueError, "nonnegative"),
+        ({"rotation_energy_per_rad": True}, TypeError, "finite"),
+        ({"idle_energy_per_s": float("nan")}, ValueError, "finite"),
+        ({"reverse_energy_multiplier": -0.1}, ValueError, "nonnegative"),
+        ({"energy_normalization": 0.0}, ValueError, "positive"),
+        ({"time_normalization_s": 0.0}, ValueError, "positive"),
+    ],
+)
+def test_wheel_profile_rejects_inexact_or_nonfinite_contracts(
+    overrides,
+    error,
+    message,
+) -> None:
+    values = {"profile": _profile()}
+    values.update(overrides)
+
+    with pytest.raises(error, match=message):
+        WheelProfileV2(**values)

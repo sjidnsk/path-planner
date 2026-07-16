@@ -23,6 +23,16 @@ from path_planner.v2.contracts import (
 )
 from path_planner.v2.serialization import canonical_json_bytes
 from path_planner.v2.runtime import PlanningDeadlineV2
+from path_planner.v2.geometry import (
+    conservative_wheel_pose_cells,
+    conservative_wheel_sweep_cells,
+    dense_wheel_replay_step_count,
+)
+from path_planner.v2.profiles import (
+    WHEEL_RELATIVE_ENERGY_PROXY_ID_V2,
+    WheelProfileV2,
+)
+from path_planner.v2.providers import WheelMotionPrimitiveV2
 
 __all__ = [
     "PLANNING_SCHEMA_VERSION_V2",
@@ -47,5 +57,11 @@ __all__ = [
     "TypedRouteV2",
     "ValidationEvidenceV2",
     "ValidationLevelV2",
+    "WHEEL_RELATIVE_ENERGY_PROXY_ID_V2",
+    "WheelMotionPrimitiveV2",
+    "WheelProfileV2",
     "canonical_json_bytes",
+    "conservative_wheel_pose_cells",
+    "conservative_wheel_sweep_cells",
+    "dense_wheel_replay_step_count",
 ]
