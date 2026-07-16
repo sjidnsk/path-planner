@@ -738,6 +738,66 @@ def test_public_geometry_view_cannot_pollute_internal_or_canonical_decisions() -
     assert built["geometry"] is not leaked
 
 
+def test_exact_hint_lookup_does_not_iterate_all_internal_hints() -> None:
+    hierarchy = import_module("path_planner.v2.hierarchy")
+    built = hierarchy.ConservativeHierarchyV2.build(
+        _anchor(width=50, height=50), max_slope_deg=30.0
+    )
+    expected = built.hint(4, Cell(12, 12))
+
+    class NonIterableTuple(tuple):
+        def __iter__(self):
+            raise AssertionError("exact lookup iterated the full hint tuple")
+
+    object.__setattr__(built, "_hints", NonIterableTuple(built._hints))
+
+    assert built.hint(4, Cell(12, 12)) == expected
+    assert built.fine_cells(4, Cell(12, 12)) == expected.fine_cells
+
+
+def test_private_hint_index_never_controls_order_or_leaks_to_canonical_output() -> None:
+    hierarchy = import_module("path_planner.v2.hierarchy")
+    built = hierarchy.ConservativeHierarchyV2.build(
+        _anchor(width=5, height=3), max_slope_deg=30.0
+    )
+    peer = hierarchy.ConservativeHierarchyV2.build(
+        _anchor(width=5, height=3), max_slope_deg=30.0
+    )
+    expected_hints = built.hints
+    expected_scale_two = built.iter_hints(2)
+    before = canonical_json_bytes(built)
+    expected_keys = tuple(
+        (hint.scale, hint.cell.y, hint.cell.x) for hint in built._hints
+    )
+
+    assert tuple(built._hint_index) == expected_keys
+    assert all(
+        built._hint_index[key] is hint
+        for key, hint in zip(expected_keys, built._hints, strict=True)
+    )
+    assert not hasattr(built, "hint_index")
+    with pytest.raises(KeyError):
+        _ = built["_hint_index"]
+    payload = json.loads(before)
+    assert set(payload) == {"geometry", "hints", "max_slope_deg", "snapshot_hash"}
+    assert "_hint_index" not in payload
+
+    reversed_index = dict(reversed(tuple(built._hint_index.items())))
+    object.__setattr__(built, "_hint_index", reversed_index)
+    assert built.hints == expected_hints
+    assert built.iter_hints(2) == expected_scale_two
+    assert canonical_json_bytes(built) == before
+    assert built == peer
+    assert hash(built) == hash(peer)
+
+    object.__setattr__(built, "_hint_index", {})
+    with pytest.raises(
+        hierarchy.HierarchyContractErrorV2,
+        match="hierarchy hint coverage contract mismatch",
+    ):
+        built.hint(2, Cell(0, 0))
+
+
 def test_hierarchy_implementation_uses_query_not_raw_truth_layers() -> None:
     hierarchy = import_module("path_planner.v2.hierarchy")
     source = inspect.getsource(hierarchy)

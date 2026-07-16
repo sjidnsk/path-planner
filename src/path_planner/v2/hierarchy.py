@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError, dataclass
 from enum import Enum
 from math import ceil, isfinite
 from numbers import Real
+from types import MappingProxyType
 
 from path_planner.core import Cell
 from path_planner.v2.contracts import ValidationLevelV2
@@ -317,7 +318,13 @@ def _defensive_geometry_copy(geometry: object) -> FineGridGeometryV2:
 
 
 class ConservativeHierarchyV2(Mapping[str, object]):
-    __slots__ = ("_geometry", "_snapshot_hash", "_max_slope_deg", "_hints")
+    __slots__ = (
+        "_geometry",
+        "_snapshot_hash",
+        "_max_slope_deg",
+        "_hints",
+        "_hint_index",
+    )
 
     _SERIALIZATION_KEYS = (
         "geometry",
@@ -451,6 +458,16 @@ class ConservativeHierarchyV2(Mapping[str, object]):
             expected_cells = _covered_cells(self._geometry, hint.scale, hint.cell)
             if hint.fine_cells != expected_cells:
                 raise ValueError("hint fine_cells must match geometry exactly")
+        object.__setattr__(
+            self,
+            "_hint_index",
+            MappingProxyType(
+                {
+                    (hint.scale, hint.cell.y, hint.cell.x): hint
+                    for hint in self._hints
+                }
+            ),
+        )
 
     @classmethod
     def build(
@@ -527,10 +544,19 @@ class ConservativeHierarchyV2(Mapping[str, object]):
         coarse_width, coarse_height = _coarse_shape(self._geometry, normalized_scale)
         if normalized_cell.x >= coarse_width or normalized_cell.y >= coarse_height:
             raise ValueError("cell is outside hierarchy scale bounds")
-        for hint in self._hints:
-            if hint.scale == normalized_scale and hint.cell == normalized_cell:
-                return hint
-        raise HierarchyContractErrorV2("hierarchy hint coverage contract mismatch")
+        key = (normalized_scale, normalized_cell.y, normalized_cell.x)
+        try:
+            hint = self._hint_index.get(key)
+            if type(hint) is not HierarchyCellHintV2:
+                raise TypeError("missing exact hierarchy hint")
+            actual_key = (hint.scale, hint.cell.y, hint.cell.x)
+            if actual_key != key:
+                raise ValueError("hierarchy hint index key mismatch")
+        except Exception as exc:
+            raise HierarchyContractErrorV2(
+                "hierarchy hint coverage contract mismatch"
+            ) from exc
+        return hint
 
     def hint(self, scale: int, cell: Cell) -> HierarchyCellHintV2:
         return _defensive_hint_copy(self._validated_lookup(scale, cell))
