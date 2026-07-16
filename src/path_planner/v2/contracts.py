@@ -312,6 +312,8 @@ class ValidationEvidenceV2:
         _strict_bool(self.passed, "passed")
         if not isinstance(self.checks, tuple):
             raise TypeError("checks must be a tuple")
+        if not self.checks:
+            raise ValueError("checks must be nonempty")
         for check in self.checks:
             _nonempty_string(check, "check")
 
@@ -371,6 +373,11 @@ class PlanningSuccessV2:
             raise ValueError("route platform must match result platform")
         if not self.route.is_complete:
             raise ValueError("successful route must be complete")
+        if any(
+            primitive.validation_level is not ValidationLevelV2.L2
+            for primitive in self.route.primitives
+        ):
+            raise ValueError("successful route primitives must all be L2")
         if not isinstance(self.observation_projection, ObservationProjectionV2):
             raise TypeError("observation_projection must be ObservationProjectionV2")
         if not isinstance(self.cost_breakdown, CostBreakdownV2):
@@ -412,6 +419,15 @@ class PlanningFailureV2:
             raise TypeError("evidence must be FailureEvidenceV2")
         if not isinstance(self.search_telemetry, SearchTelemetryV2):
             raise TypeError("search_telemetry must be SearchTelemetryV2")
+        if self.platform_kind is None and (
+            self.category is not FailureCategoryV2.UNSUPPORTED_CAPABILITY
+            or self.reason_code != "platform_profile_unresolved"
+            or self.evidence.stage != "profile_resolution"
+        ):
+            raise ValueError(
+                "unresolved platform failure must use unsupported_capability, "
+                "platform_profile_unresolved, and profile_resolution"
+            )
         if self.schema_version != PLANNING_SCHEMA_VERSION_V2:
             raise ValueError(f"schema_version must be {PLANNING_SCHEMA_VERSION_V2}")
 

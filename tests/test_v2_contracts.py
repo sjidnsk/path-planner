@@ -40,12 +40,12 @@ def _route(v2, *, platform_kind=None, primitives=None, is_complete: bool = True,
     )
 
 
-def _evidence(v2, *, level=None, passed: bool = True):
+def _evidence(v2, *, level=None, passed: bool = True, checks=("finite", "collision-free")):
     return v2.ValidationEvidenceV2(
         validator_id="route-safety/v1",
         level=level or v2.ValidationLevelV2.L2,
         passed=passed,
-        checks=("finite", "collision-free"),
+        checks=checks,
     )
 
 
@@ -109,19 +109,25 @@ def _success(v2, *, platform_kind=None, route=None, cost_breakdown=None, validat
     )
 
 
-def _failure(v2, *, platform_kind=None):
-    evidence = _failure_evidence(v2)
+def _failure(v2, *, platform_kind=None, category=None, reason_code=None, evidence=None):
     if platform_kind is None:
-        evidence = v2.FailureEvidenceV2(
-            stage="profile_resolution",
-            checks=("platform-kind-unresolved",),
-            details=(("profile_id", "unknown"),),
-        )
+        category = category or v2.FailureCategoryV2.UNSUPPORTED_CAPABILITY
+        reason_code = reason_code or "platform_profile_unresolved"
+        if evidence is None:
+            evidence = v2.FailureEvidenceV2(
+                stage="profile_resolution",
+                checks=("platform-kind-unresolved",),
+                details=(("profile_id", "unknown"),),
+            )
+    else:
+        category = category or v2.FailureCategoryV2.NO_COMPLETE_ROUTE
+        reason_code = reason_code or "search_exhausted"
+        evidence = evidence or _failure_evidence(v2)
     return v2.PlanningFailureV2(
         request_id="request-001",
         platform_kind=platform_kind,
-        category=v2.FailureCategoryV2.NO_COMPLETE_ROUTE,
-        reason_code="search_exhausted",
+        category=category,
+        reason_code=reason_code,
         evidence=evidence,
         search_telemetry=_telemetry(v2),
     )
@@ -396,6 +402,10 @@ def test_validation_evidence_requires_exact_level_and_immutable_checks():
         v2.ValidationEvidenceV2("validator", "L2", True, ())
     with pytest.raises(TypeError, match="tuple"):
         v2.ValidationEvidenceV2("validator", v2.ValidationLevelV2.L2, True, ["finite"])
+    with pytest.raises(ValueError, match="nonempty"):
+        v2.ValidationEvidenceV2("validator", v2.ValidationLevelV2.L2, True, ())
+    with pytest.raises(ValueError, match="check"):
+        v2.ValidationEvidenceV2("validator", v2.ValidationLevelV2.L2, True, (" ",))
 
 
 def test_success_requires_complete_matching_l2_route_and_cost():
@@ -407,6 +417,23 @@ def test_success_requires_complete_matching_l2_route_and_cost():
         _success(v2, validation=_evidence(v2, passed=False))
     with pytest.raises(ValueError, match="L2"):
         _success(v2, validation=_evidence(v2, level=v2.ValidationLevelV2.L1))
+    with pytest.raises(ValueError, match="nonempty"):
+        _success(v2, validation=_evidence(v2, checks=()))
+    middle = v2.PoseStateV2(1.0, 2.0, 0.5)
+    route_with_l1_primitive = _route(
+        v2,
+        primitives=(
+            _primitive(v2, end_state=middle),
+            _primitive(
+                v2,
+                start_state=middle,
+                end_state=v2.PoseStateV2(2.0, 3.0, 0.75),
+                validation_level=v2.ValidationLevelV2.L1,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="primitive.*L2"):
+        _success(v2, route=route_with_l1_primitive)
     with pytest.raises(ValueError, match="platform"):
         _success(v2, platform_kind=v2.PlatformKindV2.LEGGED, route=_route(v2))
     with pytest.raises(ValueError, match="total_cost"):
@@ -424,6 +451,8 @@ def test_full_success_and_failure_results_are_mutually_exclusive_and_frozen():
     assert success.platform_kind is v2.PlatformKindV2.WHEEL
     assert failure.evidence.stage == "search"
     assert unresolved_platform_failure.platform_kind is None
+    assert unresolved_platform_failure.category is v2.FailureCategoryV2.UNSUPPORTED_CAPABILITY
+    assert unresolved_platform_failure.reason_code == "platform_profile_unresolved"
     assert unresolved_platform_failure.evidence.stage == "profile_resolution"
     assert isinstance(success, v2.PlanningOutcomeV2)
     assert isinstance(failure, v2.PlanningOutcomeV2)
@@ -452,3 +481,60 @@ def test_full_success_and_failure_results_are_mutually_exclusive_and_frozen():
             evidence=_failure_evidence(v2),
             search_telemetry=_telemetry(v2),
         )
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        "NO_COMPLETE_ROUTE",
+        "TIMEOUT",
+        "VALIDATION_FAILED",
+    ],
+)
+def test_unresolved_platform_rejects_search_timeout_and_validation_failures(category):
+    v2 = _v2()
+    profile_evidence = v2.FailureEvidenceV2(
+        stage="profile_resolution",
+        checks=("platform-kind-unresolved",),
+        details=(("profile_id", "unknown"),),
+    )
+
+    with pytest.raises(ValueError, match="unresolved platform"):
+        _failure(
+            v2,
+            category=getattr(v2.FailureCategoryV2, category),
+            reason_code="platform_profile_unresolved",
+            evidence=profile_evidence,
+        )
+
+
+def test_unresolved_platform_requires_exact_reason_and_profile_resolution_stage():
+    v2 = _v2()
+    profile_evidence = v2.FailureEvidenceV2(
+        stage="profile_resolution",
+        checks=("platform-kind-unresolved",),
+        details=(("profile_id", "unknown"),),
+    )
+
+    with pytest.raises(ValueError, match="unresolved platform"):
+        _failure(v2, reason_code="profile_missing", evidence=profile_evidence)
+    with pytest.raises(ValueError, match="unresolved platform"):
+        _failure(v2, evidence=_failure_evidence(v2))
+
+
+def test_known_platform_can_report_another_unsupported_capability():
+    v2 = _v2()
+    failure = _failure(
+        v2,
+        platform_kind=v2.PlatformKindV2.WHEEL,
+        category=v2.FailureCategoryV2.UNSUPPORTED_CAPABILITY,
+        reason_code="accelerator_unavailable",
+        evidence=v2.FailureEvidenceV2(
+            stage="capability_resolution",
+            checks=("accelerator-required",),
+            details=(),
+        ),
+    )
+
+    assert failure.platform_kind is v2.PlatformKindV2.WHEEL
+    assert failure.category is v2.FailureCategoryV2.UNSUPPORTED_CAPABILITY

@@ -63,8 +63,8 @@ def _failure(v2):
     return v2.PlanningFailureV2(
         request_id="request-failed",
         platform_kind=None,
-        category=v2.FailureCategoryV2.NO_COMPLETE_ROUTE,
-        reason_code="search_exhausted",
+        category=v2.FailureCategoryV2.UNSUPPORTED_CAPABILITY,
+        reason_code="platform_profile_unresolved",
         evidence=v2.FailureEvidenceV2(
             stage="profile_resolution",
             checks=("platform-kind-unresolved",),
@@ -164,7 +164,8 @@ def test_canonical_json_serializes_every_failure_result_field():
         "search_telemetry",
     }
     assert payload["platform_kind"] is None
-    assert payload["category"] == "no_complete_route"
+    assert payload["category"] == "unsupported_capability"
+    assert payload["reason_code"] == "platform_profile_unresolved"
     assert payload["evidence"] == {
         "checks": ["platform-kind-unresolved"],
         "details": [["profile_id", "unknown"]],
