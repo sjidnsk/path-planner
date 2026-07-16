@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, replace
 from importlib import import_module
 import inspect
+import json
+from numbers import Real
 
 import numpy as np
 import pytest
@@ -93,6 +95,21 @@ def test_public_contracts_are_exact_frozen_and_slotted() -> None:
         hint.scale = 2
     with pytest.raises(FrozenInstanceError):
         built.max_slope_deg = 1.0
+
+
+def test_direct_hierarchy_construction_cannot_bypass_anchor_build() -> None:
+    hierarchy = import_module("path_planner.v2.hierarchy")
+    built = hierarchy.ConservativeHierarchyV2.build(
+        _anchor(), max_slope_deg=30.0
+    )
+
+    with pytest.raises(TypeError, match="build"):
+        hierarchy.ConservativeHierarchyV2(
+            geometry=built.geometry,
+            snapshot_hash=built.snapshot_hash,
+            max_slope_deg=built.max_slope_deg,
+            hints=built.hints,
+        )
 
 
 @pytest.mark.parametrize(
@@ -355,6 +372,60 @@ def test_malformed_anchor_queries_raise_stable_contract_error(
         )
 
 
+@pytest.mark.parametrize("field_name", ["slope_deg", "confidence"])
+def test_malformed_query_unrepresentable_numeric_is_contained(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+) -> None:
+    hierarchy = import_module("path_planner.v2.hierarchy")
+    original = FineSafetyAnchorV2.query
+
+    def malformed(self, cell, max_slope_deg=30.0):
+        query = original(self, cell, max_slope_deg)
+        object.__setattr__(query, field_name, 10**10000)
+        return query
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", malformed)
+    with pytest.raises(
+        hierarchy.HierarchyContractErrorV2,
+        match="fine safety anchor query contract mismatch",
+    ):
+        hierarchy.ConservativeHierarchyV2.build(
+            _anchor(width=1, height=1), max_slope_deg=30.0
+        )
+
+
+@pytest.mark.parametrize("field_name", ["slope_deg", "confidence"])
+@pytest.mark.parametrize("error_type", [TimeoutError, RuntimeError])
+def test_malformed_query_numeric_conversion_exception_is_contained(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    error_type: type[Exception],
+) -> None:
+    hierarchy = import_module("path_planner.v2.hierarchy")
+    original = FineSafetyAnchorV2.query
+
+    class ForgedReal:
+        def __float__(self):
+            raise error_type("forged numeric conversion")
+
+    Real.register(ForgedReal)
+
+    def malformed(self, cell, max_slope_deg=30.0):
+        query = original(self, cell, max_slope_deg)
+        object.__setattr__(query, field_name, ForgedReal())
+        return query
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", malformed)
+    with pytest.raises(
+        hierarchy.HierarchyContractErrorV2,
+        match="fine safety anchor query contract mismatch",
+    ):
+        hierarchy.ConservativeHierarchyV2.build(
+            _anchor(width=1, height=1), max_slope_deg=30.0
+        )
+
+
 def test_snapshot_identity_drift_raises_stable_contract_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -538,6 +609,58 @@ def test_hint_accessors_return_defensive_deep_copies() -> None:
     assert fresh.status is hierarchy.HierarchyHintStatusV2.SAFE_HINT
     assert fresh.fine_cells[0] == Cell(0, 0)
     assert built.iter_hints(2)[0].reason_codes == ("terrain_safe",)
+
+
+def test_public_hints_view_cannot_pollute_internal_or_canonical_decisions() -> None:
+    hierarchy = import_module("path_planner.v2.hierarchy")
+    built = hierarchy.ConservativeHierarchyV2.build(
+        _anchor(width=2, height=2), max_slope_deg=30.0
+    )
+    before = canonical_json_bytes(built)
+    leaked = built.hints
+    target = next(
+        hint for hint in leaked if hint.scale == 2 and hint.cell == Cell(0, 0)
+    )
+    object.__setattr__(
+        target,
+        "status",
+        hierarchy.HierarchyHintStatusV2.BLOCKED_HINT,
+    )
+    object.__setattr__(target, "reason_codes", ("terrain_hard_obstacle",))
+
+    fresh = built.hint(2, Cell(0, 0))
+    assert fresh.status is hierarchy.HierarchyHintStatusV2.SAFE_HINT
+    assert fresh.reason_codes == ("terrain_safe",)
+    assert built.iter_hints(2)[0] == fresh
+    assert built.fine_cells(2, Cell(0, 0)) == fresh.fine_cells
+    assert canonical_json_bytes(built) == before
+    assert built.hints is not leaked
+    assert built.hints[0] is not leaked[0]
+    payload = json.loads(before)
+    assert "hints" in payload
+    assert "_hints" not in payload
+
+
+def test_public_geometry_view_cannot_pollute_internal_or_canonical_decisions() -> None:
+    hierarchy = import_module("path_planner.v2.hierarchy")
+    built = hierarchy.ConservativeHierarchyV2.build(
+        _anchor(width=2, height=2), max_slope_deg=30.0
+    )
+    before = canonical_json_bytes(built)
+    leaked = built.geometry
+    object.__setattr__(leaked, "width", 99)
+
+    assert built.geometry.width == 2
+    assert built.hint(2, Cell(0, 0)).status is hierarchy.HierarchyHintStatusV2.SAFE_HINT
+    assert len(built.iter_hints(2)) == 1
+    assert built.fine_cells(2, Cell(0, 0)) == (
+        Cell(0, 0),
+        Cell(1, 0),
+        Cell(0, 1),
+        Cell(1, 1),
+    )
+    assert canonical_json_bytes(built) == before
+    assert built["geometry"] is not leaked
 
 
 def test_hierarchy_implementation_uses_query_not_raw_truth_layers() -> None:

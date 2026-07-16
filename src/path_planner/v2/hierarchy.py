@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from dataclasses import FrozenInstanceError, dataclass
 from enum import Enum
 from math import ceil, isfinite
 from numbers import Real
@@ -17,6 +18,7 @@ from path_planner.v2.terrain import (
 
 
 HIERARCHY_SCALES_V2 = (1, 2, 4)
+_HIERARCHY_BUILD_TOKEN = object()
 
 _TERRAIN_REASON_CODES = frozenset(
     {
@@ -221,22 +223,29 @@ def _validated_query(
             raise HierarchyContractErrorV2("fine safety anchor query contract mismatch")
         return query
 
-    if (
-        isinstance(terrain_slope, bool)
-        or not isinstance(terrain_slope, Real)
-        or not isfinite(float(terrain_slope))
-        or float(terrain_slope) < 0.0
-        or isinstance(confidence, bool)
-        or not isinstance(confidence, Real)
-        or not isfinite(float(confidence))
-        or not 0.0 <= float(confidence) <= 1.0
-    ):
+    terrain_slope_value = _query_numeric(terrain_slope)
+    confidence_value = _query_numeric(confidence)
+    if terrain_slope_value < 0.0 or not 0.0 <= confidence_value <= 1.0:
         raise HierarchyContractErrorV2("fine safety anchor query contract mismatch")
-    if reason_code == "terrain_safe" and float(terrain_slope) > max_slope_deg:
+    if reason_code == "terrain_safe" and terrain_slope_value > max_slope_deg:
         raise HierarchyContractErrorV2("fine safety anchor query contract mismatch")
-    if reason_code == "terrain_slope_exceeded" and float(terrain_slope) <= max_slope_deg:
+    if reason_code == "terrain_slope_exceeded" and terrain_slope_value <= max_slope_deg:
         raise HierarchyContractErrorV2("fine safety anchor query contract mismatch")
     return query
+
+
+def _query_numeric(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise HierarchyContractErrorV2("fine safety anchor query contract mismatch")
+    try:
+        normalized = float(value)
+    except Exception as exc:
+        raise HierarchyContractErrorV2(
+            "fine safety anchor query contract mismatch"
+        ) from exc
+    if not isfinite(normalized):
+        raise HierarchyContractErrorV2("fine safety anchor query contract mismatch")
+    return normalized
 
 
 def _status_for(
@@ -269,37 +278,154 @@ def _defensive_hint_copy(hint: object) -> HierarchyCellHintV2:
     return copied
 
 
-@dataclass(frozen=True, slots=True)
-class ConservativeHierarchyV2:
-    geometry: FineGridGeometryV2
-    snapshot_hash: str
-    max_slope_deg: float
-    hints: tuple[HierarchyCellHintV2, ...]
+def _defensive_geometry_copy(geometry: object) -> FineGridGeometryV2:
+    try:
+        if type(geometry) is not FineGridGeometryV2:
+            raise TypeError("geometry type mismatch")
+        return FineGridGeometryV2(
+            width=geometry.width,
+            height=geometry.height,
+            origin=(geometry.origin[0], geometry.origin[1]),
+            frame_id=geometry.frame_id,
+            resolution_m=geometry.resolution_m,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise HierarchyContractErrorV2("hierarchy geometry contract mismatch") from exc
+
+
+class ConservativeHierarchyV2(Mapping[str, object]):
+    __slots__ = ("_geometry", "_snapshot_hash", "_max_slope_deg", "_hints")
+
+    _SERIALIZATION_KEYS = (
+        "geometry",
+        "snapshot_hash",
+        "max_slope_deg",
+        "hints",
+    )
+
+    def __init__(
+        self,
+        geometry: FineGridGeometryV2,
+        snapshot_hash: str,
+        max_slope_deg: float,
+        hints: tuple[HierarchyCellHintV2, ...],
+        *,
+        _build_token: object = None,
+    ) -> None:
+        if _build_token is not _HIERARCHY_BUILD_TOKEN:
+            raise TypeError("ConservativeHierarchyV2 must be created with build()")
+        object.__setattr__(self, "_geometry", geometry)
+        object.__setattr__(self, "_snapshot_hash", snapshot_hash)
+        object.__setattr__(self, "_max_slope_deg", max_slope_deg)
+        object.__setattr__(self, "_hints", hints)
+        self.__post_init__()
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise FrozenInstanceError(f"cannot assign to field {name!r}")
+
+    def __delattr__(self, name: str) -> None:
+        raise FrozenInstanceError(f"cannot delete field {name!r}")
+
+    @property
+    def geometry(self) -> FineGridGeometryV2:
+        return _defensive_geometry_copy(self._geometry)
+
+    @property
+    def snapshot_hash(self) -> str:
+        return self._snapshot_hash
+
+    @property
+    def max_slope_deg(self) -> float:
+        return self._max_slope_deg
+
+    @property
+    def hints(self) -> tuple[HierarchyCellHintV2, ...]:
+        return tuple(_defensive_hint_copy(hint) for hint in self._hints)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._SERIALIZATION_KEYS)
+
+    def __len__(self) -> int:
+        return len(self._SERIALIZATION_KEYS)
+
+    def __getitem__(self, key: str) -> object:
+        if key == "geometry":
+            return self.geometry
+        if key == "snapshot_hash":
+            return self.snapshot_hash
+        if key == "max_slope_deg":
+            return self.max_slope_deg
+        if key == "hints":
+            return self.hints
+        raise KeyError(key)
+
+    def __eq__(self, other: object) -> bool:
+        if type(other) is not ConservativeHierarchyV2:
+            return NotImplemented
+        return (
+            self._geometry == other._geometry
+            and self._snapshot_hash == other._snapshot_hash
+            and self._max_slope_deg == other._max_slope_deg
+            and self._hints == other._hints
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self._geometry,
+                self._snapshot_hash,
+                self._max_slope_deg,
+                self._hints,
+            )
+        )
+
+    def __repr__(self) -> str:
+        return (
+            "ConservativeHierarchyV2("
+            f"geometry={self.geometry!r}, "
+            f"snapshot_hash={self.snapshot_hash!r}, "
+            f"max_slope_deg={self.max_slope_deg!r}, "
+            f"hints={self.hints!r})"
+        )
 
     def __post_init__(self) -> None:
-        if type(self.geometry) is not FineGridGeometryV2:
+        if type(self._geometry) is not FineGridGeometryV2:
             raise TypeError("geometry must be exact FineGridGeometryV2")
+        object.__setattr__(
+            self,
+            "_geometry",
+            _defensive_geometry_copy(self._geometry),
+        )
         if not _is_sha256(self.snapshot_hash):
             raise ValueError("snapshot_hash must be a lowercase SHA-256 digest")
-        object.__setattr__(self, "max_slope_deg", _normalized_threshold(self.max_slope_deg))
-        if type(self.hints) is not tuple or any(
-            type(hint) is not HierarchyCellHintV2 for hint in self.hints
+        object.__setattr__(
+            self,
+            "_max_slope_deg",
+            _normalized_threshold(self.max_slope_deg),
+        )
+        if type(self._hints) is not tuple or any(
+            type(hint) is not HierarchyCellHintV2 for hint in self._hints
         ):
             raise TypeError("hints must be an exact tuple of HierarchyCellHintV2")
+        object.__setattr__(
+            self,
+            "_hints",
+            tuple(_defensive_hint_copy(hint) for hint in self._hints),
+        )
 
         expected_keys: list[tuple[int, int, int]] = []
         for scale in HIERARCHY_SCALES_V2:
-            coarse_width, coarse_height = _coarse_shape(self.geometry, scale)
+            coarse_width, coarse_height = _coarse_shape(self._geometry, scale)
             expected_keys.extend(
                 (scale, y, x)
                 for y in range(coarse_height)
                 for x in range(coarse_width)
             )
-        actual_keys = [(hint.scale, hint.cell.y, hint.cell.x) for hint in self.hints]
+        actual_keys = [(hint.scale, hint.cell.y, hint.cell.x) for hint in self._hints]
         if actual_keys != expected_keys:
             raise ValueError("hints must cover every coarse cell in stable order")
-        for hint in self.hints:
-            expected_cells = _covered_cells(self.geometry, hint.scale, hint.cell)
+        for hint in self._hints:
+            expected_cells = _covered_cells(self._geometry, hint.scale, hint.cell)
             if hint.fine_cells != expected_cells:
                 raise ValueError("hint fine_cells must match geometry exactly")
 
@@ -363,6 +489,7 @@ class ConservativeHierarchyV2:
             snapshot_hash=expected_snapshot_hash,
             max_slope_deg=threshold,
             hints=tuple(hints),
+            _build_token=_HIERARCHY_BUILD_TOKEN,
         )
         if _anchor_snapshot_identity(anchor) != expected_snapshot_hash:
             raise HierarchyContractErrorV2(
@@ -374,10 +501,10 @@ class ConservativeHierarchyV2:
     def _validated_lookup(self, scale: object, cell: object) -> HierarchyCellHintV2:
         normalized_scale = _require_scale(scale)
         normalized_cell = _require_cell(cell)
-        coarse_width, coarse_height = _coarse_shape(self.geometry, normalized_scale)
+        coarse_width, coarse_height = _coarse_shape(self._geometry, normalized_scale)
         if normalized_cell.x >= coarse_width or normalized_cell.y >= coarse_height:
             raise ValueError("cell is outside hierarchy scale bounds")
-        for hint in self.hints:
+        for hint in self._hints:
             if hint.scale == normalized_scale and hint.cell == normalized_cell:
                 return hint
         raise HierarchyContractErrorV2("hierarchy hint coverage contract mismatch")
@@ -389,7 +516,7 @@ class ConservativeHierarchyV2:
         normalized_scale = _require_scale(scale)
         return tuple(
             _defensive_hint_copy(hint)
-            for hint in self.hints
+            for hint in self._hints
             if hint.scale == normalized_scale
         )
 
