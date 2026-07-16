@@ -33,6 +33,11 @@ from path_planner.v2.profiles import (
     WheelProfileV2,
 )
 from path_planner.v2.providers import WheelMotionPrimitiveV2
+from path_planner.v2.validation import (
+    WheelValidationResultV2,
+    validate_route_l2,
+    validate_wheel_transition_l2,
+)
 
 __all__ = [
     "PLANNING_SCHEMA_VERSION_V2",
@@ -60,8 +65,11 @@ __all__ = [
     "WHEEL_RELATIVE_ENERGY_PROXY_ID_V2",
     "WheelMotionPrimitiveV2",
     "WheelProfileV2",
+    "WheelValidationResultV2",
     "canonical_json_bytes",
     "conservative_wheel_pose_cells",
     "conservative_wheel_sweep_cells",
     "dense_wheel_replay_step_count",
+    "validate_route_l2",
+    "validate_wheel_transition_l2",
 ]
