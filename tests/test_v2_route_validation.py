@@ -33,6 +33,8 @@ from path_planner.v2.terrain import (
     TerrainSnapshotV2,
 )
 from path_planner.v2.validation import (
+    WHEEL_ROUTE_VALIDATOR_ID_V2,
+    WHEEL_TRANSITION_VALIDATOR_ID_V2,
     WheelValidationResultV2,
     validate_route_l2,
     validate_wheel_transition_l2,
@@ -266,6 +268,133 @@ def test_wheel_validation_result_rejects_forged_evidence_or_checks() -> None:
             failed_primitive_index=0,
             checked_cell_count=1,
         )
+
+
+@pytest.mark.parametrize(
+    ("validator_id", "reason_code", "passed", "failed_cell", "failed_index"),
+    [
+        ("unknown-validator/v1", "terrain_unknown", False, None, 0),
+        (
+            WHEEL_ROUTE_VALIDATOR_ID_V2,
+            "transition_l2_valid",
+            True,
+            None,
+            None,
+        ),
+        (
+            WHEEL_TRANSITION_VALIDATOR_ID_V2,
+            "route_l2_valid",
+            True,
+            None,
+            None,
+        ),
+        (WHEEL_ROUTE_VALIDATOR_ID_V2, "unknown_reason", False, None, 0),
+        (
+            WHEEL_ROUTE_VALIDATOR_ID_V2,
+            "planning_deadline_expired",
+            False,
+            Cell(0, 0),
+            0,
+        ),
+        (
+            WHEEL_ROUTE_VALIDATOR_ID_V2,
+            "terrain_unknown",
+            False,
+            Cell(0, 0),
+            None,
+        ),
+    ],
+)
+def test_wheel_validation_result_rejects_invalid_validator_reason_or_metadata(
+    validator_id,
+    reason_code,
+    passed,
+    failed_cell,
+    failed_index,
+) -> None:
+    evidence = v2.ValidationEvidenceV2(
+        validator_id=validator_id,
+        level=ValidationLevelV2.L2,
+        passed=passed,
+        checks=(reason_code,),
+    )
+
+    with pytest.raises(ValueError):
+        WheelValidationResultV2(
+            evidence=evidence,
+            reason_code=reason_code,
+            timed_out=reason_code == "planning_deadline_expired",
+            failed_cell=failed_cell,
+            failed_primitive_index=failed_index,
+            checked_cell_count=1,
+        )
+
+
+@pytest.mark.parametrize("entry_point", ["transition", "route"])
+def test_entry_points_reaudit_tampered_wheel_profile_without_overflow_leak(
+    entry_point,
+) -> None:
+    profile, _, _, primitive, transition = _straight_fixture(duration_s=1.0)
+    object.__setattr__(profile, "integration_dt_s", 10**400)
+    snapshot = _snapshot()
+    anchor = FineSafetyAnchorV2(snapshot)
+
+    if entry_point == "transition":
+        result = validate_wheel_transition_l2(
+            transition,
+            anchor,
+            profile,
+            _deadline(),
+        )
+    else:
+        result = validate_route_l2(
+            _route(primitive),
+            _request(snapshot, profile, primitive.start_state, primitive.end_state),
+            anchor,
+            profile,
+            _deadline(),
+        )
+
+    assert result.reason_code == "wheel_profile_contract_mismatch"
+    assert result.evidence.passed is False
+    assert result.checked_cell_count == 0
+
+
+@pytest.mark.parametrize("tamper_kind", ["cell", "level", "passed_reason"])
+def test_route_rejects_tampered_anchor_query_contract(
+    monkeypatch,
+    tamper_kind,
+) -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    anchor = FineSafetyAnchorV2(snapshot)
+    original_query = FineSafetyAnchorV2.query
+    requested_cells: list[Cell] = []
+
+    def tampered_query(self, cell, max_slope_deg=30.0):
+        requested_cells.append(cell)
+        query = original_query(self, cell, max_slope_deg)
+        if tamper_kind == "cell":
+            object.__setattr__(query, "cell", Cell(cell.x + 1, cell.y))
+        elif tamper_kind == "level":
+            object.__setattr__(query, "validation_level", ValidationLevelV2.L1)
+        else:
+            object.__setattr__(query, "passed", False)
+        return query
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", tampered_query)
+    result = validate_route_l2(
+        _route(primitive),
+        _request(snapshot, profile, primitive.start_state, primitive.end_state),
+        anchor,
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "terrain_query_contract_mismatch"
+    assert result.checked_cell_count == 1
+    assert result.failed_cell == requested_cells[0]
+    assert result.failed_primitive_index == 0
 
 
 def test_transition_l2_is_public_and_queries_every_swept_cell_at_exact_30(
@@ -788,6 +917,26 @@ def test_hold_is_independently_swept_and_route_state_budget_counts_actual_sample
     assert terrain_result.checked_cell_count == len(contacted)
     assert resource_result.reason_code == "route_state_budget_exceeded"
     assert resource_result.checked_cell_count == 0
+
+
+def test_tampered_hold_numeric_field_fails_stably_and_still_scans_terrain() -> None:
+    profile = _wheel_profile()
+    state = PoseStateV2(1.25, 1.25, 0.0)
+    hold = _hold(state)
+    object.__setattr__(hold, "observation_contribution", "bad")
+    snapshot = _snapshot()
+
+    result = validate_route_l2(
+        _route(hold),
+        _request(snapshot, profile, state, state),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "primitive_hold_contract_mismatch"
+    assert result.evidence.passed is False
+    assert result.checked_cell_count > 0
 
 
 def test_route_state_budget_uses_larger_of_declared_and_replayed_samples() -> None:

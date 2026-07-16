@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import hypot, isclose, isfinite, pi, remainder
 from numbers import Real
 
@@ -24,7 +24,7 @@ from path_planner.v2.geometry import (
     conservative_wheel_pose_cells,
     conservative_wheel_sweep_cells,
 )
-from path_planner.v2.profiles import WheelProfileV2
+from path_planner.v2.profiles import PlatformProfileV2, WheelProfileV2
 from path_planner.v2.providers.wheel import WheelMotionPrimitiveV2
 from path_planner.v2.runtime import PlanningDeadlineV2
 from path_planner.v2.terrain import (
@@ -44,7 +44,57 @@ _TERRAIN_FAILURE_PRIORITY = {
     "terrain_not_traversable": 3,
     "terrain_slope_exceeded": 4,
 }
-_PASS_REASON_CODES = frozenset({"transition_l2_valid", "route_l2_valid"})
+_TERRAIN_QUERY_REASON_CODES = frozenset({"terrain_safe", *_TERRAIN_FAILURE_PRIORITY})
+_COMMON_FAILURE_REASON_CODES = frozenset(
+    {
+        "planning_deadline_expired",
+        "terrain_out_of_bounds",
+        "terrain_unknown",
+        "terrain_hard_obstacle",
+        "terrain_not_traversable",
+        "terrain_slope_exceeded",
+        "terrain_snapshot_hash_mismatch",
+        "terrain_query_contract_mismatch",
+        "wheel_profile_contract_mismatch",
+        "primitive_structure_mismatch",
+        "primitive_flag_mismatch",
+        "primitive_duration_mismatch",
+        "primitive_zero_motion_mismatch",
+        "primitive_replay_mismatch",
+        "wheel_reverse_disabled",
+        "wheel_turn_in_place_disabled",
+        "wheel_speed_limit_exceeded",
+        "wheel_angular_speed_limit_exceeded",
+        "wheel_min_turning_radius_violated",
+    }
+)
+_VALIDATOR_REASON_CODES = {
+    WHEEL_TRANSITION_VALIDATOR_ID_V2: frozenset(
+        {"transition_l2_valid", *_COMMON_FAILURE_REASON_CODES}
+    ),
+    WHEEL_ROUTE_VALIDATOR_ID_V2: frozenset(
+        {
+            "route_l2_valid",
+            *_COMMON_FAILURE_REASON_CODES,
+            "terrain_snapshot_identity_mismatch",
+            "wheel_platform_identity_mismatch",
+            "wheel_profile_identity_mismatch",
+            "route_incomplete",
+            "route_structure_mismatch",
+            "route_start_mismatch",
+            "route_connectivity_mismatch",
+            "route_state_budget_exceeded",
+            "route_goal_tolerance_exceeded",
+            "wheel_primitive_type_mismatch",
+            "primitive_hold_contract_mismatch",
+            "primitive_sweep_unavailable",
+        }
+    ),
+}
+_PASS_REASON_BY_VALIDATOR = {
+    WHEEL_TRANSITION_VALIDATOR_ID_V2: "transition_l2_valid",
+    WHEEL_ROUTE_VALIDATOR_ID_V2: "route_l2_valid",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,8 +111,13 @@ class WheelValidationResultV2:
             raise TypeError("evidence must be exact ValidationEvidenceV2")
         if self.evidence.level is not ValidationLevelV2.L2:
             raise ValueError("evidence must be L2")
+        validator_id = self.evidence.validator_id
+        if validator_id not in _VALIDATOR_REASON_CODES:
+            raise ValueError("evidence validator_id must be a stable wheel L2 validator")
         if not isinstance(self.reason_code, str) or not self.reason_code.strip():
             raise ValueError("reason_code must be a nonempty string")
+        if self.reason_code not in _VALIDATOR_REASON_CODES[validator_id]:
+            raise ValueError("reason_code is not valid for the wheel L2 validator")
         if type(self.timed_out) is not bool:
             raise TypeError("timed_out must be bool")
         if self.failed_cell is not None and type(self.failed_cell) is not Cell:
@@ -84,9 +139,17 @@ class WheelValidationResultV2:
             raise ValueError("checked_cell_count must be nonnegative")
         if self.timed_out is not (self.reason_code == "planning_deadline_expired"):
             raise ValueError("timeout fields must agree")
+        if self.timed_out and (
+            self.failed_cell is not None or self.failed_primitive_index is not None
+        ):
+            raise ValueError("timeout result must not carry failure metadata")
+        if self.failed_cell is not None and self.failed_primitive_index is None:
+            raise ValueError("failed_cell requires failed_primitive_index")
         if self.evidence.checks != (self.reason_code,):
             raise ValueError("evidence checks must contain the exact reason_code")
-        if self.evidence.passed is not (self.reason_code in _PASS_REASON_CODES):
+        if self.evidence.passed is not (
+            self.reason_code == _PASS_REASON_BY_VALIDATOR[validator_id]
+        ):
             raise ValueError("evidence passed must agree with the reason_code")
         if self.evidence.passed:
             if self.timed_out:
@@ -158,6 +221,18 @@ def _validate_entry_types(
         raise TypeError("wheel_profile must be exact WheelProfileV2")
     if type(deadline) is not PlanningDeadlineV2:
         raise TypeError("deadline must be exact PlanningDeadlineV2")
+
+
+def _reaudit_wheel_profile(
+    wheel_profile: WheelProfileV2,
+) -> WheelProfileV2 | None:
+    try:
+        if type(wheel_profile.profile) is not PlatformProfileV2:
+            return None
+        profile = replace(wheel_profile.profile)
+        return replace(wheel_profile, profile=profile)
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return None
 
 
 def _result(
@@ -580,13 +655,43 @@ def _query_cells(
             checked += 1
             if deadline.expired:
                 return best, checked, _timeout(validator_id, checked)
-            if type(query) is not SafetyQueryV2 or query.snapshot_hash != expected_snapshot_hash:
+            if type(query) is not SafetyQueryV2:
+                return (
+                    best,
+                    checked,
+                    _result(
+                        validator_id,
+                        "terrain_query_contract_mismatch",
+                        failed_cell=cell,
+                        failed_primitive_index=audited.index,
+                        checked_cell_count=checked,
+                    ),
+                )
+            if query.snapshot_hash != expected_snapshot_hash:
                 return (
                     best,
                     checked,
                     _result(
                         validator_id,
                         "terrain_snapshot_hash_mismatch",
+                        failed_cell=cell,
+                        failed_primitive_index=audited.index,
+                        checked_cell_count=checked,
+                    ),
+                )
+            query_contract_matches = (
+                query.cell == cell
+                and query.validation_level is ValidationLevelV2.L2
+                and query.reason_code in _TERRAIN_QUERY_REASON_CODES
+                and query.passed is (query.reason_code == "terrain_safe")
+            )
+            if not query_contract_matches:
+                return (
+                    best,
+                    checked,
+                    _result(
+                        validator_id,
+                        "terrain_query_contract_mismatch",
                         failed_cell=cell,
                         failed_primitive_index=audited.index,
                         checked_cell_count=checked,
@@ -612,6 +717,13 @@ def validate_wheel_transition_l2(
     _validate_entry_types(anchor, wheel_profile, deadline)
     if deadline.expired:
         return _timeout(WHEEL_TRANSITION_VALIDATOR_ID_V2, 0)
+    audited_profile = _reaudit_wheel_profile(wheel_profile)
+    if audited_profile is None:
+        return _result(
+            WHEEL_TRANSITION_VALIDATOR_ID_V2,
+            "wheel_profile_contract_mismatch",
+        )
+    wheel_profile = audited_profile
     expected_hash = snapshot_hash(anchor.snapshot)
     if deadline.expired:
         return _timeout(WHEEL_TRANSITION_VALIDATOR_ID_V2, 0)
@@ -679,6 +791,13 @@ def validate_route_l2(
     _validate_entry_types(anchor, wheel_profile, deadline)
     if deadline.expired:
         return _timeout(WHEEL_ROUTE_VALIDATOR_ID_V2, 0)
+    audited_profile = _reaudit_wheel_profile(wheel_profile)
+    if audited_profile is None:
+        return _result(
+            WHEEL_ROUTE_VALIDATOR_ID_V2,
+            "wheel_profile_contract_mismatch",
+        )
+    wheel_profile = audited_profile
 
     if anchor.snapshot is not request.terrain_snapshot:
         return _result(
