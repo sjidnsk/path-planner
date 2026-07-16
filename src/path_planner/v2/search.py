@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from heapq import heapify, heappop, heappush
 from math import copysign, isfinite
 from threading import Lock
 
@@ -152,16 +153,15 @@ def _authoritative_key(
     )
 
 
-def _auxiliary_value(
+def _auxiliary_key(
     entry: SearchQueueEntryV2,
-    heuristic_id: str,
-) -> float | None:
-    for identifier, value in entry.auxiliary_heuristics:
-        if identifier == heuristic_id:
-            return value
-        if identifier > heuristic_id:
-            break
-    return None
+    auxiliary: float,
+    authoritative: tuple[float, float, tuple[int, ...], str, str],
+) -> tuple[float, float, float, tuple[int, ...], str, str]:
+    return (
+        entry.path_cost + auxiliary,
+        *authoritative,
+    )
 
 
 def _validated_entry_copy(entry: object) -> SearchQueueEntryV2:
@@ -219,6 +219,28 @@ class StableSearchQueueV2:
         init=False,
         repr=False,
     )
+    _anchor_heap: list[
+        tuple[
+            tuple[float, float, tuple[int, ...], str, str],
+            str,
+        ]
+    ] = field(default_factory=list, init=False, repr=False)
+    _auxiliary_heaps: dict[
+        str,
+        list[
+            tuple[
+                tuple[
+                    float,
+                    float,
+                    float,
+                    tuple[int, ...],
+                    str,
+                    str,
+                ],
+                str,
+            ]
+        ],
+    ] = field(default_factory=dict, init=False, repr=False)
     _lock: object = field(default_factory=Lock, init=False, repr=False)
 
     def __len__(self) -> int:
@@ -252,28 +274,120 @@ class StableSearchQueueV2:
                 if existing is not None and existing != entry:
                     raise ValueError("conflicting candidate_id in stable search queue")
 
-            merged = dict(self._entries)
-            for candidate_id, entry in batch.items():
-                if candidate_id not in self._retired_entries:
-                    merged[candidate_id] = entry
-            self._entries = {
-                entry.candidate_id: entry
-                for entry in sorted(merged.values(), key=_authoritative_key)
-            }
+            new_entries = tuple(
+                entry
+                for candidate_id, entry in batch.items()
+                if candidate_id not in self._entries
+                and candidate_id not in self._retired_entries
+            )
+            if not new_entries:
+                return
+
+            anchor_items: list[
+                tuple[
+                    tuple[float, float, tuple[int, ...], str, str],
+                    str,
+                ]
+            ] = []
+            auxiliary_items: dict[
+                str,
+                list[
+                    tuple[
+                        tuple[
+                            float,
+                            float,
+                            float,
+                            tuple[int, ...],
+                            str,
+                            str,
+                        ],
+                        str,
+                    ]
+                ],
+            ] = {}
+            for entry in new_entries:
+                authoritative = _authoritative_key(entry)
+                anchor_items.append((authoritative, entry.candidate_id))
+                for heuristic_id, auxiliary in entry.auxiliary_heuristics:
+                    auxiliary_items.setdefault(heuristic_id, []).append(
+                        (
+                            _auxiliary_key(entry, auxiliary, authoritative),
+                            entry.candidate_id,
+                        )
+                    )
+
+            new_candidate_ids = frozenset(
+                entry.candidate_id for entry in new_entries
+            )
+            previous_auxiliary_ids = frozenset(self._auxiliary_heaps)
+            try:
+                for item in anchor_items:
+                    heappush(self._anchor_heap, item)
+                for heuristic_id, items in auxiliary_items.items():
+                    heap = self._auxiliary_heaps.setdefault(heuristic_id, [])
+                    for item in items:
+                        heappush(heap, item)
+                self._entries.update(
+                    (entry.candidate_id, entry) for entry in new_entries
+                )
+            except BaseException:
+                for candidate_id in new_candidate_ids:
+                    dict.pop(self._entries, candidate_id, None)
+                self._anchor_heap[:] = [
+                    item
+                    for item in self._anchor_heap
+                    if item[1] not in new_candidate_ids
+                ]
+                heapify(self._anchor_heap)
+                for heuristic_id in auxiliary_items:
+                    heap = self._auxiliary_heaps.get(heuristic_id)
+                    if heap is None:
+                        continue
+                    heap[:] = [
+                        item
+                        for item in heap
+                        if item[1] not in new_candidate_ids
+                    ]
+                    heapify(heap)
+                    if not heap and heuristic_id not in previous_auxiliary_ids:
+                        self._auxiliary_heaps.pop(heuristic_id, None)
+                raise
+
+    def _peek_anchor_locked(self) -> SearchQueueEntryV2 | None:
+        while self._anchor_heap:
+            _, candidate_id = self._anchor_heap[0]
+            entry = self._entries.get(candidate_id)
+            if entry is not None:
+                return entry
+            heappop(self._anchor_heap)
+        return None
+
+    def _suggest_locked(self, heuristic_id: str) -> SearchQueueEntryV2 | None:
+        heap = self._auxiliary_heaps.get(heuristic_id)
+        if heap is None:
+            return None
+        while heap:
+            _, candidate_id = heap[0]
+            entry = self._entries.get(candidate_id)
+            if entry is not None:
+                return entry
+            heappop(heap)
+        return None
 
     def peek_anchor(self) -> SearchQueueEntryV2 | None:
         with self._lock:
-            if not self._entries:
+            entry = self._peek_anchor_locked()
+            if entry is None:
                 return None
-            return _validated_entry_copy(next(iter(self._entries.values())))
+            return _validated_entry_copy(entry)
 
     def pop_anchor(self) -> SearchQueueEntryV2:
         with self._lock:
-            if not self._entries:
+            entry = self._peek_anchor_locked()
+            if entry is None:
                 raise IndexError("stable search queue is empty")
-            candidate_id = next(iter(self._entries))
-            entry = self._entries[candidate_id]
             copied = _validated_entry_copy(entry)
+            _, candidate_id = heappop(self._anchor_heap)
             self._entries.pop(candidate_id)
             self._retired_entries[candidate_id] = entry
             return copied
@@ -284,37 +398,10 @@ class StableSearchQueueV2:
             field_name="heuristic_id",
         )
         with self._lock:
-            candidates: list[
-                tuple[
-                    tuple[
-                        float,
-                        float,
-                        float,
-                        tuple[int, ...],
-                        str,
-                        str,
-                    ],
-                    SearchQueueEntryV2,
-                ]
-            ] = []
-            for entry in self._entries.values():
-                auxiliary = _auxiliary_value(entry, normalized_id)
-                if auxiliary is None:
-                    continue
-                candidates.append(
-                    (
-                        (
-                            entry.path_cost + auxiliary,
-                            *_authoritative_key(entry),
-                        ),
-                        entry,
-                    )
-                )
-            if not candidates:
+            entry = self._suggest_locked(normalized_id)
+            if entry is None:
                 return None
-            return _validated_entry_copy(
-                min(candidates, key=lambda candidate: candidate[0])[1]
-            )
+            return _validated_entry_copy(entry)
 
     def discard(self, candidate_id: object) -> bool:
         normalized_id = _require_exact_nonempty_string(

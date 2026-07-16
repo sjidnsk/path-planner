@@ -8,6 +8,7 @@ from threading import Barrier
 
 import pytest
 
+import path_planner.v2.search as search_module
 from path_planner.v2.search import SearchQueueEntryV2, StableSearchQueueV2
 from path_planner.v2.serialization import canonical_json_bytes
 
@@ -132,6 +133,19 @@ class _FloatSubclass(float):
 
 class _TupleSubclass(tuple):
     pass
+
+
+class _FailingUpdateDict(dict[str, SearchQueueEntryV2]):
+    def update(self, values=(), /, **kwargs) -> None:
+        del kwargs
+        for key, value in values:
+            dict.__setitem__(self, key, value)
+            raise RuntimeError("injected active commit failure")
+
+
+class _NoValuesDict(dict[str, SearchQueueEntryV2]):
+    def values(self):
+        raise AssertionError("suggest must not scan active entries")
 
 
 @pytest.mark.parametrize(
@@ -356,6 +370,47 @@ def test_invalid_entry_rejects_entire_batch_atomically() -> None:
     assert _drain(queue) == (original,)
 
 
+def test_active_commit_exception_rolls_back_entries_and_both_heap_kinds() -> None:
+    queue = StableSearchQueueV2()
+    original = _entry(
+        "original",
+        path_cost=5,
+        auxiliary_heuristics=(("resource", 5),),
+    )
+    queue.extend((original,))
+    queue._entries = _FailingUpdateDict(queue._entries)
+    anchor_before = tuple(queue._anchor_heap)
+    auxiliary_before = {
+        heuristic_id: tuple(heap)
+        for heuristic_id, heap in queue._auxiliary_heaps.items()
+    }
+
+    with pytest.raises(RuntimeError, match="injected active commit failure"):
+        queue.extend(
+            (
+                _entry(
+                    "new-a",
+                    path_cost=1,
+                    auxiliary_heuristics=(("resource", 1),),
+                ),
+                _entry(
+                    "new-b",
+                    path_cost=2,
+                    auxiliary_heuristics=(("corridor", 2),),
+                ),
+            )
+        )
+
+    assert dict(queue._entries) == {"original": original}
+    assert tuple(queue._anchor_heap) == anchor_before
+    assert {
+        heuristic_id: tuple(heap)
+        for heuristic_id, heap in queue._auxiliary_heaps.items()
+    } == auxiliary_before
+    assert len(queue) == 1
+    assert _drain(queue) == (original,)
+
+
 def test_forged_exact_entry_rejects_entire_batch_atomically() -> None:
     queue = StableSearchQueueV2()
     original = _entry("original")
@@ -544,3 +599,106 @@ def test_concurrent_extend_is_equivalent_to_single_worker() -> None:
     assert actual == expected
     assert _decision_projection(actual) == _decision_projection(expected)
     assert canonical_json_bytes(actual) == canonical_json_bytes(expected)
+
+
+def test_extend_computes_keys_only_for_new_entries(monkeypatch) -> None:
+    queue = StableSearchQueueV2()
+    queue.extend(
+        tuple(
+            _entry(
+                f"existing-{index:04d}",
+                path_cost=index,
+                anchor_heuristic=1500 - index,
+                auxiliary_heuristics=(("resource", index),),
+            )
+            for index in range(1500)
+        )
+    )
+    real_authoritative_key = search_module._authoritative_key
+    key_calls = 0
+
+    def counting_authoritative_key(
+        entry: SearchQueueEntryV2,
+    ) -> tuple[float, float, tuple[int, ...], str, str]:
+        nonlocal key_calls
+        key_calls += 1
+        return real_authoritative_key(entry)
+
+    monkeypatch.setattr(
+        search_module,
+        "_authoritative_key",
+        counting_authoritative_key,
+    )
+    new_entry = _entry(
+        "new",
+        path_cost=1501,
+        anchor_heuristic=0,
+        auxiliary_heuristics=(("resource", 0),),
+    )
+
+    queue.extend((new_entry,))
+    assert key_calls == 1
+    queue.extend((new_entry,))
+    assert key_calls == 1
+    assert queue.discard("new") is True
+    queue.extend((new_entry,))
+    assert key_calls == 1
+
+
+def test_suggest_uses_auxiliary_heap_without_scanning_active_entries() -> None:
+    queue = StableSearchQueueV2()
+    queue.extend(
+        tuple(
+            _entry(
+                f"candidate-{index:04d}",
+                path_cost=index,
+                anchor_heuristic=1500 - index,
+                auxiliary_heuristics=(("resource", 1500 - index),),
+            )
+            for index in range(1500)
+        )
+    )
+    queue._entries = _NoValuesDict(queue._entries)
+
+    first = queue.suggest("resource")
+    second = queue.suggest("resource")
+    assert first is not None
+    assert second is not None
+    assert first.candidate_id == "candidate-0000"
+    assert second == first
+
+
+def test_heap_tombstones_are_pruned_lazily_without_reopening_retired_ids() -> None:
+    queue = StableSearchQueueV2()
+    first = _entry(
+        "first",
+        path_cost=0,
+        anchor_heuristic=0,
+        auxiliary_heuristics=(("resource", 0),),
+    )
+    second = _entry(
+        "second",
+        path_cost=1,
+        anchor_heuristic=0,
+        auxiliary_heuristics=(("resource", 0),),
+    )
+    queue.extend((first, second))
+
+    assert queue.discard("first") is True
+    assert len(queue._anchor_heap) == 2
+    assert len(queue._auxiliary_heaps["resource"]) == 2
+    assert queue.peek_anchor() == second
+    assert len(queue._anchor_heap) == 1
+    assert queue.suggest("resource") == second
+    assert len(queue._auxiliary_heaps["resource"]) == 1
+
+    assert queue.pop_anchor() == second
+    assert len(queue._anchor_heap) == 0
+    assert len(queue._auxiliary_heaps["resource"]) == 1
+    assert queue.suggest("resource") is None
+    assert len(queue._auxiliary_heaps["resource"]) == 0
+
+    queue.extend((first, second))
+    assert len(queue) == 0
+    assert len(queue._anchor_heap) == 0
+    assert len(queue._auxiliary_heaps["resource"]) == 0
