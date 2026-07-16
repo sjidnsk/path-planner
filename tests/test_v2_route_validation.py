@@ -360,6 +360,126 @@ def test_entry_points_reaudit_tampered_wheel_profile_without_overflow_leak(
     assert result.checked_cell_count == 0
 
 
+def test_route_reaudits_huge_request_goal_before_tolerance_arithmetic() -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    request = _request(
+        snapshot,
+        profile,
+        primitive.start_state,
+        primitive.end_state,
+    )
+    object.__setattr__(request.goal_state, "x_m", 10**400)
+
+    result = validate_route_l2(
+        _route(primitive),
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "route_goal_contract_mismatch"
+    assert result.evidence.passed is False
+    assert result.checked_cell_count > 0
+
+
+def test_route_reaudits_huge_request_start_before_route_comparison() -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    request_start = PoseStateV2(
+        primitive.start_state.x_m,
+        primitive.start_state.y_m,
+        primitive.start_state.heading_rad,
+    )
+    request = _request(
+        snapshot,
+        profile,
+        request_start,
+        primitive.end_state,
+    )
+    object.__setattr__(request.start_state, "x_m", 10**400)
+
+    result = validate_route_l2(
+        _route(primitive),
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "route_start_contract_mismatch"
+    assert result.evidence.passed is False
+    assert result.checked_cell_count > 0
+
+
+@pytest.mark.parametrize("tamper_kind", ["budget_type", "max_type", "max_negative"])
+def test_route_reaudits_request_route_state_budget_before_validation(
+    tamper_kind,
+) -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    request = _request(
+        snapshot,
+        profile,
+        primitive.start_state,
+        primitive.end_state,
+    )
+    if tamper_kind == "budget_type":
+        object.__setattr__(request, "resource_budget", object())
+    elif tamper_kind == "max_type":
+        object.__setattr__(request.resource_budget, "max_route_states", True)
+    else:
+        object.__setattr__(request.resource_budget, "max_route_states", -1)
+
+    result = validate_route_l2(
+        _route(primitive),
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "planning_request_contract_mismatch"
+    assert result.evidence.passed is False
+    assert result.checked_cell_count == 0
+
+
+def test_terrain_failure_beats_huge_request_goal_contract_mismatch() -> None:
+    profile, start, control, primitive, _ = _straight_fixture(duration_s=1.0)
+    base = _snapshot()
+    contacted = conservative_wheel_sweep_cells(
+        start,
+        control,
+        base.geometry,
+        body_length_m=profile.body_length_m,
+        body_width_m=profile.body_width_m,
+        safety_margin_m=profile.footprint_safety_margin_m,
+    )
+    blocked = contacted[len(contacted) // 2]
+    snapshot = _snapshot(hard_cells=(blocked,))
+    request = _request(
+        snapshot,
+        profile,
+        primitive.start_state,
+        primitive.end_state,
+    )
+    object.__setattr__(request.goal_state, "x_m", 10**400)
+
+    result = validate_route_l2(
+        _route(primitive),
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "terrain_hard_obstacle"
+    assert result.failed_cell == blocked
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == len(contacted)
+
+
 @pytest.mark.parametrize("tamper_kind", ["cell", "level", "passed_reason"])
 def test_route_rejects_tampered_anchor_query_contract(
     monkeypatch,

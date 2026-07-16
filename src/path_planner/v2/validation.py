@@ -16,6 +16,7 @@ from path_planner.v2.contracts import (
     PlatformKindV2,
     PoseStateV2,
     PrimitiveKindV2,
+    ResourceBudgetV2,
     TypedRouteV2,
     ValidationEvidenceV2,
     ValidationLevelV2,
@@ -82,9 +83,12 @@ _VALIDATOR_REASON_CODES = {
             "route_incomplete",
             "route_structure_mismatch",
             "route_start_mismatch",
+            "route_start_contract_mismatch",
             "route_connectivity_mismatch",
             "route_state_budget_exceeded",
             "route_goal_tolerance_exceeded",
+            "route_goal_contract_mismatch",
+            "planning_request_contract_mismatch",
             "wheel_primitive_type_mismatch",
             "primitive_hold_contract_mismatch",
             "primitive_sweep_unavailable",
@@ -233,6 +237,21 @@ def _reaudit_wheel_profile(
         return replace(wheel_profile, profile=profile)
     except (TypeError, ValueError, OverflowError, AttributeError):
         return None
+
+
+def _route_state_budget(request: PlanningRequestV2) -> int | None:
+    try:
+        budget = request.resource_budget
+        if type(budget) is not ResourceBudgetV2:
+            return None
+        max_route_states = budget.max_route_states
+    except AttributeError:
+        return None
+    if isinstance(max_route_states, bool) or not isinstance(max_route_states, int):
+        return None
+    if max_route_states < 0:
+        return None
+    return max_route_states
 
 
 def _result(
@@ -798,6 +817,12 @@ def validate_route_l2(
             "wheel_profile_contract_mismatch",
         )
     wheel_profile = audited_profile
+    max_route_states = _route_state_budget(request)
+    if max_route_states is None:
+        return _result(
+            WHEEL_ROUTE_VALIDATOR_ID_V2,
+            "planning_request_contract_mismatch",
+        )
 
     if anchor.snapshot is not request.terrain_snapshot:
         return _result(
@@ -827,11 +852,21 @@ def validate_route_l2(
         record("wheel_profile_identity_mismatch")
     if route.is_complete is not True:
         record("route_incomplete")
+    try:
+        request_start = _pose_from_state(request.start_state)
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        request_start = None
+        record("route_start_contract_mismatch", 0)
+    try:
+        request_goal = _pose_from_state(request.goal_state)
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        request_goal = None
+        record("route_goal_contract_mismatch")
     primitives = route.primitives
     if not isinstance(primitives, tuple) or not primitives:
         record("route_structure_mismatch")
         primitives = ()
-    if primitives:
+    if primitives and request_start is not None:
         try:
             if primitives[0].start_state != request.start_state:
                 record("route_start_mismatch", 0)
@@ -865,7 +900,7 @@ def validate_route_l2(
             0,
             audited.route_state_count - 1,
         )
-        if route_state_count > request.resource_budget.max_route_states:
+        if route_state_count > max_route_states:
             return _result(
                 WHEEL_ROUTE_VALIDATOR_ID_V2,
                 "route_state_budget_exceeded",
@@ -889,11 +924,19 @@ def validate_route_l2(
         if not declared_connected or not actual_connected:
             record("route_connectivity_mismatch", index)
 
-    if primitives and audited_motions[-1].actual_end is not None:
+    if (
+        primitives
+        and audited_motions[-1].actual_end is not None
+        and request_goal is not None
+    ):
         final = audited_motions[-1].actual_end
-        goal = request.goal_state
-        position_error = hypot(final.x_m - goal.x_m, final.y_m - goal.y_m)
-        heading_error = abs(remainder(final.theta_rad - goal.heading_rad, 2.0 * pi))
+        position_error = hypot(
+            final.x_m - request_goal.x_m,
+            final.y_m - request_goal.y_m,
+        )
+        heading_error = abs(
+            remainder(final.theta_rad - request_goal.theta_rad, 2.0 * pi)
+        )
         if (
             position_error > wheel_profile.profile.goal_position_tolerance_m
             or heading_error > wheel_profile.profile.goal_heading_tolerance_rad
