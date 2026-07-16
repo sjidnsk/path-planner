@@ -236,6 +236,138 @@ def test_route_pipeline_result_rejects_a_stage_after_prior_rejection() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("validator_id", "checks"),
+    [
+        ("fake-l0-validator/v1", ("route_l0_valid",)),
+        (validation_module.WHEEL_ROUTE_L0_VALIDATOR_ID_V2, ("fake_l0_pass",)),
+    ],
+)
+def test_route_pipeline_result_rejects_forged_l0_identity_or_pass_reason(
+    validator_id,
+    checks,
+) -> None:
+    profile = _profile()
+    route = _route(_primitive(profile))
+
+    with pytest.raises(ValueError, match="L0 validator"):
+        RouteValidationResultV2(
+            route=route,
+            success=False,
+            reason_code="route_requires_l2_validation",
+            stage_evidence=(
+                ValidationEvidenceV2(
+                    validator_id=validator_id,
+                    level=ValidationLevelV2.L0,
+                    passed=True,
+                    checks=checks,
+                ),
+            ),
+            l2_result=None,
+            cache_hits=0,
+            cache_misses=0,
+        )
+
+
+def test_route_pipeline_result_rejects_fake_l1_and_transition_l2_identity() -> None:
+    profile = _profile()
+    primitive = _primitive(profile)
+    route_l2 = replace(
+        _route(primitive),
+        primitives=(replace(primitive, validation_level=ValidationLevelV2.L2),),
+    )
+    l0 = ValidationEvidenceV2(
+        validator_id=validation_module.WHEEL_ROUTE_L0_VALIDATOR_ID_V2,
+        level=ValidationLevelV2.L0,
+        passed=True,
+        checks=("route_l0_valid",),
+    )
+    fake_l1 = ValidationEvidenceV2(
+        validator_id="fake-l1-validator/v1",
+        level=ValidationLevelV2.L1,
+        passed=True,
+        checks=("route_l1_valid",),
+    )
+    with pytest.raises(ValueError, match="L1 validator"):
+        RouteValidationResultV2(
+            route=route_l2,
+            success=False,
+            reason_code="route_requires_l2_validation",
+            stage_evidence=(l0, fake_l1),
+            l2_result=None,
+            cache_hits=0,
+            cache_misses=0,
+        )
+
+    l1 = replace(
+        fake_l1,
+        validator_id=validation_module.WHEEL_ROUTE_L1_VALIDATOR_ID_V2,
+    )
+    transition_evidence = ValidationEvidenceV2(
+        validator_id=validation_module.WHEEL_TRANSITION_VALIDATOR_ID_V2,
+        level=ValidationLevelV2.L2,
+        passed=True,
+        checks=("transition_l2_valid",),
+    )
+    transition_result = validation_module.WheelValidationResultV2(
+        evidence=transition_evidence,
+        reason_code="transition_l2_valid",
+        timed_out=False,
+        failed_cell=None,
+        failed_primitive_index=None,
+        checked_cell_count=1,
+    )
+    with pytest.raises(ValueError, match="route L2 validator"):
+        RouteValidationResultV2(
+            route=route_l2,
+            success=True,
+            reason_code="transition_l2_valid",
+            stage_evidence=(l0, l1, transition_evidence),
+            l2_result=transition_result,
+            cache_hits=0,
+            cache_misses=0,
+        )
+
+
+def test_route_pipeline_result_rejects_l2_stage_without_l2_result() -> None:
+    profile = _profile()
+    primitive = _primitive(profile)
+    route_l2 = replace(
+        _route(primitive),
+        primitives=(replace(primitive, validation_level=ValidationLevelV2.L2),),
+    )
+    evidence = (
+        ValidationEvidenceV2(
+            validator_id=validation_module.WHEEL_ROUTE_L0_VALIDATOR_ID_V2,
+            level=ValidationLevelV2.L0,
+            passed=True,
+            checks=("route_l0_valid",),
+        ),
+        ValidationEvidenceV2(
+            validator_id=validation_module.WHEEL_ROUTE_L1_VALIDATOR_ID_V2,
+            level=ValidationLevelV2.L1,
+            passed=True,
+            checks=("route_l1_valid",),
+        ),
+        ValidationEvidenceV2(
+            validator_id=validation_module.WHEEL_ROUTE_VALIDATOR_ID_V2,
+            level=ValidationLevelV2.L2,
+            passed=True,
+            checks=("route_l2_valid",),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="L2 stage requires l2_result"):
+        RouteValidationResultV2(
+            route=route_l2,
+            success=False,
+            reason_code="route_requires_l2_validation",
+            stage_evidence=evidence,
+            l2_result=None,
+            cache_hits=0,
+            cache_misses=0,
+        )
+
 @pytest.mark.parametrize("level", [ValidationLevelV2.L0, ValidationLevelV2.L1])
 def test_l0_and_l1_can_never_return_success(level) -> None:
     profile = _profile()
@@ -398,6 +530,87 @@ def test_real_wheel_l2_pass_is_the_only_success_and_preserves_evidence() -> None
         ValidationLevelV2.L2,
     )
     assert result.stage_evidence[-1] == result.l2_result.evidence
+    assert result.route.is_complete is True
+    assert all(
+        primitive.validation_level is ValidationLevelV2.L2
+        for primitive in result.route.primitives
+    )
+
+
+def test_route_pipeline_result_rejects_success_with_non_l2_route() -> None:
+    profile = _profile()
+    snapshot = _snapshot()
+    primitive = _primitive(profile)
+    route = _route(primitive)
+    l2 = validation_module.validate_route_l2(
+        route,
+        _request(snapshot, profile, primitive),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    with pytest.raises(ValueError, match="route primitives must all be L2"):
+        RouteValidationResultV2(
+            route=route,
+            success=True,
+            reason_code=l2.reason_code,
+            stage_evidence=(
+                ValidationEvidenceV2(
+                    validator_id=validation_module.WHEEL_ROUTE_L0_VALIDATOR_ID_V2,
+                    level=ValidationLevelV2.L0,
+                    passed=True,
+                    checks=("route_l0_valid",),
+                ),
+                ValidationEvidenceV2(
+                    validator_id=validation_module.WHEEL_ROUTE_L1_VALIDATOR_ID_V2,
+                    level=ValidationLevelV2.L1,
+                    passed=True,
+                    checks=("route_l1_valid",),
+                ),
+                l2.evidence,
+            ),
+            l2_result=l2,
+            cache_hits=0,
+            cache_misses=0,
+        )
+
+
+def test_unexpected_l2_runtime_error_propagates(monkeypatch) -> None:
+    profile = _profile()
+    snapshot = _snapshot()
+    primitive = _primitive(profile)
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("unexpected-l2-sentinel")
+
+    monkeypatch.setattr(validation_module, "validate_route_l2", explode)
+    with pytest.raises(RuntimeError, match="unexpected-l2-sentinel"):
+        validate_route(
+            _route(primitive),
+            FineSafetyAnchorV2(snapshot),
+            profile,
+            ValidationLevelV2.L2,
+            request=_request(snapshot, profile, primitive),
+            deadline=_deadline(),
+        )
+
+
+def test_wrong_l2_return_type_is_rejected(monkeypatch) -> None:
+    profile = _profile()
+    snapshot = _snapshot()
+    primitive = _primitive(profile)
+    monkeypatch.setattr(validation_module, "validate_route_l2", lambda *_args: object())
+
+    with pytest.raises(TypeError, match="exact WheelValidationResultV2"):
+        validate_route(
+            _route(primitive),
+            FineSafetyAnchorV2(snapshot),
+            profile,
+            ValidationLevelV2.L2,
+            request=_request(snapshot, profile, primitive),
+            deadline=_deadline(),
+        )
 
 
 def test_real_wheel_l2_rejection_is_never_downgraded() -> None:
@@ -437,8 +650,8 @@ def test_cache_on_off_decisions_match_and_second_run_has_real_hits() -> None:
     assert _decision(cache_off) == _decision(first) == _decision(second)
     assert cache_off.cache_hits == cache_off.cache_misses == 0
     assert first.cache_hits == 0
-    assert first.cache_misses == 2
-    assert second.cache_hits == 2
+    assert first.cache_misses == 1
+    assert second.cache_hits == 1
     assert second.cache_misses == 0
 
 
@@ -479,9 +692,78 @@ def test_preloaded_wrong_l1_evidence_cannot_change_the_decision() -> None:
         cache=cache,
     )
 
-    assert cache_on.cache_hits == 1
+    assert cache_on.cache_hits == 0
+    assert cache_on.cache_misses == 1
     assert _decision(cache_on) == _decision(cache_off)
     assert cache_on.reason_code == "terrain_unknown"
+
+    second = validate_route(
+        route,
+        anchor,
+        profile,
+        ValidationLevelV2.L1,
+        cache=cache,
+    )
+    assert second.cache_hits == 1
+    assert second.cache_misses == 0
+    assert _decision(second) == _decision(cache_off)
+
+
+def test_second_run_skips_the_verified_cached_l1_validator(monkeypatch) -> None:
+    profile = _profile()
+    snapshot = _snapshot()
+    route = _route(_primitive(profile))
+    anchor = FineSafetyAnchorV2(snapshot)
+    cache = ValidationCacheV2()
+    first = validate_route(
+        route,
+        anchor,
+        profile,
+        ValidationLevelV2.L1,
+        cache=cache,
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("verified L1 cache hit must skip fresh validation")
+
+    monkeypatch.setattr(validation_module, "_validate_route_l1", forbidden)
+    second = validate_route(
+        route,
+        anchor,
+        profile,
+        ValidationLevelV2.L1,
+        cache=cache,
+    )
+
+    assert first.cache_misses == 1
+    assert second.cache_hits == 1
+    assert _decision(second) == _decision(first)
+
+
+def test_shared_cache_counters_do_not_pollute_per_call_telemetry(monkeypatch) -> None:
+    profile = _profile()
+    snapshot = _snapshot()
+    route = _route(_primitive(profile))
+    anchor = FineSafetyAnchorV2(snapshot)
+    cache = ValidationCacheV2()
+    original = validation_module._validate_route_l1
+
+    def polluting(*args, **kwargs):
+        assert cache.get(object()) is None
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(validation_module, "_validate_route_l1", polluting)
+    result = validate_route(
+        route,
+        anchor,
+        profile,
+        ValidationLevelV2.L1,
+        cache=cache,
+    )
+
+    assert cache.miss_count > result.cache_misses
+    assert result.cache_hits == 0
+    assert result.cache_misses == 1
 
 
 def test_whole_route_l2_is_never_reused_from_primitive_cache(monkeypatch) -> None:
@@ -522,7 +804,7 @@ def test_whole_route_l2_is_never_reused_from_primitive_cache(monkeypatch) -> Non
 
     assert calls == 2
     assert _decision(first) == _decision(second)
-    assert second.cache_hits == 2
+    assert second.cache_hits == 1
 
 
 @pytest.mark.parametrize("value", [True, nan, 10**400])
@@ -582,7 +864,7 @@ def test_profile_and_primitive_drift_do_not_share_cached_evidence() -> None:
         route,
         FineSafetyAnchorV2(snapshot),
         profile,
-        ValidationLevelV2.L0,
+        ValidationLevelV2.L1,
         cache=cache,
     )
     changed_profile = replace(profile, max_speed_mps=0.5)
@@ -590,10 +872,11 @@ def test_profile_and_primitive_drift_do_not_share_cached_evidence() -> None:
         route,
         FineSafetyAnchorV2(snapshot),
         changed_profile,
-        ValidationLevelV2.L0,
+        ValidationLevelV2.L1,
         cache=cache,
     )
 
     assert first.cache_misses == 1
     assert changed.cache_hits == 0
     assert changed.cache_misses == 1
+    assert changed.reason_code == "wheel_speed_limit_exceeded"

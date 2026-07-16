@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import Lock
 
 from path_planner.v2.contracts import ValidationEvidenceV2, ValidationLevelV2
 from path_planner.v2.serialization import canonical_json_bytes
@@ -149,37 +150,49 @@ class ValidationCacheV2:
         init=False,
         repr=False,
     )
+    _verified_entries: dict[bytes, ValidationEvidenceV2] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
     _hit_count: int = field(default=0, init=False, repr=False)
     _miss_count: int = field(default=0, init=False, repr=False)
+    _lock: object = field(default_factory=Lock, init=False, repr=False)
 
     @property
     def hit_count(self) -> int:
-        return self._hit_count
+        with self._lock:
+            return self._hit_count
 
     @property
     def miss_count(self) -> int:
-        return self._miss_count
+        with self._lock:
+            return self._miss_count
 
     @property
     def entry_count(self) -> int:
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries.keys() | self._verified_entries.keys())
 
     def get(self, key: object) -> ValidationEvidenceV2 | None:
         canonical = _canonical_key_bytes(key)
-        if canonical is None:
-            self._miss_count += 1
-            return None
-        stored = self._entries.get(canonical)
-        if stored is None:
-            self._miss_count += 1
-            return None
-        try:
-            copied = _copy_evidence(stored)
-        except (TypeError, ValueError):
-            self._miss_count += 1
-            return None
-        self._hit_count += 1
-        return copied
+        with self._lock:
+            if canonical is None:
+                self._miss_count += 1
+                return None
+            stored = self._verified_entries.get(canonical)
+            if stored is None:
+                stored = self._entries.get(canonical)
+            if stored is None:
+                self._miss_count += 1
+                return None
+            try:
+                copied = _copy_evidence(stored)
+            except (TypeError, ValueError):
+                self._miss_count += 1
+                return None
+            self._hit_count += 1
+            return copied
 
     def put(self, key: object, evidence: object) -> None:
         canonical = _canonical_key_bytes(key)
@@ -190,9 +203,50 @@ class ValidationCacheV2:
             raise ValueError("evidence level must match complete cache key level")
         if _is_transient(copied):
             raise ValueError("transient validation evidence is not cacheable")
-        existing = self._entries.get(canonical)
-        if existing is None:
-            self._entries[canonical] = copied
-            return
-        if existing != copied:
-            raise ValueError("conflicting validation evidence for complete cache key")
+        with self._lock:
+            existing = self._verified_entries.get(canonical)
+            if existing is None:
+                existing = self._entries.get(canonical)
+            if existing is None:
+                self._entries[canonical] = copied
+                return
+            if existing != copied:
+                raise ValueError("conflicting validation evidence for complete cache key")
+
+    def _resolve_verified(
+        self,
+        key: object,
+    ) -> tuple[ValidationEvidenceV2 | None, bool]:
+        canonical = _canonical_key_bytes(key)
+        with self._lock:
+            if canonical is None:
+                self._miss_count += 1
+                return None, False
+            stored = self._verified_entries.get(canonical)
+            if stored is None:
+                self._miss_count += 1
+                return None, False
+            try:
+                copied = _copy_evidence(stored)
+            except (TypeError, ValueError):
+                self._miss_count += 1
+                return None, False
+            self._hit_count += 1
+            return copied, True
+
+    def _store_verified(self, key: object, evidence: object) -> None:
+        canonical = _canonical_key_bytes(key)
+        if canonical is None:
+            raise ValueError("complete cache key is required")
+        copied = _copy_evidence(evidence)
+        if copied.level is not key.validation_level:
+            raise ValueError("evidence level must match complete cache key level")
+        if _is_transient(copied):
+            raise ValueError("transient validation evidence is not cacheable")
+        with self._lock:
+            existing = self._verified_entries.get(canonical)
+            if existing is None:
+                self._verified_entries[canonical] = copied
+                return
+            if existing != copied:
+                raise ValueError("conflicting verified evidence for complete cache key")

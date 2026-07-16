@@ -1,4 +1,7 @@
 from dataclasses import FrozenInstanceError
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from time import sleep
 
 import pytest
 
@@ -172,6 +175,40 @@ def test_identical_replay_is_idempotent_and_conflict_is_rejected() -> None:
             _evidence(passed=False, check="terrain_unknown"),
         )
     assert cache.entry_count == 1
+
+
+def test_concurrent_conflicting_put_has_one_winner_and_one_rejection() -> None:
+    class RacingDict(dict):
+        def get(self, key, default=None):
+            result = super().get(key, default)
+            sleep(0.05)
+            return result
+
+    cache = ValidationCacheV2()
+    cache._entries = RacingDict()
+    assert hasattr(cache, "_lock")
+    key = _key()
+    passed = _evidence()
+    rejected = _evidence(passed=False, check="terrain_unknown")
+    barrier = Barrier(2)
+
+    def write(evidence):
+        barrier.wait()
+        try:
+            cache.put(key, evidence)
+        except ValueError:
+            return ("rejected", evidence)
+        return ("stored", evidence)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(write, (passed, rejected)))
+
+    winners = tuple(evidence for status, evidence in outcomes if status == "stored")
+    failures = tuple(evidence for status, evidence in outcomes if status == "rejected")
+    assert len(winners) == 1
+    assert len(failures) == 1
+    assert cache.entry_count == 1
+    assert cache.get(key) == winners[0]
 
 
 def test_cache_defensively_copies_evidence_on_write_and_read() -> None:

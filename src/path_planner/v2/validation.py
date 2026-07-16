@@ -248,6 +248,38 @@ class RouteValidationResultV2:
             ),
         ):
             raise ValueError("stage_evidence must be contiguous L0 to L2 evidence")
+        expected_stage_contracts = (
+            (
+                WHEEL_ROUTE_L0_VALIDATOR_ID_V2,
+                "route_l0_valid",
+                "L0 validator identity or pass reason is invalid",
+            ),
+            (
+                WHEEL_ROUTE_L1_VALIDATOR_ID_V2,
+                "route_l1_valid",
+                "L1 validator identity or pass reason is invalid",
+            ),
+            (
+                WHEEL_ROUTE_VALIDATOR_ID_V2,
+                "route_l2_valid",
+                "route L2 validator identity or pass reason is invalid",
+            ),
+        )
+        for evidence, (validator_id, pass_reason, message) in zip(
+            self.stage_evidence,
+            expected_stage_contracts[: len(self.stage_evidence)],
+            strict=True,
+        ):
+            if (
+                type(evidence.validator_id) is not str
+                or evidence.validator_id != validator_id
+                or type(evidence.passed) is not bool
+                or type(evidence.checks) is not tuple
+                or len(evidence.checks) != 1
+                or type(evidence.checks[0]) is not str
+                or (evidence.passed and evidence.checks[0] != pass_reason)
+            ):
+                raise ValueError(message)
         if any(not evidence.passed for evidence in self.stage_evidence[:-1]):
             raise ValueError("validation cannot continue after a rejected earlier stage")
         for name in ("cache_hits", "cache_misses"):
@@ -264,8 +296,18 @@ class RouteValidationResultV2:
                 raise ValueError("reason_code must preserve the L2 result reason")
             if self.success is not self.l2_result.evidence.passed:
                 raise ValueError("success must agree with authoritative L2 evidence")
+            if self.success:
+                if self.route.is_complete is not True:
+                    raise ValueError("successful route must be complete")
+                if any(
+                    primitive.validation_level is not ValidationLevelV2.L2
+                    for primitive in self.route.primitives
+                ):
+                    raise ValueError("successful route primitives must all be L2")
             return
 
+        if levels[-1] is ValidationLevelV2.L2:
+            raise ValueError("L2 stage requires l2_result")
         if self.success:
             raise ValueError("success requires an authoritative L2 result")
         final_evidence = self.stage_evidence[-1]
@@ -2008,43 +2050,27 @@ def validate_route(
     if cache is not None and type(cache) is not ValidationCacheV2:
         raise TypeError("cache must be exact ValidationCacheV2 or None")
 
-    start_hits = 0 if cache is None else cache.hit_count
-    start_misses = 0 if cache is None else cache.miss_count
+    local_cache_hits = 0
+    local_cache_misses = 0
 
     def finish(
         reason_code: str,
         evidence: tuple[ValidationEvidenceV2, ...],
         *,
         l2_result: WheelValidationResultV2 | None = None,
+        result_route: TypedRouteV2 | None = None,
     ) -> RouteValidationResultV2:
-        hits = 0 if cache is None else cache.hit_count - start_hits
-        misses = 0 if cache is None else cache.miss_count - start_misses
         return RouteValidationResultV2(
-            route=route,
+            route=route if result_route is None else result_route,
             success=l2_result is not None and l2_result.evidence.passed,
             reason_code=reason_code,
             stage_evidence=evidence,
             l2_result=l2_result,
-            cache_hits=hits,
-            cache_misses=misses,
+            cache_hits=local_cache_hits,
+            cache_misses=local_cache_misses,
         )
 
-    l0_fresh = _validate_route_l0(route, anchor, profile)
-    l0 = l0_fresh
-    l0_key = _lazy_cache_key(route, anchor, profile, ValidationLevelV2.L0)
-    if cache is not None and l0_key is not None:
-        cached = cache.get(l0_key)
-        if (
-            cached is not None
-            and _cached_evidence_is_compatible(cached, ValidationLevelV2.L0)
-            and cached == l0_fresh
-        ):
-            l0 = cached
-        elif cached is None:
-            try:
-                cache.put(l0_key, l0_fresh)
-            except (TypeError, ValueError):
-                pass
+    l0 = _validate_route_l0(route, anchor, profile)
     evidence = (l0,)
     if not l0.passed:
         return finish(l0.checks[0], evidence)
@@ -2052,19 +2078,23 @@ def validate_route(
         return finish("route_requires_l2_validation", evidence)
 
     l1_key = _lazy_cache_key(route, anchor, profile, ValidationLevelV2.L1)
-    l1_fresh = _validate_route_l1(route, anchor, profile)
-    l1 = l1_fresh
+    l1: ValidationEvidenceV2 | None = None
     if cache is not None and l1_key is not None:
-        cached = cache.get(l1_key)
+        cached, trusted_hit = cache._resolve_verified(l1_key)
         if (
-            cached is not None
+            trusted_hit
+            and cached is not None
             and _cached_evidence_is_compatible(cached, ValidationLevelV2.L1)
-            and cached == l1_fresh
         ):
             l1 = cached
-        elif cached is None:
+            local_cache_hits += 1
+        else:
+            local_cache_misses += 1
+    if l1 is None:
+        l1 = _validate_route_l1(route, anchor, profile)
+        if cache is not None and l1_key is not None:
             try:
-                cache.put(l1_key, l1_fresh)
+                cache._store_verified(l1_key, l1)
             except (TypeError, ValueError):
                 pass
     evidence = (*evidence, l1)
@@ -2075,17 +2105,24 @@ def validate_route(
 
     if type(request) is not PlanningRequestV2 or type(deadline) is not PlanningDeadlineV2:
         return finish("route_l2_authority_unavailable", evidence)
-    try:
-        l2 = validate_route_l2(route, request, anchor, profile, deadline)
-    except Exception:
-        l2 = _result(
-            WHEEL_ROUTE_VALIDATOR_ID_V2,
-            "planning_deadline_contract_mismatch",
-        )
+    l2 = validate_route_l2(route, request, anchor, profile, deadline)
     if type(l2) is not WheelValidationResultV2:
-        l2 = _result(
-            WHEEL_ROUTE_VALIDATOR_ID_V2,
-            "planning_deadline_contract_mismatch",
+        raise TypeError(
+            "validate_route_l2 must return exact WheelValidationResultV2"
         )
     evidence = (*evidence, l2.evidence)
-    return finish(l2.reason_code, evidence, l2_result=l2)
+    result_route = route
+    if l2.evidence.passed:
+        primitives_l2 = tuple(
+            primitive
+            if primitive.validation_level is ValidationLevelV2.L2
+            else replace(primitive, validation_level=ValidationLevelV2.L2)
+            for primitive in route.primitives
+        )
+        result_route = replace(route, primitives=primitives_l2)
+    return finish(
+        l2.reason_code,
+        evidence,
+        l2_result=l2,
+        result_route=result_route,
+    )
