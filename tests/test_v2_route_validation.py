@@ -1707,3 +1707,66 @@ def test_moving_primitive_renamed_hold_keeps_full_sweep_and_terrain_priority() -
     assert result.failed_cell == blocked
     assert result.failed_primitive_index == 0
     assert result.checked_cell_count == len(sweep_cells)
+
+
+class _ExecutableInt(int):
+    def __float__(self):
+        raise RuntimeError("untrusted numeric protocol executed")
+
+
+@pytest.mark.parametrize("entry_point", ["route", "transition"])
+def test_executable_numeric_subclass_is_rejected_without_protocol_call(
+    entry_point,
+) -> None:
+    profile, _, _, primitive, transition = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    if entry_point == "route":
+        object.__setattr__(primitive, "v_mps", _ExecutableInt(1))
+        result = validate_route_l2(
+            _route(primitive),
+            _request(snapshot, profile, primitive.start_state, primitive.end_state),
+            FineSafetyAnchorV2(snapshot),
+            profile,
+            _deadline(),
+        )
+    else:
+        object.__setattr__(transition.primitive, "v_mps", _ExecutableInt(1))
+        result = validate_wheel_transition_l2(
+            transition,
+            FineSafetyAnchorV2(snapshot),
+            profile,
+            _deadline(),
+        )
+
+    assert result.reason_code == "primitive_structure_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
+
+
+class _ExecutableStr(str):
+    def strip(self, *_args, **_kwargs):
+        raise RuntimeError("untrusted string strip executed")
+
+    def __eq__(self, _other):
+        raise RuntimeError("untrusted string equality executed")
+
+    def __ne__(self, _other):
+        raise RuntimeError("untrusted string inequality executed")
+
+
+def test_executable_control_name_subclass_is_rejected_without_protocol_call() -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    object.__setattr__(primitive, "control_name", _ExecutableStr("forward"))
+
+    result = validate_route_l2(
+        _route(primitive),
+        _request(snapshot, profile, primitive.start_state, primitive.end_state),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "primitive_structure_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count > 0

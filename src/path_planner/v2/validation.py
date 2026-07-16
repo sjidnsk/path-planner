@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from math import hypot, isclose, isfinite, pi, remainder
-from numbers import Real
 
 import numpy as np
 
@@ -339,7 +338,7 @@ class _DeadlineContractError(RuntimeError):
 
 
 def _finite_real(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, Real):
+    if type(value) not in (int, float):
         raise TypeError(f"{name} must be a finite real number")
     try:
         normalized = float(value)
