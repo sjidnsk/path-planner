@@ -1573,3 +1573,97 @@ def test_validation_result_rejects_inconsistent_terrain_failure_metadata(
             failed_primitive_index=failed_index,
             checked_cell_count=checked_count,
         )
+
+
+class _EvilTuple(tuple):
+    def __len__(self):
+        raise RuntimeError("untrusted tuple length executed")
+
+    def __iter__(self):
+        raise RuntimeError("untrusted tuple iteration executed")
+
+    def __eq__(self, _other):
+        raise RuntimeError("untrusted tuple equality executed")
+
+    def __ne__(self, _other):
+        raise RuntimeError("untrusted tuple inequality executed")
+
+
+def test_nonexact_samples_tuple_never_executes_untrusted_tuple_protocol() -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    object.__setattr__(primitive, "samples", _EvilTuple(primitive.samples))
+
+    result = validate_route_l2(
+        _route(primitive),
+        _request(snapshot, profile, primitive.start_state, primitive.end_state),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "primitive_replay_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count > 0
+
+
+def test_nonhold_missing_start_coordinate_fails_without_attribute_leak() -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    request_start = replace(primitive.start_state)
+    request_goal = replace(primitive.end_state)
+    object.__delattr__(primitive.start_state, "x_m")
+
+    result = validate_route_l2(
+        _route(primitive),
+        _request(snapshot, profile, request_start, request_goal),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "primitive_structure_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
+
+
+def test_hold_missing_start_coordinate_fails_without_attribute_leak() -> None:
+    profile = _wheel_profile()
+    state = PoseStateV2(1.25, 1.25, 0.0)
+    request_state = replace(state)
+    hold = _hold(state)
+    snapshot = _snapshot()
+    object.__delattr__(hold.start_state, "x_m")
+
+    result = validate_route_l2(
+        _route(hold),
+        _request(snapshot, profile, request_state, request_state),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "primitive_hold_contract_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
+
+
+@pytest.mark.parametrize("field_name", ["samples", "control_name"])
+def test_missing_nonhold_field_is_sanitized_before_primitive_audit(field_name) -> None:
+    profile, _, _, primitive, _ = _straight_fixture(duration_s=1.0)
+    snapshot = _snapshot()
+    request_start = replace(primitive.start_state)
+    request_goal = replace(primitive.end_state)
+    object.__delattr__(primitive, field_name)
+
+    result = validate_route_l2(
+        _route(primitive),
+        _request(snapshot, profile, request_start, request_goal),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+
+    assert result.reason_code == "primitive_structure_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count > 0

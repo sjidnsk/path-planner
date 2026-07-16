@@ -215,6 +215,109 @@ class _AuditedMotion:
     reason_code: str | None
 
 
+_MISSING_FIELD = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _PublicTransitionFields:
+    start: object
+    primitive: object
+    samples: object
+    end: object
+    distance_m: object
+    absolute_heading_change_rad: object
+
+
+@dataclass(frozen=True, slots=True)
+class _MotionControlFields:
+    name: object
+    v_mps: object
+    omega_radps: object
+    duration_s: object
+    reverse: object
+    turn_in_place: object
+
+
+@dataclass(frozen=True, slots=True)
+class _TypedPrimitiveFields:
+    kind: object
+    start_state: object
+    end_state: object
+    duration_s: object
+    distance_m: object
+    energy_cost: object
+    observation_contribution: object
+    validation_level: object
+    control_name: object
+    samples: object
+    v_mps: object
+    omega_radps: object
+    reverse: object
+    turn_in_place: object
+
+
+def _read_untrusted_field(instance: object, name: str) -> object:
+    try:
+        return getattr(instance, name)
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
+        return _MISSING_FIELD
+
+
+def _read_public_transition_fields(
+    transition: PoseTransition,
+) -> _PublicTransitionFields:
+    return _PublicTransitionFields(
+        start=_read_untrusted_field(transition, "start"),
+        primitive=_read_untrusted_field(transition, "primitive"),
+        samples=_read_untrusted_field(transition, "samples"),
+        end=_read_untrusted_field(transition, "end"),
+        distance_m=_read_untrusted_field(transition, "distance_m"),
+        absolute_heading_change_rad=_read_untrusted_field(
+            transition,
+            "absolute_heading_change_rad",
+        ),
+    )
+
+
+def _read_motion_control_fields(primitive: MotionPrimitive) -> _MotionControlFields:
+    return _MotionControlFields(
+        name=_read_untrusted_field(primitive, "name"),
+        v_mps=_read_untrusted_field(primitive, "v_mps"),
+        omega_radps=_read_untrusted_field(primitive, "omega_radps"),
+        duration_s=_read_untrusted_field(primitive, "duration_s"),
+        reverse=_read_untrusted_field(primitive, "reverse"),
+        turn_in_place=_read_untrusted_field(primitive, "turn_in_place"),
+    )
+
+
+def _read_typed_primitive_fields(
+    primitive: WheelMotionPrimitiveV2,
+) -> _TypedPrimitiveFields:
+    return _TypedPrimitiveFields(
+        kind=_read_untrusted_field(primitive, "kind"),
+        start_state=_read_untrusted_field(primitive, "start_state"),
+        end_state=_read_untrusted_field(primitive, "end_state"),
+        duration_s=_read_untrusted_field(primitive, "duration_s"),
+        distance_m=_read_untrusted_field(primitive, "distance_m"),
+        energy_cost=_read_untrusted_field(primitive, "energy_cost"),
+        observation_contribution=_read_untrusted_field(
+            primitive,
+            "observation_contribution",
+        ),
+        validation_level=_read_untrusted_field(primitive, "validation_level"),
+        control_name=_read_untrusted_field(primitive, "control_name"),
+        samples=_read_untrusted_field(primitive, "samples"),
+        v_mps=_read_untrusted_field(primitive, "v_mps"),
+        omega_radps=_read_untrusted_field(primitive, "omega_radps"),
+        reverse=_read_untrusted_field(primitive, "reverse"),
+        turn_in_place=_read_untrusted_field(primitive, "turn_in_place"),
+    )
+
+
+def _fields_missing(*values: object) -> bool:
+    return any(value is _MISSING_FIELD for value in values)
+
+
 @dataclass(frozen=True, slots=True)
 class _TerrainFailure:
     reason_code: str
@@ -512,7 +615,7 @@ def _declared_route_state_overflow(
         _raise_if_deadline_expired(deadline)
         declared_count = 0
         if type(primitive) is WheelMotionPrimitiveV2:
-            samples = primitive.samples
+            samples = _read_untrusted_field(primitive, "samples")
             if type(samples) is tuple:
                 declared_count = len(samples)
                 if declared_count > _MAX_DECLARED_ROUTE_STATES:
@@ -641,9 +744,18 @@ def _audit_public_transition(
     wheel_profile: WheelProfileV2,
     deadline: PlanningDeadlineV2,
 ) -> _AuditedMotion:
+    fields = _read_public_transition_fields(transition)
+    transition_fields_missing = _fields_missing(
+        fields.start,
+        fields.primitive,
+        fields.samples,
+        fields.end,
+        fields.distance_m,
+        fields.absolute_heading_change_rad,
+    )
     try:
-        start = _pose_from_public_pose(transition.start)
-    except (AttributeError, TypeError, ValueError):
+        start = _pose_from_public_pose(fields.start)
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
         return _AuditedMotion(
             0,
             None,
@@ -655,7 +767,7 @@ def _audit_public_transition(
             "primitive_structure_mismatch",
         )
 
-    primitive = transition.primitive
+    primitive = fields.primitive
     if type(primitive) is not MotionPrimitive:
         return _AuditedMotion(
             0,
@@ -667,20 +779,31 @@ def _audit_public_transition(
             0,
             "primitive_structure_mismatch",
         )
+    control_fields = _read_motion_control_fields(primitive)
+    control_fields_missing = _fields_missing(
+        control_fields.name,
+        control_fields.v_mps,
+        control_fields.omega_radps,
+        control_fields.duration_s,
+        control_fields.reverse,
+        control_fields.turn_in_place,
+    )
     control, reason = _new_control(
-        primitive.name,
-        primitive.v_mps,
-        primitive.omega_radps,
-        primitive.duration_s,
-        primitive.reverse,
-        primitive.turn_in_place,
+        control_fields.name,
+        control_fields.v_mps,
+        control_fields.omega_radps,
+        control_fields.duration_s,
+        control_fields.reverse,
+        control_fields.turn_in_place,
         wheel_profile,
     )
+    if transition_fields_missing or control_fields_missing:
+        reason = "primitive_structure_mismatch"
     if control is None:
         return _AuditedMotion(0, start, None, None, False, None, 0, reason)
     replay = _replay(start, control, wheel_profile, deadline)
     try:
-        declared_samples = transition.samples
+        declared_samples = fields.samples
         exact_samples = (
             type(declared_samples) is tuple
             and len(declared_samples) == len(replay.samples)
@@ -701,13 +824,13 @@ def _audit_public_transition(
                     exact_samples = False
                     break
         try:
-            declared_end = _pose_from_public_pose(transition.end)
+            declared_end = _pose_from_public_pose(fields.end)
             exact_end = _poses_equal(declared_end, replay.end)
         except _EXPECTED_CONTRACT_EXCEPTIONS:
             exact_end = False
-        distance = _finite_real(transition.distance_m, "transition distance_m")
+        distance = _finite_real(fields.distance_m, "transition distance_m")
         heading_change = _finite_real(
-            transition.absolute_heading_change_rad,
+            fields.absolute_heading_change_rad,
             "transition absolute_heading_change_rad",
         )
         replay_matches = (
@@ -742,13 +865,13 @@ def _audit_public_transition(
 
 
 def _audit_hold(
-    primitive: WheelMotionPrimitiveV2,
+    fields: _TypedPrimitiveFields,
     index: int,
     deadline: PlanningDeadlineV2,
 ) -> _AuditedMotion:
     try:
-        start = _pose_from_state(primitive.start_state)
-    except (TypeError, ValueError):
+        start = _pose_from_state(fields.start_state)
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
         return _AuditedMotion(
             index,
             None,
@@ -761,33 +884,33 @@ def _audit_hold(
         )
     try:
         _raise_if_deadline_expired(deadline)
-        samples = primitive.samples
+        samples = fields.samples
         sample = (
             _pose_from_state(samples[0])
             if type(samples) is tuple and len(samples) == 1
             else None
         )
-        end = _pose_from_state(primitive.end_state)
+        end = _pose_from_state(fields.end_state)
         valid = (
-            primitive.kind is PrimitiveKindV2.WHEEL_MOTION
-            and type(primitive.control_name) is str
-            and primitive.control_name == "hold"
+            fields.kind is PrimitiveKindV2.WHEEL_MOTION
+            and type(fields.control_name) is str
+            and fields.control_name == "hold"
             and sample is not None
             and _poses_equal(sample, start)
             and _poses_equal(end, start)
-            and _finite_real(primitive.duration_s, "hold duration_s") == 0.0
-            and _finite_real(primitive.distance_m, "hold distance_m") == 0.0
-            and _finite_real(primitive.energy_cost, "hold energy_cost") == 0.0
+            and _finite_real(fields.duration_s, "hold duration_s") == 0.0
+            and _finite_real(fields.distance_m, "hold distance_m") == 0.0
+            and _finite_real(fields.energy_cost, "hold energy_cost") == 0.0
             and _finite_real(
-                primitive.observation_contribution,
+                fields.observation_contribution,
                 "hold observation_contribution",
             )
             >= 0.0
-            and _finite_real(primitive.v_mps, "hold v_mps") == 0.0
-            and _finite_real(primitive.omega_radps, "hold omega_radps") == 0.0
-            and primitive.reverse is False
-            and primitive.turn_in_place is False
-            and primitive.validation_level is ValidationLevelV2.L2
+            and _finite_real(fields.v_mps, "hold v_mps") == 0.0
+            and _finite_real(fields.omega_radps, "hold omega_radps") == 0.0
+            and fields.reverse is False
+            and fields.turn_in_place is False
+            and fields.validation_level is ValidationLevelV2.L2
         )
     except _DeadlineContractError:
         raise
@@ -824,12 +947,20 @@ def _audit_typed_primitive(
             0,
             "wheel_primitive_type_mismatch",
         )
-    if type(primitive.samples) is tuple and len(primitive.samples) == 1:
-        return _audit_hold(primitive, index, deadline)
+    fields = _read_typed_primitive_fields(primitive)
+    samples = fields.samples
+    declared_count = len(samples) if type(samples) is tuple else 0
+    declared_hold = (
+        type(samples) is tuple and declared_count == 1
+    ) or (
+        type(fields.control_name) is str and fields.control_name == "hold"
+    )
+    if declared_hold:
+        return _audit_hold(fields, index, deadline)
 
     try:
-        start = _pose_from_state(primitive.start_state)
-    except (TypeError, ValueError):
+        start = _pose_from_state(fields.start_state)
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
         return _AuditedMotion(
             index,
             None,
@@ -841,31 +972,47 @@ def _audit_typed_primitive(
             "primitive_structure_mismatch",
         )
     control, reason = _new_control(
-        primitive.control_name,
-        primitive.v_mps,
-        primitive.omega_radps,
-        primitive.duration_s,
-        primitive.reverse,
-        primitive.turn_in_place,
+        fields.control_name,
+        fields.v_mps,
+        fields.omega_radps,
+        fields.duration_s,
+        fields.reverse,
+        fields.turn_in_place,
         wheel_profile,
     )
-    if primitive.kind is not PrimitiveKindV2.WHEEL_MOTION:
+    if _fields_missing(
+        fields.kind,
+        fields.start_state,
+        fields.end_state,
+        fields.duration_s,
+        fields.distance_m,
+        fields.energy_cost,
+        fields.observation_contribution,
+        fields.validation_level,
+        fields.control_name,
+        fields.samples,
+        fields.v_mps,
+        fields.omega_radps,
+        fields.reverse,
+        fields.turn_in_place,
+    ):
+        reason = "primitive_structure_mismatch"
+    if fields.kind is not PrimitiveKindV2.WHEEL_MOTION:
         reason = reason or "primitive_structure_mismatch"
     try:
         if (
-            _finite_real(primitive.distance_m, "distance_m") < 0.0
-            or _finite_real(primitive.energy_cost, "energy_cost") < 0.0
+            _finite_real(fields.distance_m, "distance_m") < 0.0
+            or _finite_real(fields.energy_cost, "energy_cost") < 0.0
             or _finite_real(
-                primitive.observation_contribution,
+                fields.observation_contribution,
                 "observation_contribution",
             )
             < 0.0
         ):
             reason = reason or "primitive_structure_mismatch"
-    except (TypeError, ValueError):
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
         reason = reason or "primitive_structure_mismatch"
     if control is None:
-        declared_count = len(primitive.samples) if isinstance(primitive.samples, tuple) else 0
         return _AuditedMotion(
             index,
             start,
@@ -881,8 +1028,7 @@ def _audit_typed_primitive(
         replay = _replay(start, control, wheel_profile, deadline)
     except TimeoutError:
         raise
-    except (TypeError, ValueError):
-        declared_count = len(primitive.samples) if isinstance(primitive.samples, tuple) else 0
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
         return _AuditedMotion(
             index,
             start,
@@ -894,7 +1040,7 @@ def _audit_typed_primitive(
             reason or "primitive_replay_mismatch",
         )
     try:
-        declared_samples = primitive.samples
+        declared_samples = samples
         replay_matches = (
             type(declared_samples) is tuple
             and len(declared_samples) == len(replay.samples)
@@ -915,7 +1061,7 @@ def _audit_typed_primitive(
                     replay_matches = False
                     break
         try:
-            declared_end = _pose_from_state(primitive.end_state)
+            declared_end = _pose_from_state(fields.end_state)
             end_matches = _poses_equal(declared_end, replay.end)
         except _EXPECTED_CONTRACT_EXCEPTIONS:
             end_matches = False
@@ -923,7 +1069,7 @@ def _audit_typed_primitive(
             replay_matches
             and end_matches
             and isclose(
-                _finite_real(primitive.distance_m, "distance_m"),
+                _finite_real(fields.distance_m, "distance_m"),
                 replay.distance_m,
                 rel_tol=1.0e-12,
                 abs_tol=1.0e-12,
@@ -936,8 +1082,8 @@ def _audit_typed_primitive(
     except _EXPECTED_CONTRACT_EXCEPTIONS:
         replay_matches = False
     if (
-        type(primitive.control_name) is str
-        and primitive.control_name == "hold"
+        type(fields.control_name) is str
+        and fields.control_name == "hold"
     ) or not replay_matches:
         reason = reason or "primitive_replay_mismatch"
     return _AuditedMotion(
@@ -947,10 +1093,7 @@ def _audit_typed_primitive(
         replay,
         False,
         replay.end,
-        max(
-            len(replay.samples),
-            len(primitive.samples) if isinstance(primitive.samples, tuple) else 0,
-        ),
+        max(len(replay.samples), declared_count),
         reason,
     )
 
