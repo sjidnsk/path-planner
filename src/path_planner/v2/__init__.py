@@ -41,6 +41,18 @@ from path_planner.v2.validation import (
     validate_route_l2,
     validate_wheel_transition_l2,
 )
+from path_planner.v2.benchmark import (
+    HARD_TIMEOUT_MS_V2,
+    ExactMapQualityRowV2,
+    ExactMapQualitySummaryV2,
+    PrimitiveAuditRowV2,
+    PrimitiveAuditSummaryV2,
+    StandardEpisodeRowV2,
+    StandardEpisodeSummaryV2,
+    aggregate_exact_map_quality_v2,
+    aggregate_primitive_audit_v2,
+    aggregate_standard_episodes_v2,
+)
 
 __all__ = [
     "PLANNING_SCHEMA_VERSION_V2",
@@ -49,6 +61,7 @@ __all__ = [
     "CostBreakdownV2",
     "FailureEvidenceV2",
     "FailureCategoryV2",
+    "HARD_TIMEOUT_MS_V2",
     "ObjectiveProfileV2",
     "ObservationProjectionV2",
     "PlanningFailureV2",
@@ -70,6 +83,15 @@ __all__ = [
     "WheelPrimitiveProviderV2",
     "WheelProfileV2",
     "WheelValidationResultV2",
+    "ExactMapQualityRowV2",
+    "ExactMapQualitySummaryV2",
+    "PrimitiveAuditRowV2",
+    "PrimitiveAuditSummaryV2",
+    "StandardEpisodeRowV2",
+    "StandardEpisodeSummaryV2",
+    "aggregate_exact_map_quality_v2",
+    "aggregate_primitive_audit_v2",
+    "aggregate_standard_episodes_v2",
     "canonical_json_bytes",
     "conservative_wheel_pose_cells",
     "conservative_wheel_sweep_cells",
