@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from math import hypot, isclose, isfinite, pi, remainder
 
 import numpy as np
 
-from path_planner.core import Cell
+from path_planner.core import Cell, WorldPoint
 from path_planner.search import (
     MotionPrimitive,
     Pose2D,
@@ -23,6 +24,11 @@ from path_planner.v2.contracts import (
     ValidationEvidenceV2,
     ValidationLevelV2,
 )
+from path_planner.v2.cache import (
+    VALIDATION_CACHE_SCHEMA_VERSION_V2,
+    ValidationCacheKeyV2,
+    ValidationCacheV2,
+)
 from path_planner.v2.geometry import (
     conservative_wheel_pose_cells,
     conservative_wheel_sweep_cells,
@@ -30,6 +36,7 @@ from path_planner.v2.geometry import (
 from path_planner.v2.profiles import PlatformProfileV2, WheelProfileV2
 from path_planner.v2.providers.wheel import WheelMotionPrimitiveV2
 from path_planner.v2.runtime import PlanningDeadlineV2
+from path_planner.v2.serialization import canonical_json_bytes
 from path_planner.v2.terrain import (
     FineGridGeometryV2,
     FineSafetyAnchorV2,
@@ -43,6 +50,8 @@ from path_planner.v2.terrain import (
 
 WHEEL_TRANSITION_VALIDATOR_ID_V2 = "path-planner-v2-wheel-transition-l2/v1"
 WHEEL_ROUTE_VALIDATOR_ID_V2 = "path-planner-v2-wheel-route-l2/v1"
+WHEEL_ROUTE_L0_VALIDATOR_ID_V2 = "path-planner-v2-wheel-route-l0/v1"
+WHEEL_ROUTE_L1_VALIDATOR_ID_V2 = "path-planner-v2-wheel-route-l1/v1"
 _MAX_DECLARED_ROUTE_STATES = MAX_REPLAY_STEPS + 1
 _EXPECTED_CONTRACT_EXCEPTIONS = (
     TypeError,
@@ -200,6 +209,74 @@ class WheelValidationResultV2:
                 raise ValueError("passing evidence cannot carry failure metadata")
             if self.checked_cell_count == 0:
                 raise ValueError("passing L2 evidence must include checked cells")
+
+
+@dataclass(frozen=True, slots=True)
+class RouteValidationResultV2:
+    route: TypedRouteV2
+    success: bool
+    reason_code: str
+    stage_evidence: tuple[ValidationEvidenceV2, ...]
+    l2_result: WheelValidationResultV2 | None
+    cache_hits: int
+    cache_misses: int
+
+    def __post_init__(self) -> None:
+        if type(self.route) is not TypedRouteV2:
+            raise TypeError("route must be exact TypedRouteV2")
+        if type(self.success) is not bool:
+            raise TypeError("success must be exact bool")
+        if type(self.reason_code) is not str or not self.reason_code.strip():
+            raise ValueError("reason_code must be an exact nonempty string")
+        if (
+            type(self.stage_evidence) is not tuple
+            or not self.stage_evidence
+            or any(
+                type(evidence) is not ValidationEvidenceV2
+                for evidence in self.stage_evidence
+            )
+        ):
+            raise TypeError("stage_evidence must contain exact ValidationEvidenceV2 values")
+        levels = tuple(evidence.level for evidence in self.stage_evidence)
+        if levels not in (
+            (ValidationLevelV2.L0,),
+            (ValidationLevelV2.L0, ValidationLevelV2.L1),
+            (
+                ValidationLevelV2.L0,
+                ValidationLevelV2.L1,
+                ValidationLevelV2.L2,
+            ),
+        ):
+            raise ValueError("stage_evidence must be contiguous L0 to L2 evidence")
+        if any(not evidence.passed for evidence in self.stage_evidence[:-1]):
+            raise ValueError("validation cannot continue after a rejected earlier stage")
+        for name in ("cache_hits", "cache_misses"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be an exact nonnegative integer")
+
+        if self.l2_result is not None:
+            if type(self.l2_result) is not WheelValidationResultV2:
+                raise TypeError("l2_result must be exact WheelValidationResultV2 or None")
+            if self.stage_evidence[-1] != self.l2_result.evidence:
+                raise ValueError("L2 stage evidence must match l2_result evidence")
+            if self.reason_code != self.l2_result.reason_code:
+                raise ValueError("reason_code must preserve the L2 result reason")
+            if self.success is not self.l2_result.evidence.passed:
+                raise ValueError("success must agree with authoritative L2 evidence")
+            return
+
+        if self.success:
+            raise ValueError("success requires an authoritative L2 result")
+        final_evidence = self.stage_evidence[-1]
+        if final_evidence.passed:
+            if self.reason_code not in {
+                "route_requires_l2_validation",
+                "route_l2_authority_unavailable",
+            }:
+                raise ValueError("passing pre-L2 stages require a stable incomplete reason")
+        elif self.reason_code != final_evidence.checks[0]:
+            raise ValueError("pre-L2 rejection reason must match final stage evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1575,3 +1652,440 @@ def validate_route_l2(
         passed=True,
         checked_cell_count=checked,
     )
+
+
+def _lazy_evidence(
+    level: ValidationLevelV2,
+    reason_code: str,
+    *,
+    passed: bool = False,
+) -> ValidationEvidenceV2:
+    validator_id = (
+        WHEEL_ROUTE_L0_VALIDATOR_ID_V2
+        if level is ValidationLevelV2.L0
+        else WHEEL_ROUTE_L1_VALIDATOR_ID_V2
+    )
+    return ValidationEvidenceV2(
+        validator_id=validator_id,
+        level=level,
+        passed=passed,
+        checks=(reason_code,),
+    )
+
+
+def _lazy_profile_is_complete(profile: WheelProfileV2) -> bool:
+    return _reaudit_wheel_profile(profile) is not None
+
+
+def _lazy_snapshot_identity(anchor: FineSafetyAnchorV2) -> str | None:
+    try:
+        snapshot = anchor.snapshot
+        if type(snapshot) is not TerrainSnapshotV2:
+            return None
+        if type(snapshot.geometry) is not FineGridGeometryV2:
+            return None
+        digest = snapshot_hash(snapshot)
+        cached = anchor._snapshot_hash
+    except Exception:
+        return None
+    if (
+        type(digest) is not str
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        or type(cached) is not str
+        or cached != digest
+    ):
+        return None
+    return digest
+
+
+def _lazy_primitive_structure_reason(
+    primitive: WheelMotionPrimitiveV2,
+    geometry: FineGridGeometryV2,
+) -> str | None:
+    fields = _read_typed_primitive_fields(primitive)
+    if _fields_missing(
+        fields.kind,
+        fields.start_state,
+        fields.end_state,
+        fields.duration_s,
+        fields.distance_m,
+        fields.energy_cost,
+        fields.observation_contribution,
+        fields.validation_level,
+        fields.control_name,
+        fields.samples,
+        fields.v_mps,
+        fields.omega_radps,
+        fields.reverse,
+        fields.turn_in_place,
+    ):
+        return "primitive_structure_mismatch"
+    if (
+        fields.kind is not PrimitiveKindV2.WHEEL_MOTION
+        or type(fields.validation_level) is not ValidationLevelV2
+        or type(fields.control_name) is not str
+        or not fields.control_name.strip()
+        or type(fields.reverse) is not bool
+        or type(fields.turn_in_place) is not bool
+        or type(fields.samples) is not tuple
+        or not fields.samples
+        or len(fields.samples) > _MAX_DECLARED_ROUTE_STATES
+    ):
+        return "primitive_structure_mismatch"
+    try:
+        duration = _finite_real(fields.duration_s, "duration_s")
+        distance = _finite_real(fields.distance_m, "distance_m")
+        energy = _finite_real(fields.energy_cost, "energy_cost")
+        observation = _finite_real(
+            fields.observation_contribution,
+            "observation_contribution",
+        )
+        speed = _finite_real(fields.v_mps, "v_mps")
+        angular_speed = _finite_real(fields.omega_radps, "omega_radps")
+        start = _pose_from_state(fields.start_state)
+        end = _pose_from_state(fields.end_state)
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
+        return "primitive_structure_mismatch"
+    if min(duration, distance, energy, observation) < 0.0:
+        return "primitive_structure_mismatch"
+
+    normalized_samples: list[Pose2D] = []
+    for sample in fields.samples:
+        try:
+            normalized = _pose_from_state(sample)
+            geometry.world_to_cell(WorldPoint(normalized.x_m, normalized.y_m))
+        except _EXPECTED_CONTRACT_EXCEPTIONS:
+            return "terrain_out_of_bounds"
+        normalized_samples.append(normalized)
+    if (
+        not _poses_equal(normalized_samples[0], start)
+        or not _poses_equal(normalized_samples[-1], end)
+    ):
+        return "primitive_structure_mismatch"
+
+    if len(normalized_samples) == 1:
+        if (
+            fields.control_name != "hold"
+            or not _poses_equal(start, end)
+            or duration != 0.0
+            or distance != 0.0
+            or energy != 0.0
+            or speed != 0.0
+            or angular_speed != 0.0
+            or fields.reverse
+            or fields.turn_in_place
+            or fields.validation_level is not ValidationLevelV2.L2
+        ):
+            return "primitive_structure_mismatch"
+        return None
+    if (
+        fields.control_name == "hold"
+        or duration <= 0.0
+        or (speed == 0.0 and angular_speed == 0.0)
+        or fields.reverse is not (speed < 0.0)
+        or fields.turn_in_place is not (speed == 0.0 and angular_speed != 0.0)
+    ):
+        return "primitive_structure_mismatch"
+    return None
+
+
+def _validate_route_l0(
+    route: TypedRouteV2,
+    anchor: FineSafetyAnchorV2,
+    profile: WheelProfileV2,
+) -> ValidationEvidenceV2:
+    if not _lazy_profile_is_complete(profile):
+        return _lazy_evidence(
+            ValidationLevelV2.L0,
+            "wheel_profile_contract_mismatch",
+        )
+    if _lazy_snapshot_identity(anchor) is None:
+        return _lazy_evidence(
+            ValidationLevelV2.L0,
+            "terrain_snapshot_hash_mismatch",
+        )
+    try:
+        platform_kind = route.platform_kind
+        primitives = route.primitives
+        total_cost = route.total_cost
+        complete = route.is_complete
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
+        return _lazy_evidence(ValidationLevelV2.L0, "route_structure_mismatch")
+    if platform_kind is not PlatformKindV2.WHEEL:
+        return _lazy_evidence(
+            ValidationLevelV2.L0,
+            "wheel_platform_identity_mismatch",
+        )
+    if complete is not True:
+        return _lazy_evidence(ValidationLevelV2.L0, "route_incomplete")
+    if (
+        type(primitives) is not tuple
+        or not primitives
+        or len(primitives) > MAX_REPLAY_STEPS
+    ):
+        return _lazy_evidence(ValidationLevelV2.L0, "route_structure_mismatch")
+    try:
+        if _finite_real(total_cost, "total_cost") < 0.0:
+            raise ValueError("negative total cost")
+    except _EXPECTED_CONTRACT_EXCEPTIONS:
+        return _lazy_evidence(ValidationLevelV2.L0, "route_structure_mismatch")
+
+    previous_end: Pose2D | None = None
+    geometry = anchor.snapshot.geometry
+    for primitive in primitives:
+        if type(primitive) is not WheelMotionPrimitiveV2:
+            return _lazy_evidence(
+                ValidationLevelV2.L0,
+                "wheel_primitive_type_mismatch",
+            )
+        reason = _lazy_primitive_structure_reason(primitive, geometry)
+        if reason is not None:
+            return _lazy_evidence(ValidationLevelV2.L0, reason)
+        try:
+            start = _pose_from_state(primitive.start_state)
+            end = _pose_from_state(primitive.end_state)
+        except _EXPECTED_CONTRACT_EXCEPTIONS:
+            return _lazy_evidence(
+                ValidationLevelV2.L0,
+                "primitive_structure_mismatch",
+            )
+        if previous_end is not None and not _poses_equal(previous_end, start):
+            return _lazy_evidence(
+                ValidationLevelV2.L0,
+                "route_connectivity_mismatch",
+            )
+        previous_end = end
+    return _lazy_evidence(
+        ValidationLevelV2.L0,
+        "route_l0_valid",
+        passed=True,
+    )
+
+
+def _validate_route_l1(
+    route: TypedRouteV2,
+    anchor: FineSafetyAnchorV2,
+    profile: WheelProfileV2,
+) -> ValidationEvidenceV2:
+    expected_snapshot_hash = _lazy_snapshot_identity(anchor)
+    if expected_snapshot_hash is None:
+        return _lazy_evidence(
+            ValidationLevelV2.L1,
+            "terrain_snapshot_hash_mismatch",
+        )
+    for primitive in route.primitives:
+        if len(primitive.samples) > 1:
+            _, reason = _new_control(
+                primitive.control_name,
+                primitive.v_mps,
+                primitive.omega_radps,
+                primitive.duration_s,
+                primitive.reverse,
+                primitive.turn_in_place,
+                profile,
+            )
+            if reason is not None:
+                return _lazy_evidence(ValidationLevelV2.L1, reason)
+        for sample in primitive.samples:
+            try:
+                pose = _pose_from_state(sample)
+                cell = anchor.snapshot.geometry.world_to_cell(
+                    WorldPoint(pose.x_m, pose.y_m)
+                )
+                query = anchor.query(cell, profile.profile.max_traversable_slope_deg)
+                query_cell = query.cell
+                reason_code = query.reason_code
+                query_valid = (
+                    type(query) is SafetyQueryV2
+                    and type(query_cell) is Cell
+                    and type(query_cell.x) is int
+                    and type(query_cell.y) is int
+                    and query_cell == cell
+                    and type(query.passed) is bool
+                    and type(reason_code) is str
+                    and reason_code in _TERRAIN_QUERY_REASON_CODES
+                    and query.passed is (reason_code == "terrain_safe")
+                    and query.validation_level is ValidationLevelV2.L2
+                    and type(query.snapshot_hash) is str
+                    and query.snapshot_hash == expected_snapshot_hash
+                )
+            except Exception:
+                return _lazy_evidence(
+                    ValidationLevelV2.L1,
+                    "lazy_validation_internal_contract_mismatch",
+                )
+            if not query_valid:
+                return _lazy_evidence(
+                    ValidationLevelV2.L1,
+                    "lazy_validation_internal_contract_mismatch",
+                )
+            if reason_code != "terrain_safe":
+                return _lazy_evidence(ValidationLevelV2.L1, reason_code)
+    if _lazy_snapshot_identity(anchor) != expected_snapshot_hash:
+        return _lazy_evidence(
+            ValidationLevelV2.L1,
+            "terrain_snapshot_hash_mismatch",
+        )
+    return _lazy_evidence(
+        ValidationLevelV2.L1,
+        "route_l1_valid",
+        passed=True,
+    )
+
+
+def _lazy_hash(value: object) -> str | None:
+    try:
+        return sha256(canonical_json_bytes(value)).hexdigest()
+    except Exception:
+        return None
+
+
+def _lazy_cache_key(
+    route: TypedRouteV2,
+    anchor: FineSafetyAnchorV2,
+    profile: WheelProfileV2,
+    level: ValidationLevelV2,
+) -> ValidationCacheKeyV2 | None:
+    profile_hash = _lazy_hash(profile)
+    terrain_hash = _lazy_snapshot_identity(anchor)
+    primitive_hash = _lazy_hash(route.primitives)
+    if profile_hash is None or terrain_hash is None or primitive_hash is None:
+        return None
+    try:
+        return ValidationCacheKeyV2(
+            schema_version=VALIDATION_CACHE_SCHEMA_VERSION_V2,
+            platform_profile_hash=profile_hash,
+            terrain_snapshot_hash=terrain_hash,
+            primitive_hash=primitive_hash,
+            validation_level=level,
+            objective_profile_hash=None,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _cached_evidence_is_compatible(
+    evidence: ValidationEvidenceV2,
+    level: ValidationLevelV2,
+) -> bool:
+    expected_validator = (
+        WHEEL_ROUTE_L0_VALIDATOR_ID_V2
+        if level is ValidationLevelV2.L0
+        else WHEEL_ROUTE_L1_VALIDATOR_ID_V2
+    )
+    expected_pass = "route_l0_valid" if level is ValidationLevelV2.L0 else "route_l1_valid"
+    return (
+        type(evidence) is ValidationEvidenceV2
+        and evidence.validator_id == expected_validator
+        and evidence.level is level
+        and type(evidence.passed) is bool
+        and type(evidence.checks) is tuple
+        and len(evidence.checks) == 1
+        and type(evidence.checks[0]) is str
+        and (not evidence.passed or evidence.checks[0] == expected_pass)
+    )
+
+
+def validate_route(
+    route: TypedRouteV2,
+    anchor: FineSafetyAnchorV2,
+    profile: WheelProfileV2,
+    max_level: ValidationLevelV2,
+    *,
+    request: PlanningRequestV2 | None = None,
+    deadline: PlanningDeadlineV2 | None = None,
+    cache: ValidationCacheV2 | None = None,
+) -> RouteValidationResultV2:
+    if type(route) is not TypedRouteV2:
+        raise TypeError("route must be exact TypedRouteV2")
+    if type(anchor) is not FineSafetyAnchorV2:
+        raise TypeError("anchor must be exact FineSafetyAnchorV2")
+    if type(profile) is not WheelProfileV2:
+        raise TypeError("profile must be exact WheelProfileV2")
+    if type(max_level) is not ValidationLevelV2:
+        raise TypeError("max_level must be exact ValidationLevelV2")
+    if cache is not None and type(cache) is not ValidationCacheV2:
+        raise TypeError("cache must be exact ValidationCacheV2 or None")
+
+    start_hits = 0 if cache is None else cache.hit_count
+    start_misses = 0 if cache is None else cache.miss_count
+
+    def finish(
+        reason_code: str,
+        evidence: tuple[ValidationEvidenceV2, ...],
+        *,
+        l2_result: WheelValidationResultV2 | None = None,
+    ) -> RouteValidationResultV2:
+        hits = 0 if cache is None else cache.hit_count - start_hits
+        misses = 0 if cache is None else cache.miss_count - start_misses
+        return RouteValidationResultV2(
+            route=route,
+            success=l2_result is not None and l2_result.evidence.passed,
+            reason_code=reason_code,
+            stage_evidence=evidence,
+            l2_result=l2_result,
+            cache_hits=hits,
+            cache_misses=misses,
+        )
+
+    l0_fresh = _validate_route_l0(route, anchor, profile)
+    l0 = l0_fresh
+    l0_key = _lazy_cache_key(route, anchor, profile, ValidationLevelV2.L0)
+    if cache is not None and l0_key is not None:
+        cached = cache.get(l0_key)
+        if (
+            cached is not None
+            and _cached_evidence_is_compatible(cached, ValidationLevelV2.L0)
+            and cached == l0_fresh
+        ):
+            l0 = cached
+        elif cached is None:
+            try:
+                cache.put(l0_key, l0_fresh)
+            except (TypeError, ValueError):
+                pass
+    evidence = (l0,)
+    if not l0.passed:
+        return finish(l0.checks[0], evidence)
+    if max_level is ValidationLevelV2.L0:
+        return finish("route_requires_l2_validation", evidence)
+
+    l1_key = _lazy_cache_key(route, anchor, profile, ValidationLevelV2.L1)
+    l1_fresh = _validate_route_l1(route, anchor, profile)
+    l1 = l1_fresh
+    if cache is not None and l1_key is not None:
+        cached = cache.get(l1_key)
+        if (
+            cached is not None
+            and _cached_evidence_is_compatible(cached, ValidationLevelV2.L1)
+            and cached == l1_fresh
+        ):
+            l1 = cached
+        elif cached is None:
+            try:
+                cache.put(l1_key, l1_fresh)
+            except (TypeError, ValueError):
+                pass
+    evidence = (*evidence, l1)
+    if not l1.passed:
+        return finish(l1.checks[0], evidence)
+    if max_level is ValidationLevelV2.L1:
+        return finish("route_requires_l2_validation", evidence)
+
+    if type(request) is not PlanningRequestV2 or type(deadline) is not PlanningDeadlineV2:
+        return finish("route_l2_authority_unavailable", evidence)
+    try:
+        l2 = validate_route_l2(route, request, anchor, profile, deadline)
+    except Exception:
+        l2 = _result(
+            WHEEL_ROUTE_VALIDATOR_ID_V2,
+            "planning_deadline_contract_mismatch",
+        )
+    if type(l2) is not WheelValidationResultV2:
+        l2 = _result(
+            WHEEL_ROUTE_VALIDATOR_ID_V2,
+            "planning_deadline_contract_mismatch",
+        )
+    evidence = (*evidence, l2.evidence)
+    return finish(l2.reason_code, evidence, l2_result=l2)

@@ -22,6 +22,11 @@ from path_planner.v2.contracts import (
     ValidationLevelV2,
 )
 from path_planner.v2.serialization import canonical_json_bytes
+from path_planner.v2.cache import (
+    VALIDATION_CACHE_SCHEMA_VERSION_V2,
+    ValidationCacheKeyV2,
+    ValidationCacheV2,
+)
 from path_planner.v2.runtime import PlanningDeadlineV2
 from path_planner.v2.geometry import (
     conservative_wheel_pose_cells,
@@ -37,7 +42,9 @@ from path_planner.v2.providers import (
     WheelPrimitiveProviderV2,
 )
 from path_planner.v2.validation import (
+    RouteValidationResultV2,
     WheelValidationResultV2,
+    validate_route,
     validate_route_l2,
     validate_wheel_transition_l2,
 )
@@ -78,11 +85,15 @@ __all__ = [
     "TypedRouteV2",
     "ValidationEvidenceV2",
     "ValidationLevelV2",
+    "VALIDATION_CACHE_SCHEMA_VERSION_V2",
+    "ValidationCacheKeyV2",
+    "ValidationCacheV2",
     "WHEEL_RELATIVE_ENERGY_PROXY_ID_V2",
     "WheelMotionPrimitiveV2",
     "WheelPrimitiveProviderV2",
     "WheelProfileV2",
     "WheelValidationResultV2",
+    "RouteValidationResultV2",
     "ExactMapQualityRowV2",
     "ExactMapQualitySummaryV2",
     "PrimitiveAuditRowV2",
@@ -97,5 +108,6 @@ __all__ = [
     "conservative_wheel_sweep_cells",
     "dense_wheel_replay_step_count",
     "validate_route_l2",
+    "validate_route",
     "validate_wheel_transition_l2",
 ]
