@@ -227,6 +227,7 @@ def test_wheel_validation_contract_is_public_frozen_and_slotted() -> None:
         failed_cell=None,
         failed_primitive_index=None,
         checked_cell_count=1,
+        validated_route_hash="a" * 64,
     )
 
     assert not hasattr(result, "__dict__")

@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError, replace
+from hashlib import sha256
 from math import nan
 
 import numpy as np
@@ -535,6 +536,9 @@ def test_real_wheel_l2_pass_is_the_only_success_and_preserves_evidence() -> None
         primitive.validation_level is ValidationLevelV2.L2
         for primitive in result.route.primitives
     )
+    assert result.l2_result.validated_route_hash == sha256(
+        v2.canonical_json_bytes(result.route)
+    ).hexdigest()
 
 
 def test_route_pipeline_result_rejects_success_with_non_l2_route() -> None:
@@ -573,6 +577,89 @@ def test_route_pipeline_result_rejects_success_with_non_l2_route() -> None:
             l2_result=l2,
             cache_hits=0,
             cache_misses=0,
+        )
+
+
+def test_route_l2_evidence_is_bound_to_the_exact_validated_route_identity() -> None:
+    profile = _profile()
+    snapshot = _snapshot()
+    primitive_a = _primitive(profile)
+    route_a = replace(
+        _route(primitive_a),
+        primitives=(replace(primitive_a, validation_level=ValidationLevelV2.L2),),
+    )
+    l2_a = validation_module.validate_route_l2(
+        route_a,
+        _request(snapshot, profile, primitive_a),
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _deadline(),
+    )
+    primitive_b = _primitive(profile, start=Pose2D(1.75, 1.25, 0.0))
+    route_b = replace(
+        _route(primitive_b),
+        primitives=(replace(primitive_b, validation_level=ValidationLevelV2.L2),),
+    )
+    stages = (
+        ValidationEvidenceV2(
+            validator_id=validation_module.WHEEL_ROUTE_L0_VALIDATOR_ID_V2,
+            level=ValidationLevelV2.L0,
+            passed=True,
+            checks=("route_l0_valid",),
+        ),
+        ValidationEvidenceV2(
+            validator_id=validation_module.WHEEL_ROUTE_L1_VALIDATOR_ID_V2,
+            level=ValidationLevelV2.L1,
+            passed=True,
+            checks=("route_l1_valid",),
+        ),
+        l2_a.evidence,
+    )
+
+    with pytest.raises(ValueError, match="validated route identity"):
+        RouteValidationResultV2(
+            route=route_b,
+            success=True,
+            reason_code=l2_a.reason_code,
+            stage_evidence=stages,
+            l2_result=l2_a,
+            cache_hits=0,
+            cache_misses=0,
+        )
+
+    route_a_copy = replace(
+        route_a,
+        primitives=tuple(replace(item) for item in route_a.primitives),
+    )
+    same_content = RouteValidationResultV2(
+        route=route_a_copy,
+        success=True,
+        reason_code=l2_a.reason_code,
+        stage_evidence=stages,
+        l2_result=l2_a,
+        cache_hits=0,
+        cache_misses=0,
+    )
+    assert same_content.success is True
+
+
+def test_transition_validation_result_forbids_route_identity_hash() -> None:
+    transition_evidence = ValidationEvidenceV2(
+        validator_id=validation_module.WHEEL_TRANSITION_VALIDATOR_ID_V2,
+        level=ValidationLevelV2.L2,
+        passed=True,
+        checks=("transition_l2_valid",),
+    )
+
+    with pytest.raises(ValueError, match="transition.*route hash"):
+        validation_module.WheelValidationResultV2(
+            evidence=transition_evidence,
+            reason_code="transition_l2_valid",
+            timed_out=False,
+            failed_cell=None,
+            failed_primitive_index=None,
+            checked_cell_count=1,
+            validated_route_hash="a" * 64,
         )
 
 

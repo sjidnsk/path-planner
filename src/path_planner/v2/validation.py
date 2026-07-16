@@ -125,6 +125,16 @@ _PASS_REASON_BY_VALIDATOR = {
 }
 
 
+def _canonical_route_hash(route: object) -> str | None:
+    if type(route) is not TypedRouteV2:
+        return None
+    try:
+        payload = canonical_json_bytes(route)
+    except (*_EXPECTED_CONTRACT_EXCEPTIONS, RecursionError, RuntimeError):
+        return None
+    return sha256(payload).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class WheelValidationResultV2:
     evidence: ValidationEvidenceV2
@@ -133,6 +143,7 @@ class WheelValidationResultV2:
     failed_cell: Cell | None
     failed_primitive_index: int | None
     checked_cell_count: int
+    validated_route_hash: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.evidence) is not ValidationEvidenceV2:
@@ -209,6 +220,18 @@ class WheelValidationResultV2:
                 raise ValueError("passing evidence cannot carry failure metadata")
             if self.checked_cell_count == 0:
                 raise ValueError("passing L2 evidence must include checked cells")
+        route_hash = self.validated_route_hash
+        if validator_id == WHEEL_TRANSITION_VALIDATOR_ID_V2:
+            if route_hash is not None:
+                raise ValueError("transition validation must not carry a route hash")
+        elif route_hash is not None and (
+            type(route_hash) is not str
+            or len(route_hash) != 64
+            or any(character not in "0123456789abcdef" for character in route_hash)
+        ):
+            raise ValueError("validated_route_hash must be a lowercase SHA-256 digest")
+        elif self.evidence.passed and route_hash is None:
+            raise ValueError("passing route L2 evidence requires validated_route_hash")
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +327,14 @@ class RouteValidationResultV2:
                     for primitive in self.route.primitives
                 ):
                     raise ValueError("successful route primitives must all be L2")
+                route_hash = _canonical_route_hash(self.route)
+                if (
+                    route_hash is None
+                    or self.l2_result.validated_route_hash != route_hash
+                ):
+                    raise ValueError(
+                        "authoritative evidence does not match validated route identity"
+                    )
             return
 
         if levels[-1] is ValidationLevelV2.L2:
@@ -755,6 +786,7 @@ def _result(
     failed_cell: Cell | None = None,
     failed_primitive_index: int | None = None,
     checked_cell_count: int = 0,
+    validated_route_hash: str | None = None,
 ) -> WheelValidationResultV2:
     return WheelValidationResultV2(
         evidence=ValidationEvidenceV2(
@@ -768,6 +800,7 @@ def _result(
         failed_cell=failed_cell,
         failed_primitive_index=failed_primitive_index,
         checked_cell_count=checked_cell_count,
+        validated_route_hash=validated_route_hash,
     )
 
 
@@ -1469,12 +1502,14 @@ def validate_wheel_transition_l2(
     )
 
 
-def validate_route_l2(
+def _validate_route_l2_impl(
     route: TypedRouteV2,
     request: PlanningRequestV2,
     anchor: FineSafetyAnchorV2,
     wheel_profile: WheelProfileV2,
     deadline: PlanningDeadlineV2,
+    *,
+    _validated_route_hash: str | None,
 ) -> WheelValidationResultV2:
     if type(route) is not TypedRouteV2:
         raise TypeError("route must be exact TypedRouteV2")
@@ -1688,12 +1723,48 @@ def validate_route_l2(
             failed_primitive_index=primitive_index,
             checked_cell_count=checked,
         )
+    if _validated_route_hash is None:
+        return _result(
+            WHEEL_ROUTE_VALIDATOR_ID_V2,
+            "route_structure_mismatch",
+            checked_cell_count=checked,
+        )
     return _result(
         WHEEL_ROUTE_VALIDATOR_ID_V2,
         "route_l2_valid",
         passed=True,
         checked_cell_count=checked,
+        validated_route_hash=_validated_route_hash,
     )
+
+
+def validate_route_l2(
+    route: TypedRouteV2,
+    request: PlanningRequestV2,
+    anchor: FineSafetyAnchorV2,
+    wheel_profile: WheelProfileV2,
+    deadline: PlanningDeadlineV2,
+) -> WheelValidationResultV2:
+    before_hash = _canonical_route_hash(route)
+    raw = _validate_route_l2_impl(
+        route,
+        request,
+        anchor,
+        wheel_profile,
+        deadline,
+        _validated_route_hash=before_hash,
+    )
+    after_hash = _canonical_route_hash(route)
+    stable_hash = before_hash if before_hash == after_hash else None
+    if raw.evidence.passed and stable_hash is None:
+        return _result(
+            WHEEL_ROUTE_VALIDATOR_ID_V2,
+            "route_structure_mismatch",
+            checked_cell_count=raw.checked_cell_count,
+        )
+    if raw.validated_route_hash == stable_hash:
+        return raw
+    return replace(raw, validated_route_hash=stable_hash)
 
 
 def _lazy_evidence(
@@ -2105,21 +2176,24 @@ def validate_route(
 
     if type(request) is not PlanningRequestV2 or type(deadline) is not PlanningDeadlineV2:
         return finish("route_l2_authority_unavailable", evidence)
-    l2 = validate_route_l2(route, request, anchor, profile, deadline)
+    primitives_l2 = tuple(
+        primitive
+        if primitive.validation_level is ValidationLevelV2.L2
+        else replace(primitive, validation_level=ValidationLevelV2.L2)
+        for primitive in route.primitives
+    )
+    l2_candidate = (
+        route
+        if primitives_l2 == route.primitives
+        else replace(route, primitives=primitives_l2)
+    )
+    l2 = validate_route_l2(l2_candidate, request, anchor, profile, deadline)
     if type(l2) is not WheelValidationResultV2:
         raise TypeError(
             "validate_route_l2 must return exact WheelValidationResultV2"
         )
     evidence = (*evidence, l2.evidence)
-    result_route = route
-    if l2.evidence.passed:
-        primitives_l2 = tuple(
-            primitive
-            if primitive.validation_level is ValidationLevelV2.L2
-            else replace(primitive, validation_level=ValidationLevelV2.L2)
-            for primitive in route.primitives
-        )
-        result_route = replace(route, primitives=primitives_l2)
+    result_route = l2_candidate if l2.evidence.passed else route
     return finish(
         l2.reason_code,
         evidence,
