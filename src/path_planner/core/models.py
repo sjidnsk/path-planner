@@ -42,6 +42,7 @@ class FailureReason(str, Enum):
     GOAL_BLOCKED = "goal_blocked"
     UNREACHABLE = "unreachable"
     MAX_ITERATIONS = "max_iterations"
+    TIMEOUT = "timeout"
 
 
 @dataclass(frozen=True)
