@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+from math import nextafter, pi
 
 import pytest
 
@@ -48,6 +49,13 @@ def test_platform_profile_is_frozen_slotted_and_has_fixed_schema() -> None:
         ({"max_traversable_slope_deg": float("inf")}, ValueError, "finite"),
         ({"max_traversable_slope_deg": -0.1}, ValueError, r"\[0, 90\]"),
         ({"max_traversable_slope_deg": 90.0001}, ValueError, r"\[0, 90\]"),
+        ({"goal_position_tolerance_m": True}, TypeError, "finite"),
+        ({"goal_position_tolerance_m": float("nan")}, ValueError, "finite"),
+        ({"goal_position_tolerance_m": -0.1}, ValueError, "nonnegative"),
+        ({"goal_heading_tolerance_rad": True}, TypeError, "finite"),
+        ({"goal_heading_tolerance_rad": float("inf")}, ValueError, "finite"),
+        ({"goal_heading_tolerance_rad": -0.1}, ValueError, "nonnegative"),
+        ({"goal_heading_tolerance_rad": nextafter(pi, float("inf"))}, ValueError, "pi"),
     ],
 )
 def test_platform_profile_rejects_invalid_identity_and_safety_values(
@@ -57,6 +65,19 @@ def test_platform_profile_rejects_invalid_identity_and_safety_values(
 ) -> None:
     with pytest.raises(error, match=message):
         _profile(**overrides)
+
+
+def test_platform_profile_goal_tolerance_defaults_and_closed_boundaries() -> None:
+    default = _profile()
+    boundary = _profile(
+        goal_position_tolerance_m=0.25,
+        goal_heading_tolerance_rad=pi,
+    )
+
+    assert default.goal_position_tolerance_m == 0.0
+    assert default.goal_heading_tolerance_rad == 0.0
+    assert boundary.goal_position_tolerance_m == 0.25
+    assert boundary.goal_heading_tolerance_rad == pi
 
 
 def test_registry_requires_sorted_unique_exact_profiles_and_resolves_without_fallback() -> None:
@@ -89,7 +110,7 @@ def test_provider_protocol_is_runtime_checkable_and_exposes_profile_and_plan() -
         def __init__(self) -> None:
             self.profile = profile
 
-        def plan(self, request, anchor):
+        def plan(self, request, anchor, deadline):
             raise NotImplementedError
 
     provider = Provider()

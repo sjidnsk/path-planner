@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import isfinite
+from math import isfinite, pi
 from numbers import Real
 
 from path_planner.v2.contracts import PlatformKindV2
@@ -26,6 +26,19 @@ def _slope_threshold(value: object) -> float:
     return normalized
 
 
+def _goal_tolerance(value: object, name: str, *, maximum: float | None = None) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite real number")
+    normalized = float(value)
+    if not isfinite(normalized):
+        raise ValueError(f"{name} must be finite")
+    if normalized < 0.0:
+        raise ValueError(f"{name} must be nonnegative")
+    if maximum is not None and normalized > maximum:
+        raise ValueError(f"{name} must be at most pi")
+    return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class PlatformProfileV2:
     profile_id: str
@@ -33,6 +46,8 @@ class PlatformProfileV2:
     capability_revision: str
     simulation_proxy: bool
     max_traversable_slope_deg: float
+    goal_position_tolerance_m: float = 0.0
+    goal_heading_tolerance_rad: float = 0.0
     schema_version: str = PLATFORM_PROFILE_SCHEMA_VERSION_V2
 
     def __post_init__(self) -> None:
@@ -46,6 +61,23 @@ class PlatformProfileV2:
             self,
             "max_traversable_slope_deg",
             _slope_threshold(self.max_traversable_slope_deg),
+        )
+        object.__setattr__(
+            self,
+            "goal_position_tolerance_m",
+            _goal_tolerance(
+                self.goal_position_tolerance_m,
+                "goal_position_tolerance_m",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "goal_heading_tolerance_rad",
+            _goal_tolerance(
+                self.goal_heading_tolerance_rad,
+                "goal_heading_tolerance_rad",
+                maximum=pi,
+            ),
         )
         if self.schema_version != PLATFORM_PROFILE_SCHEMA_VERSION_V2:
             raise ValueError(

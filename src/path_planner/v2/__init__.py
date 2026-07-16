@@ -22,6 +22,7 @@ from path_planner.v2.contracts import (
     ValidationLevelV2,
 )
 from path_planner.v2.serialization import canonical_json_bytes
+from path_planner.v2.runtime import PlanningDeadlineV2
 
 __all__ = [
     "PLANNING_SCHEMA_VERSION_V2",
@@ -33,6 +34,7 @@ __all__ = [
     "ObjectiveProfileV2",
     "ObservationProjectionV2",
     "PlanningFailureV2",
+    "PlanningDeadlineV2",
     "PlanningOutcomeV2",
     "PlanningRequestV2",
     "PlanningSuccessV2",

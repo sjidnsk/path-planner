@@ -107,14 +107,19 @@ class PoseStateV2:
 
 @dataclass(frozen=True, slots=True)
 class ObjectiveProfileV2:
-    distance_weight: float = 1.0
+    distance_weight: float = 0.0
     risk_weight: float = 0.0
-    energy_weight: float = 0.0
-    time_weight: float = 0.0
+    energy_weight: float = 0.5
+    time_weight: float = 0.5
 
     def __post_init__(self) -> None:
         for name in ("distance_weight", "risk_weight", "energy_weight", "time_weight"):
             object.__setattr__(self, name, _nonnegative_float(getattr(self, name), name))
+        if not any(
+            getattr(self, name) > 0.0
+            for name in ("distance_weight", "risk_weight", "energy_weight", "time_weight")
+        ):
+            raise ValueError("objective weights must not be all-zero")
 
 
 @dataclass(frozen=True, slots=True)

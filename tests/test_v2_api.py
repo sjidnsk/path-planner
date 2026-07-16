@@ -1,4 +1,8 @@
+from dataclasses import FrozenInstanceError
+from math import nextafter, pi
+
 import path_planner
+import path_planner.v2 as v2
 import numpy as np
 import pytest
 
@@ -42,6 +46,8 @@ def _profile(
     platform_kind: PlatformKindV2 = PlatformKindV2.WHEEL,
     capability_revision: str = "wheel-capability/v1",
     max_slope: float = 30.0,
+    goal_position_tolerance_m: float = 0.0,
+    goal_heading_tolerance_rad: float = 0.0,
 ) -> PlatformProfileV2:
     return PlatformProfileV2(
         profile_id=profile_id,
@@ -49,6 +55,8 @@ def _profile(
         capability_revision=capability_revision,
         simulation_proxy=False,
         max_traversable_slope_deg=max_slope,
+        goal_position_tolerance_m=goal_position_tolerance_m,
+        goal_heading_tolerance_rad=goal_heading_tolerance_rad,
     )
 
 
@@ -84,6 +92,7 @@ def _request(
     snapshot: object | None = None,
     start: PoseStateV2 | None = None,
     goal: PoseStateV2 | None = None,
+    timeout_s: float = 5.0,
 ) -> PlanningRequestV2:
     return PlanningRequestV2(
         request_id="request-api-001",
@@ -93,7 +102,7 @@ def _request(
         terrain_snapshot=_snapshot() if snapshot is None else snapshot,
         objective_profile=ObjectiveProfileV2(),
         resource_budget=ResourceBudgetV2(),
-        timeout_s=5.0,
+        timeout_s=timeout_s,
         accelerator_policy=AcceleratorPolicyV2.DISABLED,
         determinism_seed=7,
     )
@@ -186,10 +195,10 @@ class _ProviderSpy:
     def __init__(self, profile: PlatformProfileV2, outcome_or_factory) -> None:
         self.profile = profile
         self.outcome_or_factory = outcome_or_factory
-        self.calls: list[tuple[PlanningRequestV2, FineSafetyAnchorV2]] = []
+        self.calls: list[tuple[PlanningRequestV2, FineSafetyAnchorV2, object]] = []
 
-    def plan(self, request: PlanningRequestV2, anchor: FineSafetyAnchorV2):
-        self.calls.append((request, anchor))
+    def plan(self, request: PlanningRequestV2, anchor: FineSafetyAnchorV2, deadline):
+        self.calls.append((request, anchor, deadline))
         if callable(self.outcome_or_factory):
             return self.outcome_or_factory(request)
         return self.outcome_or_factory
@@ -227,7 +236,150 @@ def test_single_request_calls_only_the_exact_registered_provider_once() -> None:
     assert len(target_provider.calls) == 1
     assert target_provider.calls[0][0] is request
     assert isinstance(target_provider.calls[0][1], FineSafetyAnchorV2)
+    deadline = target_provider.calls[0][2]
+    assert isinstance(deadline, v2.PlanningDeadlineV2)
+    assert deadline.deadline_monotonic_s - deadline.started_monotonic_s == 2.0
     assert other_provider.calls == []
+
+
+class _FakeClock:
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _SequenceClock:
+    def __init__(self, *values: float) -> None:
+        self._values = iter(values)
+        self._last = values[-1]
+
+    def __call__(self) -> float:
+        self._last = next(self._values, self._last)
+        return self._last
+
+
+def test_planning_deadline_is_immutable_slotted_and_uses_shared_clock() -> None:
+    clock = _FakeClock(10.0)
+    deadline = v2.PlanningDeadlineV2(10.0, 12.0, clock)
+
+    assert not hasattr(deadline, "__dict__")
+    assert "clock" not in repr(deadline)
+    assert deadline == v2.PlanningDeadlineV2(10.0, 12.0, _FakeClock(99.0))
+    assert deadline.elapsed_s == 0.0
+    assert deadline.remaining_s == 2.0
+    assert deadline.expired is False
+    clock.now = 12.5
+    assert deadline.elapsed_s == 2.5
+    assert deadline.remaining_s == 0.0
+    assert deadline.expired is True
+    with pytest.raises(FrozenInstanceError):
+        deadline.deadline_monotonic_s = 13.0
+
+
+@pytest.mark.parametrize(
+    ("request_timeout_s", "effective_timeout_s"),
+    [(5.0, 2.0), (0.25, 0.25)],
+)
+def test_provider_receives_exact_shared_deadline_with_effective_timeout(
+    request_timeout_s,
+    effective_timeout_s,
+) -> None:
+    clock = _FakeClock(10.0)
+    request = _request(timeout_s=request_timeout_s)
+    profile = _profile()
+    provider = _ProviderSpy(profile, lambda value: _success(value))
+
+    outcome = plan_v2(
+        request,
+        registry=PlatformProfileRegistryV2((profile,)),
+        providers={profile.profile_id: provider},
+        monotonic_clock=clock,
+    )
+
+    assert isinstance(outcome, PlanningSuccessV2)
+    assert len(provider.calls) == 1
+    called_request, anchor, deadline = provider.calls[0]
+    assert called_request is request
+    assert isinstance(anchor, FineSafetyAnchorV2)
+    assert deadline.started_monotonic_s == 10.0
+    assert deadline.deadline_monotonic_s == 10.0 + effective_timeout_s
+
+
+def test_expired_deadline_before_provider_dispatch_returns_typed_timeout() -> None:
+    clock = _FakeClock(10.0)
+    request = _request(timeout_s=0.0)
+    profile = _profile()
+    provider = _ProviderSpy(profile, lambda value: _success(value))
+
+    outcome = plan_v2(
+        request,
+        registry=PlatformProfileRegistryV2((profile,)),
+        providers={profile.profile_id: provider},
+        monotonic_clock=clock,
+    )
+
+    assert isinstance(outcome, PlanningFailureV2)
+    assert outcome.category is FailureCategoryV2.TIMEOUT
+    assert outcome.reason_code == "planning_deadline_expired"
+    assert outcome.evidence.stage == "provider_dispatch"
+    assert outcome.search_telemetry.timed_out is True
+    assert outcome.search_telemetry.elapsed_s == 0.0
+    assert provider.calls == []
+
+
+def test_late_provider_success_is_replaced_by_typed_timeout() -> None:
+    clock = _FakeClock(10.0)
+    request = _request(timeout_s=0.25)
+    profile = _profile()
+
+    def late_success(value):
+        clock.now = 10.5
+        return _success(value)
+
+    provider = _ProviderSpy(profile, late_success)
+    outcome = plan_v2(
+        request,
+        registry=PlatformProfileRegistryV2((profile,)),
+        providers={profile.profile_id: provider},
+        monotonic_clock=clock,
+    )
+
+    assert isinstance(outcome, PlanningFailureV2)
+    assert outcome.category is FailureCategoryV2.TIMEOUT
+    assert outcome.reason_code == "planning_deadline_expired"
+    assert outcome.evidence.stage == "provider_completion"
+    assert outcome.search_telemetry.timed_out is True
+    assert outcome.search_telemetry.elapsed_s == 0.5
+    assert len(provider.calls) == 1
+
+
+def test_success_expiring_during_postcondition_is_replaced_by_timeout() -> None:
+    clock = _SequenceClock(10.0, 10.0, 10.0, 10.5, 10.5)
+    request = _request(timeout_s=0.25)
+    profile = _profile()
+    provider = _ProviderSpy(profile, lambda value: _success(value))
+
+    outcome = plan_v2(
+        request,
+        registry=PlatformProfileRegistryV2((profile,)),
+        providers={profile.profile_id: provider},
+        monotonic_clock=clock,
+    )
+
+    assert isinstance(outcome, PlanningFailureV2)
+    assert outcome.category is FailureCategoryV2.TIMEOUT
+    assert outcome.evidence.stage == "provider_postcondition"
+    assert outcome.search_telemetry.elapsed_s == 0.5
+
+
+def test_plan_v2_rejects_noncallable_clock_before_first_call() -> None:
+    request = _request()
+    registry = PlatformProfileRegistryV2((_profile(),))
+
+    with pytest.raises(TypeError, match="monotonic_clock must be callable"):
+        plan_v2(request, registry=registry, providers={}, monotonic_clock=None)
 
 
 @pytest.mark.parametrize("providers", [{}, {"wrong-key/v1": object()}])
@@ -388,6 +540,70 @@ def test_invalid_provider_outcomes_are_replaced_by_stable_postcondition_failure(
         providers={profile.profile_id: provider},
     )
 
+    assert outcome.category is FailureCategoryV2.INTERNAL_ERROR
+    assert outcome.reason_code == "primitive_provider_outcome_invalid"
+    assert outcome.evidence.stage == "provider_postcondition"
+
+
+@pytest.mark.parametrize(
+    ("profile", "goal", "actual_end"),
+    [
+        (
+            _profile(goal_position_tolerance_m=0.25),
+            PoseStateV2(1.25, 1.25, 0.0),
+            PoseStateV2(1.5, 1.25, 0.0),
+        ),
+        (
+            _profile(goal_heading_tolerance_rad=0.5),
+            PoseStateV2(1.25, 1.25, 2.0 * pi - 0.25),
+            PoseStateV2(1.25, 1.25, 0.25),
+        ),
+    ],
+)
+def test_goal_tolerance_closed_boundary_passes_without_endpoint_mutation(
+    profile,
+    goal,
+    actual_end,
+) -> None:
+    request = _request(goal=goal)
+    provider = _ProviderSpy(profile, lambda value: _success(value, end=actual_end))
+
+    outcome = plan_v2(
+        request,
+        registry=PlatformProfileRegistryV2((profile,)),
+        providers={profile.profile_id: provider},
+    )
+
+    assert isinstance(outcome, PlanningSuccessV2)
+    assert outcome.route.primitives[-1].end_state is actual_end
+
+
+@pytest.mark.parametrize(
+    ("profile", "goal", "actual_end"),
+    [
+        (
+            _profile(goal_position_tolerance_m=0.25),
+            PoseStateV2(1.25, 1.25, 0.0),
+            PoseStateV2(nextafter(1.5, float("inf")), 1.25, 0.0),
+        ),
+        (
+            _profile(goal_heading_tolerance_rad=nextafter(0.5, 0.0)),
+            PoseStateV2(1.25, 1.25, 2.0 * pi - 0.25),
+            PoseStateV2(1.25, 1.25, 0.25),
+        ),
+    ],
+)
+def test_goal_tolerance_just_outside_is_rejected(profile, goal, actual_end) -> None:
+    request = _request(goal=goal)
+    provider = _ProviderSpy(profile, lambda value: _success(value, end=actual_end))
+
+    outcome = plan_v2(
+        request,
+        registry=PlatformProfileRegistryV2((profile,)),
+        providers={profile.profile_id: provider},
+    )
+
+    assert isinstance(outcome, PlanningFailureV2)
     assert outcome.category is FailureCategoryV2.INTERNAL_ERROR
     assert outcome.reason_code == "primitive_provider_outcome_invalid"
     assert outcome.evidence.stage == "provider_postcondition"

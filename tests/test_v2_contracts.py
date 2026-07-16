@@ -215,6 +215,24 @@ def test_objective_and_resource_budget_fail_closed():
         v2.ResourceBudgetV2(max_route_states=-1)
 
 
+def test_objective_defaults_are_resource_balanced_and_all_zero_is_rejected():
+    v2 = _v2()
+
+    assert v2.ObjectiveProfileV2() == v2.ObjectiveProfileV2(
+        distance_weight=0.0,
+        risk_weight=0.0,
+        energy_weight=0.5,
+        time_weight=0.5,
+    )
+    with pytest.raises(ValueError, match="all-zero"):
+        v2.ObjectiveProfileV2(
+            distance_weight=0.0,
+            risk_weight=0.0,
+            energy_weight=0.0,
+            time_weight=0.0,
+        )
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
