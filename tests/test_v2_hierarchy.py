@@ -372,6 +372,81 @@ def test_malformed_anchor_queries_raise_stable_contract_error(
         )
 
 
+def test_nonexact_query_getter_exception_is_contained_without_property_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hierarchy = import_module("path_planner.v2.hierarchy")
+    getter_accessed = False
+
+    class ExplosiveQuery:
+        @property
+        def cell(self):
+            nonlocal getter_accessed
+            getter_accessed = True
+            raise RuntimeError("malformed query getter")
+
+    monkeypatch.setattr(
+        FineSafetyAnchorV2,
+        "query",
+        lambda self, cell, max_slope_deg=30.0: ExplosiveQuery(),
+    )
+    with pytest.raises(
+        hierarchy.HierarchyContractErrorV2,
+        match="fine safety anchor query contract mismatch",
+    ):
+        hierarchy.ConservativeHierarchyV2.build(
+            _anchor(width=1, height=1), max_slope_deg=30.0
+        )
+    assert getter_accessed is False
+
+
+def test_exact_query_malicious_cell_equality_is_contained_before_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hierarchy = import_module("path_planner.v2.hierarchy")
+    original = FineSafetyAnchorV2.query
+    equality_called = False
+
+    class ExplosiveEquality:
+        def __eq__(self, other):
+            nonlocal equality_called
+            equality_called = True
+            raise RuntimeError("malformed cell equality")
+
+    def malformed(self, cell, max_slope_deg=30.0):
+        query = replace(
+            original(self, cell, max_slope_deg),
+            cell=Cell(cell.x, cell.y),
+        )
+        object.__setattr__(query.cell, "x", ExplosiveEquality())
+        return query
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", malformed)
+    with pytest.raises(
+        hierarchy.HierarchyContractErrorV2,
+        match="fine safety anchor query contract mismatch",
+    ):
+        hierarchy.ConservativeHierarchyV2.build(
+            _anchor(width=1, height=1), max_slope_deg=30.0
+        )
+    assert equality_called is False
+
+
+def test_anchor_query_timeout_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hierarchy = import_module("path_planner.v2.hierarchy")
+
+    def timed_out(self, cell, max_slope_deg=30.0):
+        raise TimeoutError("anchor timeout")
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", timed_out)
+    with pytest.raises(TimeoutError, match="anchor timeout"):
+        hierarchy.ConservativeHierarchyV2.build(
+            _anchor(width=1, height=1), max_slope_deg=30.0
+        )
+
+
 @pytest.mark.parametrize("field_name", ["slope_deg", "confidence"])
 def test_malformed_query_unrepresentable_numeric_is_contained(
     monkeypatch: pytest.MonkeyPatch,

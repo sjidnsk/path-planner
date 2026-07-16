@@ -183,6 +183,8 @@ def _validated_query(
     cell: Cell,
     max_slope_deg: float,
 ) -> SafetyQueryV2:
+    expected_x = cell.x
+    expected_y = cell.y
     try:
         query = anchor.query(cell, max_slope_deg=max_slope_deg)
     except TimeoutError:
@@ -190,6 +192,8 @@ def _validated_query(
     except Exception as exc:
         raise HierarchyContractErrorV2("fine safety anchor query failed") from exc
 
+    if type(query) is not SafetyQueryV2:
+        raise HierarchyContractErrorV2("fine safety anchor query contract mismatch")
     try:
         query_cell = query.cell
         passed = query.passed
@@ -198,16 +202,35 @@ def _validated_query(
         confidence = query.confidence
         identity = query.snapshot_hash
         level = query.validation_level
-    except (AttributeError, TypeError, ValueError) as exc:
+    except Exception as exc:
         raise HierarchyContractErrorV2("fine safety anchor query contract mismatch") from exc
 
+    if type(query_cell) is not Cell:
+        raise HierarchyContractErrorV2("fine safety anchor query contract mismatch")
+    try:
+        query_x = query_cell.x
+        query_y = query_cell.y
+        current_x = cell.x
+        current_y = cell.y
+    except Exception as exc:
+        raise HierarchyContractErrorV2("fine safety anchor query contract mismatch") from exc
+    if (
+        type(query_x) is not int
+        or type(query_y) is not int
+        or type(current_x) is not int
+        or type(current_y) is not int
+    ):
+        raise HierarchyContractErrorV2("fine safety anchor query contract mismatch")
+    if (
+        query_x != expected_x
+        or query_y != expected_y
+        or current_x != expected_x
+        or current_y != expected_y
+    ):
+        raise HierarchyContractErrorV2("fine safety anchor query contract mismatch")
+
     invalid = (
-        type(query) is not SafetyQueryV2
-        or type(query_cell) is not Cell
-        or query_cell != cell
-        or type(query_cell.x) is not int
-        or type(query_cell.y) is not int
-        or type(passed) is not bool
+        type(passed) is not bool
         or type(reason_code) is not str
         or reason_code not in _TERRAIN_REASON_CODES
         or level is not ValidationLevelV2.L2
