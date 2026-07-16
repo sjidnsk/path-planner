@@ -183,3 +183,16 @@ def test_wheel_profile_rejects_inexact_or_nonfinite_contracts(
 
     with pytest.raises(error, match=message):
         WheelProfileV2(**values)
+
+
+def test_profile_numeric_helpers_convert_huge_real_overflow_to_finite_errors() -> None:
+    huge = 10**10_000
+
+    with pytest.raises(ValueError, match="max_traversable_slope_deg.*finite"):
+        _profile(max_traversable_slope_deg=huge)
+    with pytest.raises(ValueError, match="goal_position_tolerance_m.*finite"):
+        _profile(goal_position_tolerance_m=huge)
+    with pytest.raises(ValueError, match="energy_normalization.*finite"):
+        WheelProfileV2(profile=_profile(), energy_normalization=huge)
+    with pytest.raises(ValueError, match="translation_energy_per_m.*finite"):
+        WheelProfileV2(profile=_profile(), translation_energy_per_m=huge)

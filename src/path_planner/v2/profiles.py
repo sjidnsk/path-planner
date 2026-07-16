@@ -17,23 +17,27 @@ def _nonempty_string(value: object, name: str) -> None:
         raise ValueError(f"{name} must be a nonempty string")
 
 
-def _slope_threshold(value: object) -> float:
+def _finite_float(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
-        raise TypeError("max_traversable_slope_deg must be a finite real number")
-    normalized = float(value)
+        raise TypeError(f"{name} must be a finite real number")
+    try:
+        normalized = float(value)
+    except OverflowError:
+        raise ValueError(f"{name} must be finite") from None
     if not isfinite(normalized):
-        raise ValueError("max_traversable_slope_deg must be finite")
+        raise ValueError(f"{name} must be finite")
+    return normalized
+
+
+def _slope_threshold(value: object) -> float:
+    normalized = _finite_float(value, "max_traversable_slope_deg")
     if not 0.0 <= normalized <= 90.0:
         raise ValueError("max_traversable_slope_deg must be in [0, 90]")
     return normalized
 
 
 def _goal_tolerance(value: object, name: str, *, maximum: float | None = None) -> float:
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise TypeError(f"{name} must be a finite real number")
-    normalized = float(value)
-    if not isfinite(normalized):
-        raise ValueError(f"{name} must be finite")
+    normalized = _finite_float(value, name)
     if normalized < 0.0:
         raise ValueError(f"{name} must be nonnegative")
     if maximum is not None and normalized > maximum:
@@ -42,11 +46,7 @@ def _goal_tolerance(value: object, name: str, *, maximum: float | None = None) -
 
 
 def _positive_float(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise TypeError(f"{name} must be a finite real number")
-    normalized = float(value)
-    if not isfinite(normalized):
-        raise ValueError(f"{name} must be finite")
+    normalized = _finite_float(value, name)
     if normalized <= 0.0:
         raise ValueError(f"{name} must be positive")
     return normalized

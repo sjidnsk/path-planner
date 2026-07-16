@@ -16,7 +16,10 @@ from path_planner.v2.contracts import (
 def _finite_real(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
         raise TypeError(f"{name} must be a finite real number")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except OverflowError:
+        raise ValueError(f"{name} must be finite") from None
     if not isfinite(normalized):
         raise ValueError(f"{name} must be finite")
     return normalized
@@ -89,11 +92,14 @@ class WheelMotionPrimitiveV2(RoutePrimitiveV2):
             self.start_state.y_m,
             self.start_state.heading_rad,
         )
-        integration_dt_s = nextafter(
+        raw_integration_dt_s = _finite_real(
             self.duration_s / float(len(self.samples) - 1),
-            float("inf"),
+            "inferred integration_dt_s",
         )
-        replay = replay_motion_primitive(start, control, integration_dt_s)
+        replay_dt = nextafter(raw_integration_dt_s, float("inf"))
+        if not isfinite(replay_dt):
+            replay_dt = raw_integration_dt_s
+        replay = replay_motion_primitive(start, control, replay_dt)
         expected_samples = tuple(_to_pose_state(sample) for sample in replay.samples)
         if self.samples != expected_samples:
             raise ValueError("samples must match exact public replay")

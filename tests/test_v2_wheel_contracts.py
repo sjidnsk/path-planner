@@ -120,6 +120,11 @@ def test_wheel_motion_primitive_rejects_replay_or_flag_mismatch(overrides, messa
         replace(primitive, **overrides)
 
 
+def test_wheel_motion_converts_huge_real_overflow_to_stable_finite_error() -> None:
+    with pytest.raises(ValueError, match="v_mps.*finite"):
+        replace(_primitive(), v_mps=10**10_000)
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -155,3 +160,34 @@ def test_wheel_contracts_are_exported_only_through_opt_in_v2_package() -> None:
     assert v2.WheelProfileV2.__name__ == "WheelProfileV2"
     assert callable(v2.conservative_wheel_sweep_cells)
     assert "plan_v2" not in path_planner.__dict__
+
+
+def test_two_sample_max_duration_replay_keeps_finite_inferred_dt() -> None:
+    duration = float.fromhex("0x1.fffffffffffffp+1023")
+    min_subnormal = float.fromhex("0x0.0000000000001p-1022")
+    start = Pose2D(1.25, 1.25, 0.2)
+    control = MotionPrimitive("max_duration_creep", min_subnormal, 0.0, duration)
+    replay = replay_motion_primitive(start, control, duration)
+    samples = tuple(
+        PoseStateV2(sample.x_m, sample.y_m, sample.theta_rad)
+        for sample in replay.samples
+    )
+
+    primitive = WheelMotionPrimitiveV2(
+        kind=PrimitiveKindV2.WHEEL_MOTION,
+        start_state=samples[0],
+        end_state=samples[-1],
+        duration_s=duration,
+        distance_m=replay.distance_m,
+        energy_cost=1.0,
+        observation_contribution=0.0,
+        validation_level=ValidationLevelV2.L0,
+        control_name=control.name,
+        samples=samples,
+        v_mps=control.v_mps,
+        omega_radps=control.omega_radps,
+        reverse=False,
+        turn_in_place=False,
+    )
+
+    assert primitive.samples == samples

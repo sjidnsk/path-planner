@@ -256,6 +256,17 @@ def test_dense_replay_rejects_invalid_geometry_inputs(overrides, error, message)
         )
 
 
+def test_dense_replay_converts_huge_real_overflow_to_stable_finite_error() -> None:
+    with pytest.raises(ValueError, match="body_length_m.*finite"):
+        dense_wheel_replay_step_count(
+            MotionPrimitive("forward", 1.0, 0.0, 1.0),
+            body_length_m=10**10_000,
+            body_width_m=0.580,
+            safety_margin_m=0.0,
+            resolution_m=0.5,
+        )
+
+
 def test_pose_contact_rejects_nonfinite_normalized_bounds() -> None:
     geometry = FineGridGeometryV2(
         width=2,
