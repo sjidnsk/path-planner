@@ -680,6 +680,17 @@ class _PinnedTerrain:
         if digest != self.expected_hash or not self.identity_matches():
             raise _SnapshotHashError
 
+    def seal_without_clock(self) -> None:
+        if not self.identity_matches():
+            raise _SnapshotHashError
+        try:
+            digest = snapshot_hash(self.snapshot)
+        except BaseException as exc:
+            _propagate_critical(exc)
+            raise _SnapshotHashError from exc
+        if digest != self.expected_hash or not self.identity_matches():
+            raise _SnapshotHashError
+
     def layer(self, name: str) -> np.ndarray:
         index = next(index for index, (layer_name, _dtype) in enumerate(_LAYER_SPECS) if layer_name == name)
         return self.layers[index]
@@ -1136,6 +1147,7 @@ def validate_legged_step_l2(
         raise TypeError("deadline must be exact PlanningDeadlineV2")
     checked = [0]
     guard: _DeadlineGuard | None = None
+    pinned: _PinnedTerrain | None = None
 
     def finish(
         reason_code: str,
@@ -1149,6 +1161,14 @@ def validate_legged_step_l2(
     ) -> LeggedValidationResultV2:
         if check_deadline and guard is not None:
             guard.check()
+        if check_deadline and pinned is not None:
+            try:
+                pinned.seal_without_clock()
+            except _SnapshotHashError:
+                return _result(
+                    "terrain_snapshot_hash_mismatch",
+                    checked_cell_count=checked[0],
+                )
         return _result(
             reason_code,
             passed=passed,

@@ -472,43 +472,55 @@ def test_body_sweep_catches_pure_rotation_interior_collision(
 
 @pytest.mark.parametrize(
     ("obstacle", "fraction"),
-    [(Cell(9, 6), 0.25), (Cell(10, 6), 0.75)],
+    [(Cell(7, 4), 0.25), (Cell(12, 4), 0.75)],
 )
-def test_body_sweep_catches_quarter_interval_thin_obstacle(
+def test_body_sweep_catches_quarter_only_thin_obstacle(
     obstacle: Cell,
     fraction: float,
 ) -> None:
     contacts = (
-        LeggedFootContactV2(LegIdV2.FRONT_LEFT, WorldPoint(3.0, 3.0)),
-        LeggedFootContactV2(LegIdV2.FRONT_RIGHT, WorldPoint(3.0, -3.0)),
-        LeggedFootContactV2(LegIdV2.REAR_LEFT, WorldPoint(-3.0, 3.0)),
-        LeggedFootContactV2(LegIdV2.REAR_RIGHT, WorldPoint(-3.0, -3.0)),
+        LeggedFootContactV2(LegIdV2.FRONT_LEFT, WorldPoint(4.0, 4.0)),
+        LeggedFootContactV2(LegIdV2.FRONT_RIGHT, WorldPoint(4.0, -4.0)),
+        LeggedFootContactV2(LegIdV2.REAR_LEFT, WorldPoint(-4.0, 4.0)),
+        LeggedFootContactV2(LegIdV2.REAR_RIGHT, WorldPoint(-4.0, -4.0)),
     )
-    start = PoseStateV2(-1.0, -1.5, 0.0)
-    end = PoseStateV2(1.0, -1.5, 0.0)
+    start = PoseStateV2(-2.0, -2.5, 0.0)
+    midpoint = PoseStateV2(0.0, -2.5, 0.0)
+    end = PoseStateV2(2.0, -2.5, 0.0)
     geometry = _anchor().snapshot.geometry
-    endpoint_cells = set(
-        v2.oriented_rectangle_cells(
-            WorldPoint(start.x_m, start.y_m),
-            start.heading_rad,
-            0.60,
-            0.40,
-            geometry,
+    non_interval_cells = set()
+    for pose in (start, midpoint, end):
+        non_interval_cells.update(
+            v2.oriented_rectangle_cells(
+                WorldPoint(pose.x_m, pose.y_m),
+                pose.heading_rad,
+                0.60,
+                0.40,
+                geometry,
+            )
         )
-    ) | set(
+    interval_pose = WorldPoint(-2.0 + 4.0 * fraction, -2.5)
+    interval_cells = set(
         v2.oriented_rectangle_cells(
-            WorldPoint(end.x_m, end.y_m),
-            end.heading_rad,
+            interval_pose,
+            0.0,
             0.60,
             0.40,
             geometry,
         )
     )
-    interval_pose = WorldPoint(-1.0 + 2.0 * fraction, -1.5)
-    assert obstacle not in endpoint_cells
-    assert obstacle in set(
-        v2.oriented_rectangle_cells(interval_pose, 0.0, 0.60, 0.40, geometry)
+    opposite_interval_cells = set(
+        v2.oriented_rectangle_cells(
+            WorldPoint(-2.0 + 4.0 * (1.0 - fraction), -2.5),
+            0.0,
+            0.60,
+            0.40,
+            geometry,
+        )
     )
+    assert obstacle not in non_interval_cells
+    assert obstacle not in opposite_interval_cells
+    assert obstacle in interval_cells
 
     result = validate_legged_step_l2(
         _candidate(
@@ -516,7 +528,7 @@ def test_body_sweep_catches_quarter_interval_thin_obstacle(
             lift_body_state=end,
             end_body_state=end,
             foot_contacts=contacts,
-            target_foothold=WorldPoint(3.5, 3.0),
+            target_foothold=WorldPoint(4.5, 4.0),
         ),
         _anchor(hard=(obstacle,)),
         _profile(),
@@ -1311,6 +1323,102 @@ def test_contact_cells_remain_bound_to_canonical_geometry_during_restored_drift(
     assert result.reason_code == "legged_foothold_hard_obstacle"
     assert result.failed_leg is LegIdV2.FRONT_LEFT
     assert result.failed_cell == obstacle
+
+
+@pytest.mark.parametrize("mutation_kind", ["hash", "geometry", "layer"])
+def test_valid_return_reseals_authority_after_last_clock(
+    mutation_kind: str,
+) -> None:
+    baseline_calls = 0
+
+    def baseline_clock() -> float:
+        nonlocal baseline_calls
+        baseline_calls += 1
+        return 0.0
+
+    baseline = validate_legged_step_l2(
+        _candidate(),
+        _anchor(),
+        _profile(),
+        PlanningDeadlineV2(0.0, 100.0, baseline_clock),
+    )
+    assert baseline.reason_code == "legged_step_l2_valid"
+    assert baseline_calls > 0
+
+    anchor = _anchor()
+    replacement_layer = _anchor().snapshot.slope_deg
+    calls = 0
+    mutated = False
+
+    def mutate_on_last_clock() -> float:
+        nonlocal calls, mutated
+        calls += 1
+        if calls == baseline_calls:
+            mutated = True
+            if mutation_kind == "hash":
+                object.__setattr__(anchor, "_snapshot_hash", "0" * 64)
+            elif mutation_kind == "geometry":
+                object.__setattr__(anchor.snapshot.geometry, "origin", (-4.0, -4.0))
+            else:
+                object.__setattr__(anchor.snapshot, "slope_deg", replacement_layer)
+        return 0.0
+
+    result = validate_legged_step_l2(
+        _candidate(),
+        anchor,
+        _profile(),
+        PlanningDeadlineV2(0.0, 100.0, mutate_on_last_clock),
+    )
+    assert mutated is True
+    assert calls == baseline_calls
+    assert result.reason_code == "terrain_snapshot_hash_mismatch"
+
+
+def test_typed_body_failure_reseals_authority_after_last_clock() -> None:
+    obstacle = Cell(9, 9)
+    candidate = _candidate(
+        foot_contacts=_wide_contacts(),
+        lift_body_state=PoseStateV2(0.0, -0.20, 0.0),
+        end_body_state=PoseStateV2(0.0, -0.20, 0.0),
+        target_foothold=WorldPoint(1.0, 0.75),
+    )
+    baseline_calls = 0
+
+    def baseline_clock() -> float:
+        nonlocal baseline_calls
+        baseline_calls += 1
+        return 0.0
+
+    baseline = validate_legged_step_l2(
+        candidate,
+        _anchor(hard=(obstacle,)),
+        _profile(),
+        PlanningDeadlineV2(0.0, 100.0, baseline_clock),
+    )
+    assert baseline.reason_code == "legged_body_sweep_collision"
+    assert baseline_calls > 0
+
+    anchor = _anchor(hard=(obstacle,))
+    calls = 0
+    mutated = False
+
+    def mutate_on_last_clock() -> float:
+        nonlocal calls, mutated
+        calls += 1
+        if calls == baseline_calls:
+            mutated = True
+            object.__setattr__(anchor, "_snapshot_hash", "0" * 64)
+        return 0.0
+
+    result = validate_legged_step_l2(
+        candidate,
+        anchor,
+        _profile(),
+        PlanningDeadlineV2(0.0, 100.0, mutate_on_last_clock),
+    )
+    assert mutated is True
+    assert calls == baseline_calls
+    assert result.reason_code == "terrain_snapshot_hash_mismatch"
 
 
 def test_deadline_signed_zero_and_persistent_clock_mutation_are_contract_failures() -> None:
