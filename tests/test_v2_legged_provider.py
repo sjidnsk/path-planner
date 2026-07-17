@@ -834,3 +834,110 @@ def test_as_oracle_candidate_fault_boundary_converts_only_exceptions(
         )
         with pytest.raises(type(error)):
             primitive.as_oracle_candidate()
+
+
+@pytest.mark.parametrize(
+    ("raw_heading", "expected_heading"),
+    [
+        (2.0 * pi, 0.0),
+        (-3.0 * pi, -pi),
+        (pi, pi),
+        (-pi, -pi),
+        (
+            sys.float_info.max,
+            (sys.float_info.max + pi) % (2.0 * pi) - pi,
+        ),
+        (
+            -sys.float_info.max,
+            (-sys.float_info.max + pi) % (2.0 * pi) - pi,
+        ),
+    ],
+)
+def test_primitive_canonicalizes_lift_heading_before_candidate_conversion(
+    raw_heading: float,
+    expected_heading: float,
+) -> None:
+    primitive = _primitive(
+        lift_body_state=PoseStateV2(0.0, -0.10, raw_heading),
+    )
+    candidate = primitive.as_oracle_candidate()
+    assert primitive.lift_body_state.heading_rad == expected_heading
+    assert candidate.lift_body_state == primitive.lift_body_state
+    assert canonical_json_bytes(candidate.lift_body_state) == canonical_json_bytes(
+        primitive.lift_body_state
+    )
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "entrypoint"),
+    [
+        ("_audit_search_state_canonical", lambda: legged_state_key_v2(_state())),
+        ("_validate_step_relations", _primitive),
+        ("_resource_matches", _primitive),
+        ("_audit_primitive_canonical", lambda: _primitive().as_oracle_candidate()),
+    ],
+)
+def test_public_boundaries_convert_internal_runtime_faults_to_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+    entrypoint: object,
+) -> None:
+    monkeypatch.setattr(
+        legged_module,
+        helper_name,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError(f"{helper_name} fault")
+        ),
+    )
+    with pytest.raises(ValueError):
+        entrypoint()  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "entrypoint"),
+    [
+        ("_audit_search_state_canonical", lambda: legged_state_key_v2(_state())),
+        ("_validate_step_relations", _primitive),
+        ("_resource_matches", _primitive),
+        ("_audit_primitive_canonical", lambda: _primitive().as_oracle_candidate()),
+    ],
+)
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit(), MemoryError()])
+def test_public_boundaries_propagate_internal_critical_faults(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+    entrypoint: object,
+    error: BaseException,
+) -> None:
+    monkeypatch.setattr(
+        legged_module,
+        helper_name,
+        lambda *_args, error=error, **_kwargs: (_ for _ in ()).throw(error),
+    )
+    with pytest.raises(type(error)):
+        entrypoint()  # type: ignore[operator]
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "entrypoint"),
+    [
+        ("_audit_search_state_canonical", lambda: legged_state_key_v2(_state())),
+        ("_validate_step_relations", _primitive),
+        ("_resource_matches", _primitive),
+        ("_audit_primitive_canonical", lambda: _primitive().as_oracle_candidate()),
+    ],
+)
+@pytest.mark.parametrize("error", [TypeError("typed contract"), ValueError("value contract")])
+def test_public_boundaries_preserve_contract_error_types(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+    entrypoint: object,
+    error: Exception,
+) -> None:
+    monkeypatch.setattr(
+        legged_module,
+        helper_name,
+        lambda *_args, error=error, **_kwargs: (_ for _ in ()).throw(error),
+    )
+    with pytest.raises(type(error), match=str(error)):
+        entrypoint()  # type: ignore[operator]

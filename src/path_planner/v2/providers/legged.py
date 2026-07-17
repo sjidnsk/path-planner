@@ -31,9 +31,21 @@ _RESOURCE_ABS_TOL = 1e-12
 
 
 def _raise_contract_value_error(name: str, error: Exception) -> None:
-    if isinstance(error, MemoryError):
+    if isinstance(error, (TypeError, ValueError, MemoryError)):
         raise error
     raise ValueError(f"{name} contract evaluation failed") from None
+
+
+def _call_contract_helper_v2(
+    name: str,
+    helper: object,
+    *args: object,
+    **kwargs: object,
+) -> object:
+    try:
+        return helper(*args, **kwargs)  # type: ignore[operator]
+    except Exception as error:
+        _raise_contract_value_error(name, error)
 
 
 def _is_negative_zero(value: float) -> bool:
@@ -325,7 +337,14 @@ def _float_bits_v2(value: float) -> int:
 
 
 def legged_state_key_v2(state: LeggedSearchStateV2) -> tuple[int, ...]:
-    audited = _audit_search_state_canonical(state, "state")
+    audited = _call_contract_helper_v2(
+        "legged state audit",
+        _audit_search_state_canonical,
+        state,
+        "state",
+    )
+    if type(audited) is not LeggedSearchStateV2 or audited is not state:
+        raise ValueError("legged state audit must return exact LeggedSearchStateV2")
     floats = (
         audited.body_state.x_m,
         audited.body_state.y_m,
@@ -455,6 +474,14 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
     primitive_schema_version: str = LEGGED_STEP_PRIMITIVE_SCHEMA_V2
 
     def __post_init__(self) -> None:
+        result = _call_contract_helper_v2(
+            "legged step primitive construction",
+            self._initialize_canonical_payload,
+        )
+        if result is not None:
+            raise ValueError("legged step primitive initializer must return None")
+
+    def _initialize_canonical_payload(self) -> None:
         raw_kind = self.kind
         raw_start_state = self.start_state
         raw_end_state = self.end_state
@@ -548,7 +575,7 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
         lift = _audit_pose_public(
             raw_lift,
             "lift_body_state",
-            wrap_heading=False,
+            wrap_heading=True,
         )
         end_legged = _audit_search_state_canonical(
             raw_end_legged,
@@ -603,7 +630,9 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
         object.__setattr__(self, "primitive_schema_version", schema)
         RoutePrimitiveV2.__post_init__(self)
 
-        expected_foot, expected_distance, expected_energy = _validate_step_relations(
+        expected_resources = _call_contract_helper_v2(
+            "legged step relation validation",
+            _validate_step_relations,
             start_state=start_state,
             end_state=end_state,
             start_legged_state=start_legged,
@@ -612,29 +641,62 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
             moving_leg=raw_moving_leg,
             target_foothold=target,
         )
+        if (
+            type(expected_resources) is not tuple
+            or len(expected_resources) != 3
+            or any(type(value) is not float for value in expected_resources)
+        ):
+            raise ValueError("legged step relation validation returned invalid resources")
+        expected_foot, expected_distance, expected_energy = expected_resources
         for raw_value, expected_value, name in (
             (foot_travel, expected_foot, "foot_travel_m"),
             (distance, expected_distance, "distance_m"),
             (energy, expected_energy, "energy_cost"),
         ):
-            if not _resource_matches(raw_value, expected_value):
+            matches = _call_contract_helper_v2(
+                "legged resource comparison",
+                _resource_matches,
+                raw_value,
+                expected_value,
+            )
+            if type(matches) is not bool:
+                raise ValueError("legged resource comparison must return exact bool")
+            if not matches:
                 raise ValueError(f"{name} must match the relative resource proxy")
         object.__setattr__(self, "foot_travel_m", expected_foot)
         object.__setattr__(self, "distance_m", expected_distance)
         object.__setattr__(self, "energy_cost", expected_energy)
 
     def as_oracle_candidate(self) -> LeggedStepCandidateV2:
-        _audit_primitive_canonical(self)
-        try:
-            return _candidate_from_payload_v2(
-                self.start_legged_state,
-                self.lift_body_state,
-                self.end_legged_state,
-                self.moving_leg,
-                self.target_foothold,
-            )
-        except Exception as error:
-            _raise_contract_value_error("oracle candidate", error)
+        audited = _call_contract_helper_v2(
+            "legged primitive audit",
+            _audit_primitive_canonical,
+            self,
+        )
+        if audited is not self:
+            raise ValueError("legged primitive audit must preserve object identity")
+        candidate = _call_contract_helper_v2(
+            "oracle candidate",
+            _candidate_from_payload_v2,
+            self.start_legged_state,
+            self.lift_body_state,
+            self.end_legged_state,
+            self.moving_leg,
+            self.target_foothold,
+        )
+        if type(candidate) is not LeggedStepCandidateV2:
+            raise ValueError("oracle candidate helper returned invalid payload")
+        if (
+            candidate.start_body_state != self.start_legged_state.body_state
+            or candidate.lift_body_state != self.lift_body_state
+            or candidate.end_body_state != self.end_legged_state.body_state
+            or candidate.foot_contacts != self.start_legged_state.foot_contacts
+            or candidate.moving_leg is not self.moving_leg
+            or candidate.sequence_phase != self.start_legged_state.sequence_phase
+            or candidate.target_foothold != self.target_foothold
+        ):
+            raise ValueError("oracle candidate helper returned mismatched payload")
+        return candidate
 
 
 def _audit_primitive_canonical(value: object) -> LeggedStepPrimitiveV2:
