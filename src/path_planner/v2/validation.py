@@ -3174,6 +3174,11 @@ def _legged_trusted_snapshot_digest_v2(snapshot: TerrainSnapshotV2) -> str:
     return digest
 
 
+_TRUSTED_LEGGED_ROUTE_BYTES_V2 = _legged_trusted_route_bytes_v2
+_TRUSTED_LEGGED_ROUTE_DIGEST_V2 = _legged_trusted_route_digest_v2
+_TRUSTED_LEGGED_SNAPSHOT_DIGEST_V2 = _legged_trusted_snapshot_digest_v2
+
+
 class _LeggedDeadlineContractError(RuntimeError):
     pass
 
@@ -3342,6 +3347,11 @@ def _legged_a2_result_token_v2(
         checked_cell_count=result.checked_cell_count,
         minimum_support_margin_m=result.minimum_support_margin_m,
     )
+    failed_cell_token = (
+        None
+        if result.failed_cell is None
+        else (result.failed_cell.x, result.failed_cell.y)
+    )
     return (
         evidence.validator_id,
         evidence.level,
@@ -3349,7 +3359,7 @@ def _legged_a2_result_token_v2(
         evidence.checks,
         result.reason_code,
         result.timed_out,
-        result.failed_cell,
+        failed_cell_token,
         result.failed_leg,
         result.checked_cell_count,
         (
@@ -3361,6 +3371,9 @@ def _legged_a2_result_token_v2(
             )
         ),
     )
+
+
+_TRUSTED_LEGGED_A2_RESULT_TOKEN_V2 = _legged_a2_result_token_v2
 
 
 @dataclass(frozen=True, slots=True)
@@ -3404,8 +3417,25 @@ _TRUSTED_LEGGED_SNAPSHOT_TOKEN_V2 = _legged_snapshot_token_v2
 
 def _legged_independent_seal_authority_v2(
     context: _LeggedAuthorityContextV2,
+    *,
+    _direct: bool = False,
 ) -> tuple[str | None, str | None]:
     route_hash = context.route_hash
+    route_bytes_v2 = (
+        _TRUSTED_LEGGED_ROUTE_BYTES_V2
+        if _direct
+        else _legged_trusted_route_bytes_v2
+    )
+    route_digest_v2 = (
+        _TRUSTED_LEGGED_ROUTE_DIGEST_V2
+        if _direct
+        else _legged_trusted_route_digest_v2
+    )
+    snapshot_digest_v2 = (
+        _TRUSTED_LEGGED_SNAPSHOT_DIGEST_V2
+        if _direct
+        else _legged_trusted_snapshot_digest_v2
+    )
     if context.route_token is not None:
         try:
             current_route_token = _TRUSTED_LEGGED_ROUTE_REBUILD_V2(context.route)
@@ -3416,7 +3446,7 @@ def _legged_independent_seal_authority_v2(
         if current_route_token != context.route_token:
             return "route_structure_mismatch", None
         try:
-            current_bytes = _legged_trusted_route_bytes_v2(context.route)
+            current_bytes = route_bytes_v2(context.route)
         except _LeggedRouteHashContractError:
             return "route_hash_contract_mismatch", None
         if current_bytes != context.route_bytes:
@@ -3471,7 +3501,7 @@ def _legged_independent_seal_authority_v2(
         return "terrain_snapshot_identity_mismatch", route_hash
     try:
         current_snapshot = _TRUSTED_LEGGED_SNAPSHOT_TOKEN_V2(context.snapshot)
-        current_digest = _legged_trusted_snapshot_digest_v2(context.snapshot)
+        current_digest = snapshot_digest_v2(context.snapshot)
         cached_digest = context.anchor._snapshot_hash
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -3486,14 +3516,23 @@ def _legged_independent_seal_authority_v2(
         return "terrain_snapshot_hash_mismatch", route_hash
     if (
         context.route_token is not None
-        and _legged_reseal_route_hash_without_callbacks_v2(context) is None
+        and _legged_reseal_route_hash_without_callbacks_v2(
+            context,
+            _route_bytes_v2=route_bytes_v2,
+            _route_digest_v2=route_digest_v2,
+        ) is None
     ):
         return "route_structure_mismatch", None
+    if not _direct:
+        return _legged_independent_seal_authority_v2(context, _direct=True)
     return None, route_hash
 
 
 def _legged_reseal_route_hash_without_callbacks_v2(
     context: _LeggedAuthorityContextV2,
+    *,
+    _route_bytes_v2=_TRUSTED_LEGGED_ROUTE_BYTES_V2,
+    _route_digest_v2=_TRUSTED_LEGGED_ROUTE_DIGEST_V2,
 ) -> str | None:
     if (
         context.route_token is None
@@ -3505,15 +3544,23 @@ def _legged_reseal_route_hash_without_callbacks_v2(
         current_route_token = _TRUSTED_LEGGED_ROUTE_REBUILD_V2(context.route)
         if current_route_token != context.route_token:
             return None
-        current_bytes = _legged_trusted_route_bytes_v2(context.route)
+        current_bytes = _route_bytes_v2(context.route)
         if current_bytes != context.route_bytes:
             return None
-        current_digest = _legged_trusted_route_digest_v2(current_bytes)
+        current_digest = _route_digest_v2(current_bytes)
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
     except Exception:
         return None
     if current_digest != context.route_hash:
+        return None
+    try:
+        final_route_token = _TRUSTED_LEGGED_ROUTE_REBUILD_V2(context.route)
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        return None
+    if final_route_token != context.route_token:
         return None
     return context.route_hash
 
@@ -3927,7 +3974,9 @@ def validate_legged_route_l2(
         ):
             record(8, "route_goal_tolerance_exceeded", len(primitives) - 1)
 
-    step_failures: list[tuple[int, int, LeggedValidationResultV2]] = []
+    step_failures: list[
+        tuple[int, int, str, Cell | None, LegIdV2 | None, float | None]
+    ] = []
     pass_margins: list[float] = []
     reason_rank = {
         reason: rank for rank, reason in enumerate(_LEGGED_STEP_FAILURE_REASONS_V2)
@@ -3963,8 +4012,18 @@ def validate_legged_route_l2(
         try:
             before = _legged_a2_result_token_v2(a2_result)
             after = _legged_a2_result_token_v2(a2_result)
-            if before != after:
+            sealed = _TRUSTED_LEGGED_A2_RESULT_TOKEN_V2(a2_result)
+            if before != after or after != sealed:
                 raise ValueError("A2 result audit mutated payload")
+            audited_reason = sealed[4]
+            audited_cell = (
+                None
+                if sealed[6] is None
+                else Cell(sealed[6][0], sealed[6][1])
+            )
+            audited_leg = sealed[7]
+            audited_checked = sealed[8]
+            audited_margin = a2_result.minimum_support_margin_m
         except (KeyboardInterrupt, SystemExit, MemoryError):
             raise
         except Exception:
@@ -3974,24 +4033,31 @@ def validate_legged_route_l2(
                 checked_cell_count=checked_cell_count,
                 validated_route_hash=route_hash,
             )
-        checked_cell_count += a2_result.checked_cell_count
-        if a2_result.reason_code in _LEGGED_GLOBAL_A2_FAILURE_REASONS_V2:
+        checked_cell_count += audited_checked
+        if audited_reason in _LEGGED_GLOBAL_A2_FAILURE_REASONS_V2:
             return _legged_route_result_v2(
-                a2_result.reason_code,
+                audited_reason,
                 checked_cell_count=checked_cell_count,
                 validated_route_hash=route_hash,
             )
-        if a2_result.reason_code in reason_rank:
+        if audited_reason in reason_rank:
             step_failures.append(
-                (reason_rank[a2_result.reason_code], index, a2_result)
+                (
+                    reason_rank[audited_reason],
+                    index,
+                    audited_reason,
+                    audited_cell,
+                    audited_leg,
+                    audited_margin,
+                )
             )
-        elif a2_result.reason_code == "legged_step_l2_valid":
-            pass_margins.append(a2_result.minimum_support_margin_m)
+        elif audited_reason == "legged_step_l2_valid":
+            pass_margins.append(audited_margin)
         else:
             return _legged_route_result_v2(
                 "legged_step_oracle_contract_mismatch",
                 failed_primitive_index=index,
-                checked_cell_count=checked_cell_count - a2_result.checked_cell_count,
+                checked_cell_count=checked_cell_count - audited_checked,
                 validated_route_hash=route_hash,
             )
 
@@ -4003,14 +4069,17 @@ def validate_legged_route_l2(
         return authority_failure(reason, stable_hash)
 
     if step_failures:
-        _rank, index, selected = min(step_failures, key=lambda item: (item[0], item[1]))
+        _rank, index, selected_reason, selected_cell, selected_leg, selected_margin = min(
+            step_failures,
+            key=lambda item: (item[0], item[1]),
+        )
         return _legged_route_result_v2(
-            selected.reason_code,
-            failed_cell=selected.failed_cell,
-            failed_leg=selected.failed_leg,
+            selected_reason,
+            failed_cell=selected_cell,
+            failed_leg=selected_leg,
             failed_primitive_index=index,
             checked_cell_count=checked_cell_count,
-            minimum_support_margin_m=selected.minimum_support_margin_m,
+            minimum_support_margin_m=selected_margin,
             validated_route_hash=route_hash,
         )
     if structural:
