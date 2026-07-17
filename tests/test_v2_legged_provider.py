@@ -2285,6 +2285,110 @@ def test_legged_route_rechecks_bound_candidate_after_pre_a2_checkpoint(
     assert result.validated_route_hash == expected_hash
 
 
+@pytest.mark.parametrize(
+    (
+        "first_reason",
+        "expected_reason",
+        "expected_index",
+        "expected_cell",
+        "expected_margin",
+    ),
+    [
+        (
+            "legged_body_sweep_collision",
+            "legged_body_sweep_collision",
+            0,
+            Cell(2, 3),
+            0.08,
+        ),
+        (
+            "legged_step_l2_valid",
+            "legged_primitive_contract_mismatch",
+            1,
+            None,
+            None,
+        ),
+    ],
+)
+def test_legged_route_aggregates_later_pre_a2_candidate_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    first_reason: str,
+    expected_reason: str,
+    expected_index: int,
+    expected_cell: Cell | None,
+    expected_margin: float | None,
+) -> None:
+    first, second = _route_primitives()
+    route = _legged_route(first, second)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
+    real_conversion = LeggedStepPrimitiveV2.as_oracle_candidate
+    candidates: list[LeggedStepCandidateV2] = []
+    clock_calls = 0
+    a2_calls = 0
+
+    def capture_candidate(primitive):
+        candidate = real_conversion(primitive)
+        candidates.append(candidate)
+        return candidate
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 4:
+            candidate = candidates[1]
+            object.__setattr__(
+                candidate,
+                "sequence_phase",
+                (candidate.sequence_phase + 1) % 4,
+            )
+        return 0.0
+
+    def first_only_a2(*_args):
+        nonlocal a2_calls
+        a2_calls += 1
+        if a2_calls > 1:
+            raise AssertionError("drifted second candidate must not reach A2")
+        return _a2_result(
+            first_reason,
+            checked=5,
+            cell=(
+                Cell(2, 3)
+                if first_reason == "legged_body_sweep_collision"
+                else None
+            ),
+            margin=0.08,
+        )
+
+    monkeypatch.setattr(
+        LeggedStepPrimitiveV2,
+        "as_oracle_candidate",
+        capture_candidate,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        first_only_a2,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(clock),
+    )
+    assert a2_calls == 1
+    assert result.reason_code == expected_reason
+    assert result.failed_primitive_index == expected_index
+    assert result.failed_cell == expected_cell
+    assert result.failed_leg is None
+    assert result.checked_cell_count == 5
+    assert result.minimum_support_margin_m == expected_margin
+    assert result.validated_route_hash == expected_hash
+
+
 @pytest.mark.parametrize("mutation_stage", ["a2", "public_result"])
 def test_legged_route_rechecks_candidate_after_a2_and_result_audit(
     monkeypatch: pytest.MonkeyPatch,
