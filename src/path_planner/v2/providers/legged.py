@@ -336,7 +336,106 @@ def _float_bits_v2(value: float) -> int:
     return int.from_bytes(struct.pack(">d", value), "big", signed=False)
 
 
+def _independent_float_bits_v2(value: float) -> int:
+    return int.from_bytes(struct.pack(">d", value), "big", signed=False)
+
+
+def _canonical_float_word_v2(
+    value: object,
+    name: str,
+    *,
+    nonnegative: bool = False,
+) -> int:
+    if type(value) is not float:
+        raise TypeError(f"{name} must be an exact built-in float")
+    if not isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if nonnegative and value < 0.0:
+        raise ValueError(f"{name} must be nonnegative")
+    if _is_negative_zero(value):
+        raise ValueError(f"{name} must use canonical positive zero")
+    return _independent_float_bits_v2(value)
+
+
+def _canonical_pose_snapshot_v2(value: object, name: str) -> tuple[int, int, int]:
+    if type(value) is not PoseStateV2:
+        raise TypeError(f"{name} must be exact PoseStateV2")
+    snapshot = (
+        _canonical_float_word_v2(value.x_m, f"{name}.x_m"),
+        _canonical_float_word_v2(value.y_m, f"{name}.y_m"),
+        _canonical_float_word_v2(value.heading_rad, f"{name}.heading_rad"),
+    )
+    if not -pi <= value.heading_rad <= pi:
+        raise ValueError(f"{name}.heading_rad must already be canonical")
+    return snapshot
+
+
+def _canonical_point_snapshot_v2(value: object, name: str) -> tuple[int, int]:
+    if type(value) is not WorldPoint:
+        raise TypeError(f"{name} must be exact WorldPoint")
+    return (
+        _canonical_float_word_v2(value.x, f"{name}.x"),
+        _canonical_float_word_v2(value.y, f"{name}.y"),
+    )
+
+
+def _canonical_contacts_snapshot_v2(
+    value: object,
+    name: str,
+) -> tuple[tuple[LegIdV2, int, int], ...]:
+    if type(value) is not tuple:
+        raise TypeError(f"{name} must be an exact tuple")
+    if len(value) != 4:
+        raise ValueError(f"{name} must contain exactly four contacts")
+    snapshot: list[tuple[LegIdV2, int, int]] = []
+    for index, expected_leg in enumerate(LEGGED_FOOT_STORAGE_ORDER_V2):
+        contact = value[index]
+        if type(contact) is not LeggedFootContactV2:
+            raise TypeError(f"{name}[{index}] must be exact LeggedFootContactV2")
+        if type(contact.leg_id) is not LegIdV2:
+            raise TypeError(f"{name}[{index}].leg_id must be exact LegIdV2")
+        if contact.leg_id is not expected_leg:
+            raise ValueError(f"{name} must follow exact storage order")
+        point = _canonical_point_snapshot_v2(
+            contact.foothold,
+            f"{name}[{index}].foothold",
+        )
+        snapshot.append((expected_leg, *point))
+    return tuple(snapshot)
+
+
+def _canonical_search_state_snapshot_v2(
+    value: object,
+    name: str,
+) -> tuple[object, ...]:
+    if type(value) is not LeggedSearchStateV2:
+        raise TypeError(f"{name} must be exact LeggedSearchStateV2")
+    if type(value.sequence_phase) is not int:
+        raise TypeError(f"{name}.sequence_phase must be an exact int")
+    if not 0 <= value.sequence_phase <= 3:
+        raise ValueError(f"{name}.sequence_phase must be in [0, 3]")
+    if type(value.schema_version) is not str:
+        raise TypeError(f"{name}.schema_version must be an exact built-in str")
+    if value.schema_version != LEGGED_SEARCH_STATE_SCHEMA_V2:
+        raise ValueError(f"{name}.schema_version must match the frozen schema")
+    return (
+        value.schema_version,
+        value.sequence_phase,
+        _canonical_pose_snapshot_v2(value.body_state, f"{name}.body_state"),
+        _canonical_contacts_snapshot_v2(
+            value.foot_contacts,
+            f"{name}.foot_contacts",
+        ),
+    )
+
+
 def legged_state_key_v2(state: LeggedSearchStateV2) -> tuple[int, ...]:
+    before = _call_contract_helper_v2(
+        "legged state pre-audit snapshot",
+        _canonical_search_state_snapshot_v2,
+        state,
+        "state",
+    )
     audited = _call_contract_helper_v2(
         "legged state audit",
         _audit_search_state_canonical,
@@ -345,6 +444,14 @@ def legged_state_key_v2(state: LeggedSearchStateV2) -> tuple[int, ...]:
     )
     if type(audited) is not LeggedSearchStateV2 or audited is not state:
         raise ValueError("legged state audit must return exact LeggedSearchStateV2")
+    after = _call_contract_helper_v2(
+        "legged state post-audit snapshot",
+        _canonical_search_state_snapshot_v2,
+        state,
+        "state",
+    )
+    if type(before) is not tuple or type(after) is not tuple or after != before:
+        raise ValueError("legged state audit must not mutate canonical payload")
     floats = (
         audited.body_state.x_m,
         audited.body_state.y_m,
@@ -356,7 +463,18 @@ def legged_state_key_v2(state: LeggedSearchStateV2) -> tuple[int, ...]:
         ),
     )
     try:
-        words = tuple(_float_bits_v2(value) for value in floats)
+        words_list: list[int] = []
+        for value in floats:
+            word = _float_bits_v2(value)
+            independent_word = _independent_float_bits_v2(value)
+            if (
+                type(word) is not int
+                or not 0 <= word < 1 << 64
+                or word != independent_word
+            ):
+                raise ValueError("float bit helper returned noncanonical word")
+            words_list.append(word)
+        words = tuple(words_list)
     except Exception as error:
         _raise_contract_value_error("legged state key", error)
     return (1, audited.sequence_phase, *words)
@@ -480,6 +598,13 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
         )
         if result is not None:
             raise ValueError("legged step primitive initializer must return None")
+        seal_result = _call_contract_helper_v2(
+            "legged step primitive postcondition",
+            _seal_primitive_canonical_postcondition_v2,
+            self,
+        )
+        if seal_result is not None:
+            raise ValueError("legged step primitive postcondition must return None")
 
     def _initialize_canonical_payload(self) -> None:
         raw_kind = self.kind
@@ -647,7 +772,26 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
             or any(type(value) is not float for value in expected_resources)
         ):
             raise ValueError("legged step relation validation returned invalid resources")
-        expected_foot, expected_distance, expected_energy = expected_resources
+        expected_foot, expected_distance, expected_energy = (
+            _audit_float(
+                expected_resources[0],
+                "relation foot_travel_m",
+                allow_signed_zero=False,
+                nonnegative=True,
+            ),
+            _audit_float(
+                expected_resources[1],
+                "relation distance_m",
+                allow_signed_zero=False,
+                nonnegative=True,
+            ),
+            _audit_float(
+                expected_resources[2],
+                "relation energy_cost",
+                allow_signed_zero=False,
+                nonnegative=True,
+            ),
+        )
         for raw_value, expected_value, name in (
             (foot_travel, expected_foot, "foot_travel_m"),
             (distance, expected_distance, "distance_m"),
@@ -668,6 +812,13 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
         object.__setattr__(self, "energy_cost", expected_energy)
 
     def as_oracle_candidate(self) -> LeggedStepCandidateV2:
+        pre_seal = _call_contract_helper_v2(
+            "legged primitive pre-audit postcondition",
+            _seal_primitive_canonical_postcondition_v2,
+            self,
+        )
+        if pre_seal is not None:
+            raise ValueError("legged primitive postcondition must return None")
         audited = _call_contract_helper_v2(
             "legged primitive audit",
             _audit_primitive_canonical,
@@ -675,6 +826,13 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
         )
         if audited is not self:
             raise ValueError("legged primitive audit must preserve object identity")
+        post_seal = _call_contract_helper_v2(
+            "legged primitive post-audit postcondition",
+            _seal_primitive_canonical_postcondition_v2,
+            self,
+        )
+        if post_seal is not None:
+            raise ValueError("legged primitive postcondition must return None")
         candidate = _call_contract_helper_v2(
             "oracle candidate",
             _candidate_from_payload_v2,
@@ -686,16 +844,14 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
         )
         if type(candidate) is not LeggedStepCandidateV2:
             raise ValueError("oracle candidate helper returned invalid payload")
-        if (
-            candidate.start_body_state != self.start_legged_state.body_state
-            or candidate.lift_body_state != self.lift_body_state
-            or candidate.end_body_state != self.end_legged_state.body_state
-            or candidate.foot_contacts != self.start_legged_state.foot_contacts
-            or candidate.moving_leg is not self.moving_leg
-            or candidate.sequence_phase != self.start_legged_state.sequence_phase
-            or candidate.target_foothold != self.target_foothold
-        ):
-            raise ValueError("oracle candidate helper returned mismatched payload")
+        candidate_seal = _call_contract_helper_v2(
+            "oracle candidate postcondition",
+            _seal_candidate_postcondition_v2,
+            candidate,
+            self,
+        )
+        if candidate_seal is not None:
+            raise ValueError("oracle candidate postcondition must return None")
         return candidate
 
 
@@ -786,6 +942,215 @@ def _audit_primitive_canonical(value: object) -> LeggedStepPrimitiveV2:
     ):
         raise ValueError("primitive resource payload drifted")
     return value
+
+
+def _seal_primitive_canonical_postcondition_v2(value: object) -> None:
+    if type(value) is not LeggedStepPrimitiveV2:
+        raise TypeError("primitive must be exact LeggedStepPrimitiveV2")
+    if type(value.kind) is not PrimitiveKindV2:
+        raise TypeError("kind must be exact PrimitiveKindV2")
+    if value.kind is not PrimitiveKindV2.LEG_STEP:
+        raise ValueError("kind must be PrimitiveKindV2.LEG_STEP")
+
+    start_pose = _canonical_pose_snapshot_v2(value.start_state, "start_state")
+    end_pose = _canonical_pose_snapshot_v2(value.end_state, "end_state")
+    lift_pose = _canonical_pose_snapshot_v2(
+        value.lift_body_state,
+        "lift_body_state",
+    )
+    _canonical_float_word_v2(value.duration_s, "duration_s", nonnegative=True)
+    distance_word = _canonical_float_word_v2(
+        value.distance_m,
+        "distance_m",
+        nonnegative=True,
+    )
+    energy_word = _canonical_float_word_v2(
+        value.energy_cost,
+        "energy_cost",
+        nonnegative=True,
+    )
+    _canonical_float_word_v2(
+        value.observation_contribution,
+        "observation_contribution",
+        nonnegative=True,
+    )
+    foot_word = _canonical_float_word_v2(
+        value.foot_travel_m,
+        "foot_travel_m",
+        nonnegative=True,
+    )
+    if value.duration_s != 1.0:
+        raise ValueError("duration_s must be exactly 1.0")
+    if value.observation_contribution != 0.0:
+        raise ValueError("observation_contribution must be exactly 0.0")
+    if type(value.validation_level) is not ValidationLevelV2:
+        raise TypeError("validation_level must be exact ValidationLevelV2")
+    if value.validation_level is not ValidationLevelV2.L2:
+        raise ValueError("validation_level must be ValidationLevelV2.L2")
+
+    _canonical_search_state_snapshot_v2(
+        value.start_legged_state,
+        "start_legged_state",
+    )
+    _canonical_search_state_snapshot_v2(
+        value.end_legged_state,
+        "end_legged_state",
+    )
+    start_body = _canonical_pose_snapshot_v2(
+        value.start_legged_state.body_state,
+        "start_legged_state.body_state",
+    )
+    end_body = _canonical_pose_snapshot_v2(
+        value.end_legged_state.body_state,
+        "end_legged_state.body_state",
+    )
+    if start_pose != start_body:
+        raise ValueError("start_state must bitwise match start legged body")
+    if end_pose != end_body:
+        raise ValueError("end_state must bitwise match end legged body")
+
+    if type(value.moving_leg) is not LegIdV2:
+        raise TypeError("moving_leg must be exact LegIdV2")
+    start_phase = value.start_legged_state.sequence_phase
+    end_phase = value.end_legged_state.sequence_phase
+    if value.moving_leg is not LEGGED_CRAWL_SEQUENCE_V2[start_phase]:
+        raise ValueError("moving_leg must match the crawl sequence phase")
+    if end_phase != (start_phase + 1) % 4:
+        raise ValueError("end sequence phase must advance by one")
+
+    target = _canonical_point_snapshot_v2(value.target_foothold, "target_foothold")
+    start_contacts = _canonical_contacts_snapshot_v2(
+        value.start_legged_state.foot_contacts,
+        "start_legged_state.foot_contacts",
+    )
+    end_contacts = _canonical_contacts_snapshot_v2(
+        value.end_legged_state.foot_contacts,
+        "end_legged_state.foot_contacts",
+    )
+    moving_index = LEGGED_FOOT_STORAGE_ORDER_V2.index(value.moving_leg)
+    for index, (start_contact, end_contact) in enumerate(
+        zip(start_contacts, end_contacts, strict=True)
+    ):
+        if index == moving_index:
+            if end_contact[1:] != target:
+                raise ValueError("moving contact must bitwise match target foothold")
+        elif end_contact != start_contact:
+            raise ValueError("nonmoving contacts must remain bitwise unchanged")
+
+    source = value.start_legged_state.foot_contacts[moving_index].foothold
+    target_point = value.target_foothold
+    foot_expected = hypot(target_point.x - source.x, target_point.y - source.y)
+    first_body = hypot(
+        value.lift_body_state.x_m - value.start_state.x_m,
+        value.lift_body_state.y_m - value.start_state.y_m,
+    )
+    second_body = hypot(
+        value.end_state.x_m - value.lift_body_state.x_m,
+        value.end_state.y_m - value.lift_body_state.y_m,
+    )
+    distance_expected = first_body + second_body
+    energy_expected = distance_expected + foot_expected
+    expected_words = (
+        _canonical_float_word_v2(
+            foot_expected,
+            "independent foot_travel_m",
+            nonnegative=True,
+        ),
+        _canonical_float_word_v2(
+            distance_expected,
+            "independent distance_m",
+            nonnegative=True,
+        ),
+        _canonical_float_word_v2(
+            energy_expected,
+            "independent energy_cost",
+            nonnegative=True,
+        ),
+    )
+    if (foot_word, distance_word, energy_word) != expected_words:
+        raise ValueError("primitive resources must bitwise match direct recomputation")
+
+    for actual, expected, name in (
+        (value.capability, LEGGED_CAPABILITY_LEVEL_V2, "capability"),
+        (value.resource_proxy_id, LEGGED_RESOURCE_PROXY_ID_V2, "resource_proxy_id"),
+        (
+            value.primitive_schema_version,
+            LEGGED_STEP_PRIMITIVE_SCHEMA_V2,
+            "primitive_schema_version",
+        ),
+    ):
+        if type(actual) is not str:
+            raise TypeError(f"{name} must be an exact built-in str")
+        if actual != expected:
+            raise ValueError(f"{name} must match the frozen value")
+
+
+def _seal_candidate_postcondition_v2(
+    candidate: object,
+    primitive: object,
+) -> None:
+    if type(candidate) is not LeggedStepCandidateV2:
+        raise TypeError("candidate must be exact LeggedStepCandidateV2")
+    if type(primitive) is not LeggedStepPrimitiveV2:
+        raise TypeError("primitive must be exact LeggedStepPrimitiveV2")
+
+    candidate_start = _canonical_pose_snapshot_v2(
+        candidate.start_body_state,
+        "candidate.start_body_state",
+    )
+    candidate_lift = _canonical_pose_snapshot_v2(
+        candidate.lift_body_state,
+        "candidate.lift_body_state",
+    )
+    candidate_end = _canonical_pose_snapshot_v2(
+        candidate.end_body_state,
+        "candidate.end_body_state",
+    )
+    candidate_contacts = _canonical_contacts_snapshot_v2(
+        candidate.foot_contacts,
+        "candidate.foot_contacts",
+    )
+    if type(candidate.moving_leg) is not LegIdV2:
+        raise TypeError("candidate.moving_leg must be exact LegIdV2")
+    if type(candidate.sequence_phase) is not int:
+        raise TypeError("candidate.sequence_phase must be an exact int")
+    if not 0 <= candidate.sequence_phase <= 3:
+        raise ValueError("candidate.sequence_phase must be in [0, 3]")
+    candidate_target = _canonical_point_snapshot_v2(
+        candidate.target_foothold,
+        "candidate.target_foothold",
+    )
+
+    primitive_start = _canonical_pose_snapshot_v2(
+        primitive.start_legged_state.body_state,
+        "primitive.start_legged_state.body_state",
+    )
+    primitive_lift = _canonical_pose_snapshot_v2(
+        primitive.lift_body_state,
+        "primitive.lift_body_state",
+    )
+    primitive_end = _canonical_pose_snapshot_v2(
+        primitive.end_legged_state.body_state,
+        "primitive.end_legged_state.body_state",
+    )
+    primitive_contacts = _canonical_contacts_snapshot_v2(
+        primitive.start_legged_state.foot_contacts,
+        "primitive.start_legged_state.foot_contacts",
+    )
+    primitive_target = _canonical_point_snapshot_v2(
+        primitive.target_foothold,
+        "primitive.target_foothold",
+    )
+    if (
+        candidate_start != primitive_start
+        or candidate_lift != primitive_lift
+        or candidate_end != primitive_end
+        or candidate_contacts != primitive_contacts
+        or candidate.moving_leg is not primitive.moving_leg
+        or candidate.sequence_phase != primitive.start_legged_state.sequence_phase
+        or candidate_target != primitive_target
+    ):
+        raise ValueError("oracle candidate must bitwise match primitive payload")
 
 
 def _candidate_from_payload_v2(

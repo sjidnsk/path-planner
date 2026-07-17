@@ -941,3 +941,115 @@ def test_public_boundaries_preserve_contract_error_types(
     )
     with pytest.raises(type(error), match=str(error)):
         entrypoint()  # type: ignore[operator]
+
+
+def test_key_rejects_in_place_mutation_by_audit_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state(PoseStateV2(1.0, 2.0, 0.25))
+    real_audit = legged_module._audit_search_state_canonical
+
+    def audit_then_mutate(value: object, name: str) -> LeggedSearchStateV2:
+        audited = real_audit(value, name)
+        object.__setattr__(audited.body_state, "x_m", -0.0)
+        return audited
+
+    monkeypatch.setattr(
+        legged_module,
+        "_audit_search_state_canonical",
+        audit_then_mutate,
+    )
+    with pytest.raises(ValueError):
+        legged_state_key_v2(state)
+
+
+@pytest.mark.parametrize(
+    "bad_word",
+    [True, IntSubclass(1), -1, 1 << 64, 0],
+)
+def test_key_rejects_noncanonical_or_mismatched_bit_words(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_word: object,
+) -> None:
+    monkeypatch.setattr(
+        legged_module,
+        "_float_bits_v2",
+        lambda _value: bad_word,
+    )
+    with pytest.raises(ValueError):
+        legged_state_key_v2(_state(PoseStateV2(1.0, 2.0, 0.25)))
+
+
+def test_constructor_rejects_raw_payload_when_initializer_is_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        LeggedStepPrimitiveV2,
+        "_initialize_canonical_payload",
+        lambda _self: None,
+    )
+    values = _primitive_values()
+    values["duration_s"] = 1
+    with pytest.raises(TypeError):
+        LeggedStepPrimitiveV2(**values)
+
+
+@pytest.mark.parametrize("fault", ["moving_leg", "end_phase"])
+def test_constructor_independently_rejects_relation_helper_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    values = _primitive_values()
+    if fault == "moving_leg":
+        values["moving_leg"] = LegIdV2.REAR_RIGHT
+    else:
+        end = values["end_legged_state"]
+        assert type(end) is LeggedSearchStateV2
+        values["end_legged_state"] = _state(
+            end.body_state,
+            end.foot_contacts,
+            2,
+        )
+    monkeypatch.setattr(
+        legged_module,
+        "_validate_step_relations",
+        lambda **_kwargs: (0.25, 0.10, 0.35),
+    )
+    with pytest.raises(ValueError):
+        LeggedStepPrimitiveV2(**values)
+
+
+def test_constructor_rejects_negative_resources_returned_by_relation_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        legged_module,
+        "_validate_step_relations",
+        lambda **_kwargs: (-5e-324, -5e-324, -5e-324),
+    )
+    with pytest.raises(ValueError):
+        _zero_primitive()
+
+
+@pytest.mark.parametrize("fault", ["start_negative_zero", "phase_bool"])
+def test_candidate_rejects_exact_type_with_forged_nested_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    real_builder = legged_module._candidate_from_payload_v2
+
+    def build_then_forge(*args: object) -> LeggedStepCandidateV2:
+        candidate = real_builder(*args)
+        if fault == "start_negative_zero":
+            object.__setattr__(candidate.start_body_state, "x_m", -0.0)
+        else:
+            object.__setattr__(candidate, "sequence_phase", False)
+        return candidate
+
+    monkeypatch.setattr(
+        legged_module,
+        "_candidate_from_payload_v2",
+        build_then_forge,
+    )
+    with pytest.raises((TypeError, ValueError)):
+        _primitive().as_oracle_candidate()
