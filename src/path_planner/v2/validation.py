@@ -3125,13 +3125,20 @@ class _LeggedRouteHashContractError(RuntimeError):
     pass
 
 
+class _LeggedRouteBytesDriftError(RuntimeError):
+    pass
+
+
 class _LeggedSnapshotHashContractError(RuntimeError):
     pass
 
 
-def _legged_trusted_route_bytes_v2(route: TypedRouteV2) -> bytes:
+def _legged_trusted_route_bytes_v2(
+    route: TypedRouteV2,
+    _canonical_json_bytes_v2=_TRUSTED_CANONICAL_JSON_BYTES_V2,
+) -> bytes:
     try:
-        payload = _TRUSTED_CANONICAL_JSON_BYTES_V2(route)
+        payload = _canonical_json_bytes_v2(route)
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
     except Exception as exc:
@@ -3141,9 +3148,12 @@ def _legged_trusted_route_bytes_v2(route: TypedRouteV2) -> bytes:
     return payload
 
 
-def _legged_trusted_route_digest_v2(payload: bytes) -> str:
+def _legged_trusted_route_digest_v2(
+    payload: bytes,
+    _sha256_v2=_TRUSTED_ROUTE_SHA256_V2,
+) -> str:
     try:
-        hasher = _TRUSTED_ROUTE_SHA256_V2(payload)
+        hasher = _sha256_v2(payload)
         digest = hasher.hexdigest()
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -3158,9 +3168,12 @@ def _legged_trusted_route_digest_v2(payload: bytes) -> str:
     return digest
 
 
-def _legged_trusted_snapshot_digest_v2(snapshot: TerrainSnapshotV2) -> str:
+def _legged_trusted_snapshot_digest_v2(
+    snapshot: TerrainSnapshotV2,
+    _snapshot_hash_v2=_TRUSTED_SNAPSHOT_HASH_V2,
+) -> str:
     try:
-        digest = _TRUSTED_SNAPSHOT_HASH_V2(snapshot)
+        digest = _snapshot_hash_v2(snapshot)
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
     except Exception as exc:
@@ -3177,6 +3190,41 @@ def _legged_trusted_snapshot_digest_v2(snapshot: TerrainSnapshotV2) -> str:
 _TRUSTED_LEGGED_ROUTE_BYTES_V2 = _legged_trusted_route_bytes_v2
 _TRUSTED_LEGGED_ROUTE_DIGEST_V2 = _legged_trusted_route_digest_v2
 _TRUSTED_LEGGED_SNAPSHOT_DIGEST_V2 = _legged_trusted_snapshot_digest_v2
+
+
+def _legged_auditable_route_bytes_v2(route: TypedRouteV2) -> bytes:
+    audited = _legged_trusted_route_bytes_v2(route)
+    direct = _TRUSTED_LEGGED_ROUTE_BYTES_V2(
+        route,
+        _canonical_json_bytes_v2=_TRUSTED_CANONICAL_JSON_BYTES_V2,
+    )
+    if type(audited) is not bytes:
+        raise _LeggedRouteHashContractError
+    if audited != direct:
+        raise _LeggedRouteBytesDriftError
+    return audited
+
+
+def _legged_auditable_route_digest_v2(payload: bytes) -> str:
+    audited = _legged_trusted_route_digest_v2(payload)
+    direct = _TRUSTED_LEGGED_ROUTE_DIGEST_V2(
+        payload,
+        _sha256_v2=_TRUSTED_ROUTE_SHA256_V2,
+    )
+    if type(audited) is not str or audited != direct:
+        raise _LeggedRouteHashContractError
+    return audited
+
+
+def _legged_auditable_snapshot_digest_v2(snapshot: TerrainSnapshotV2) -> str:
+    audited = _legged_trusted_snapshot_digest_v2(snapshot)
+    direct = _TRUSTED_LEGGED_SNAPSHOT_DIGEST_V2(
+        snapshot,
+        _snapshot_hash_v2=_TRUSTED_SNAPSHOT_HASH_V2,
+    )
+    if type(audited) is not str or audited != direct:
+        raise _LeggedSnapshotHashContractError
+    return audited
 
 
 class _LeggedDeadlineContractError(RuntimeError):
@@ -3421,21 +3469,14 @@ def _legged_independent_seal_authority_v2(
     _direct: bool = False,
 ) -> tuple[str | None, str | None]:
     route_hash = context.route_hash
-    route_bytes_v2 = (
-        _TRUSTED_LEGGED_ROUTE_BYTES_V2
-        if _direct
-        else _legged_trusted_route_bytes_v2
-    )
-    route_digest_v2 = (
-        _TRUSTED_LEGGED_ROUTE_DIGEST_V2
-        if _direct
-        else _legged_trusted_route_digest_v2
-    )
-    snapshot_digest_v2 = (
-        _TRUSTED_LEGGED_SNAPSHOT_DIGEST_V2
-        if _direct
-        else _legged_trusted_snapshot_digest_v2
-    )
+    if _direct:
+        route_bytes_v2 = _TRUSTED_LEGGED_ROUTE_BYTES_V2
+        route_digest_v2 = _TRUSTED_LEGGED_ROUTE_DIGEST_V2
+        snapshot_digest_v2 = _TRUSTED_LEGGED_SNAPSHOT_DIGEST_V2
+    else:
+        route_bytes_v2 = _legged_auditable_route_bytes_v2
+        route_digest_v2 = _legged_auditable_route_digest_v2
+        snapshot_digest_v2 = _legged_auditable_snapshot_digest_v2
     if context.route_token is not None:
         try:
             current_route_token = _TRUSTED_LEGGED_ROUTE_REBUILD_V2(context.route)
@@ -3447,6 +3488,8 @@ def _legged_independent_seal_authority_v2(
             return "route_structure_mismatch", None
         try:
             current_bytes = route_bytes_v2(context.route)
+        except _LeggedRouteBytesDriftError:
+            return "route_structure_mismatch", None
         except _LeggedRouteHashContractError:
             return "route_hash_contract_mismatch", None
         if current_bytes != context.route_bytes:
@@ -3579,7 +3622,9 @@ def _legged_seal_authority_v2(
         if current_route_token != context.route_token:
             return "route_structure_mismatch", None
         try:
-            current_bytes = _legged_trusted_route_bytes_v2(context.route)
+            current_bytes = _legged_auditable_route_bytes_v2(context.route)
+        except _LeggedRouteBytesDriftError:
+            return "route_structure_mismatch", None
         except _LeggedRouteHashContractError:
             return "route_hash_contract_mismatch", None
         if current_bytes != context.route_bytes:
@@ -3637,7 +3682,7 @@ def _legged_seal_authority_v2(
         return "terrain_snapshot_identity_mismatch", route_hash
     try:
         current_snapshot = _legged_snapshot_token_v2(context.snapshot)
-        current_digest = _legged_trusted_snapshot_digest_v2(context.snapshot)
+        current_digest = _legged_auditable_snapshot_digest_v2(context.snapshot)
         cached_digest = context.anchor._snapshot_hash
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -3847,10 +3892,10 @@ def validate_legged_route_l2(
             if len(exact_tokens) != len(primitives):
                 raise ValueError("route primitive audit did not cover every item")
             route_token = _legged_route_token_v2(route, exact_tokens)
-            route_bytes = _legged_trusted_route_bytes_v2(route)
+            route_bytes = _legged_auditable_route_bytes_v2(route)
             if _legged_rebuild_route_token_v2(route) != route_token:
                 raise ValueError("route serializer mutated canonical payload")
-            route_hash = _legged_trusted_route_digest_v2(route_bytes)
+            route_hash = _legged_auditable_route_digest_v2(route_bytes)
         except (KeyboardInterrupt, SystemExit, MemoryError):
             raise
         except _LeggedRouteHashContractError:
@@ -3872,7 +3917,7 @@ def validate_legged_route_l2(
         )
     try:
         snapshot_token = _legged_snapshot_token_v2(snapshot)
-        snapshot_digest = _legged_trusted_snapshot_digest_v2(snapshot)
+        snapshot_digest = _legged_auditable_snapshot_digest_v2(snapshot)
         cached_digest = anchor._snapshot_hash
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
