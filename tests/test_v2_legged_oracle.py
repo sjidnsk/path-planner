@@ -8,6 +8,7 @@ import pytest
 
 import path_planner.v2 as v2
 import path_planner.v2.oracles as oracle_exports
+import path_planner.v2.oracles.legged as legged_module
 from path_planner.core import Cell, WorldPoint
 from path_planner.v2.contracts import (
     PlatformKindV2,
@@ -240,6 +241,42 @@ def test_oracle_reaudit_rejects_type_and_signed_zero_contract_drift() -> None:
     ).reason_code == "legged_profile_contract_mismatch"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_traversable_slope_deg", 30),
+        ("goal_heading_tolerance_rad", 0),
+        ("goal_position_tolerance_m", False),
+        ("profile_id", ""),
+        ("schema_version", "wrong-schema/v1"),
+        ("platform_kind", "legged"),
+        ("simulation_proxy", 1),
+        ("max_traversable_slope_deg", float("nan")),
+    ],
+)
+def test_profile_reaudit_rejects_raw_nested_base_contract_drift(
+    field: str,
+    value: object,
+) -> None:
+    profile = _profile()
+    object.__setattr__(profile.profile, field, value)
+    result = validate_legged_step_l2(
+        _candidate(), _anchor(), profile, _deadline()
+    )
+    assert result.reason_code == "legged_profile_contract_mismatch"
+
+
+def test_profile_reaudit_rejects_raw_nested_string_subclass() -> None:
+    class DerivedStr(str):
+        pass
+
+    profile = _profile()
+    object.__setattr__(profile.profile, "profile_id", DerivedStr("legged-static-crawl/v1"))
+    assert validate_legged_step_l2(
+        _candidate(), _anchor(), profile, _deadline()
+    ).reason_code == "legged_profile_contract_mismatch"
+
+
 def test_happy_path_returns_authoritative_l2_evidence() -> None:
     result = validate_legged_step_l2(
         _candidate(),
@@ -363,6 +400,15 @@ def _wide_contacts() -> tuple[LeggedFootContactV2, ...]:
     )
 
 
+def _boundary_contacts(point: WorldPoint) -> tuple[LeggedFootContactV2, ...]:
+    return (
+        LeggedFootContactV2(LegIdV2.FRONT_LEFT, point),
+        LeggedFootContactV2(LegIdV2.FRONT_RIGHT, WorldPoint(2.25, -2.25)),
+        LeggedFootContactV2(LegIdV2.REAR_LEFT, WorldPoint(-2.25, 2.25)),
+        LeggedFootContactV2(LegIdV2.REAR_RIGHT, WorldPoint(-2.25, -2.25)),
+    )
+
+
 @pytest.mark.parametrize(
     ("anchor", "reason"),
     [
@@ -422,6 +468,156 @@ def test_body_sweep_catches_pure_rotation_interior_collision(
     )
     assert result.reason_code == "legged_body_sweep_collision"
     assert result.failed_cell == obstacle
+
+
+@pytest.mark.parametrize(
+    ("obstacle", "fraction"),
+    [(Cell(9, 6), 0.25), (Cell(10, 6), 0.75)],
+)
+def test_body_sweep_catches_quarter_interval_thin_obstacle(
+    obstacle: Cell,
+    fraction: float,
+) -> None:
+    contacts = (
+        LeggedFootContactV2(LegIdV2.FRONT_LEFT, WorldPoint(3.0, 3.0)),
+        LeggedFootContactV2(LegIdV2.FRONT_RIGHT, WorldPoint(3.0, -3.0)),
+        LeggedFootContactV2(LegIdV2.REAR_LEFT, WorldPoint(-3.0, 3.0)),
+        LeggedFootContactV2(LegIdV2.REAR_RIGHT, WorldPoint(-3.0, -3.0)),
+    )
+    start = PoseStateV2(-1.0, -1.5, 0.0)
+    end = PoseStateV2(1.0, -1.5, 0.0)
+    geometry = _anchor().snapshot.geometry
+    endpoint_cells = set(
+        v2.oriented_rectangle_cells(
+            WorldPoint(start.x_m, start.y_m),
+            start.heading_rad,
+            0.60,
+            0.40,
+            geometry,
+        )
+    ) | set(
+        v2.oriented_rectangle_cells(
+            WorldPoint(end.x_m, end.y_m),
+            end.heading_rad,
+            0.60,
+            0.40,
+            geometry,
+        )
+    )
+    interval_pose = WorldPoint(-1.0 + 2.0 * fraction, -1.5)
+    assert obstacle not in endpoint_cells
+    assert obstacle in set(
+        v2.oriented_rectangle_cells(interval_pose, 0.0, 0.60, 0.40, geometry)
+    )
+
+    result = validate_legged_step_l2(
+        _candidate(
+            start_body_state=start,
+            lift_body_state=end,
+            end_body_state=end,
+            foot_contacts=contacts,
+            target_foothold=WorldPoint(3.5, 3.0),
+        ),
+        _anchor(hard=(obstacle,)),
+        _profile(),
+        _deadline(),
+    )
+    assert result.reason_code == "legged_body_sweep_collision"
+    assert result.failed_cell == obstacle
+
+
+@pytest.mark.parametrize("end_heading", [pi, -pi])
+def test_body_sweep_translation_and_pi_tie_catches_mid_interval_collision(
+    end_heading: float,
+) -> None:
+    start = PoseStateV2(-0.225, -0.175, 0.0)
+    end = PoseStateV2(0.025, -0.175, end_heading)
+    obstacle = Cell(9, 8)
+    geometry = _anchor().snapshot.geometry
+    endpoint_cells = set(
+        v2.oriented_rectangle_cells(
+            WorldPoint(start.x_m, start.y_m),
+            start.heading_rad,
+            0.60,
+            0.40,
+            geometry,
+        )
+    ) | set(
+        v2.oriented_rectangle_cells(
+            WorldPoint(end.x_m, end.y_m),
+            end.heading_rad,
+            0.60,
+            0.40,
+            geometry,
+        )
+    )
+    assert obstacle not in endpoint_cells
+
+    result = validate_legged_step_l2(
+        _candidate(
+            foot_contacts=_wide_contacts(),
+            start_body_state=start,
+            lift_body_state=end,
+            end_body_state=end,
+            target_foothold=WorldPoint(1.0, 0.75),
+        ),
+        _anchor(hard=(obstacle,)),
+        _profile(),
+        _deadline(),
+    )
+    assert result.reason_code == "legged_body_sweep_collision"
+    assert result.failed_cell == obstacle
+
+
+@pytest.mark.parametrize("end_heading", [pi, -pi])
+@pytest.mark.parametrize("fraction", [0.25, 0.75])
+def test_body_sweep_pi_tie_catches_quarter_interval_oob(
+    end_heading: float,
+    fraction: float,
+) -> None:
+    contacts = (
+        LeggedFootContactV2(LegIdV2.FRONT_LEFT, WorldPoint(-0.75, 4.1)),
+        LeggedFootContactV2(LegIdV2.FRONT_RIGHT, WorldPoint(0.75, 4.1)),
+        LeggedFootContactV2(LegIdV2.REAR_LEFT, WorldPoint(-0.75, 4.9)),
+        LeggedFootContactV2(LegIdV2.REAR_RIGHT, WorldPoint(0.75, 4.9)),
+    )
+    start = PoseStateV2(0.0, 4.59, 0.0)
+    end = PoseStateV2(0.0, 4.59, end_heading)
+    geometry = _anchor().snapshot.geometry
+    center = WorldPoint(start.x_m, start.y_m)
+    for safe_heading in (start.heading_rad, end_heading / 2.0, end_heading):
+        safe_cells = v2.oriented_rectangle_cells(
+            center,
+            safe_heading,
+            0.60,
+            0.40,
+            geometry,
+        )
+        assert all(geometry.in_bounds(cell) for cell in safe_cells)
+    interval_cells = v2.oriented_rectangle_cells(
+        center,
+        end_heading * fraction,
+        0.60,
+        0.40,
+        geometry,
+    )
+    assert any(not geometry.in_bounds(cell) for cell in interval_cells)
+
+    result = validate_legged_step_l2(
+        _candidate(
+            foot_contacts=contacts,
+            start_body_state=start,
+            lift_body_state=end,
+            end_body_state=end,
+            target_foothold=WorldPoint(-0.25, 4.1),
+        ),
+        _anchor(),
+        _profile(),
+        _deadline(),
+    )
+    assert result.reason_code == "legged_body_sweep_unknown"
+    assert result.failed_cell is not None
+    assert not geometry.in_bounds(result.failed_cell)
 
 
 def test_body_sweep_oob_is_unknown_and_exact_body_slope_30_passes() -> None:
@@ -647,6 +843,75 @@ def test_fine_boundary_contact_queries_all_closed_square_neighbors(
     assert {Cell(10, 10), Cell(11, 10), Cell(10, 11), Cell(11, 11)} <= contact_cells
 
 
+@pytest.mark.parametrize(
+    ("point", "expected_cells"),
+    [
+        (WorldPoint(0.25, 0.25), {Cell(10, 10)}),
+        (WorldPoint(0.5, 0.25), {Cell(10, 10), Cell(11, 10)}),
+        (
+            WorldPoint(0.5, 0.5),
+            {Cell(10, 10), Cell(11, 10), Cell(10, 11), Cell(11, 11)},
+        ),
+        (
+            WorldPoint(nextafter(0.5, 0.0), 0.25),
+            {Cell(10, 10), Cell(11, 10)},
+        ),
+        (
+            WorldPoint(nextafter(0.5, 1.0), 0.25),
+            {Cell(10, 10), Cell(11, 10)},
+        ),
+        (WorldPoint(0.5 - 0.5e-12, 0.25), {Cell(10, 10), Cell(11, 10)}),
+        (WorldPoint(0.5 + 0.5e-12, 0.25), {Cell(10, 10), Cell(11, 10)}),
+        (WorldPoint(0.5 - 2.0e-12, 0.25), {Cell(10, 10)}),
+        (WorldPoint(0.5 + 2.0e-12, 0.25), {Cell(11, 10)}),
+        (
+            WorldPoint(nextafter(0.5, 0.0), nextafter(0.5, 1.0)),
+            {Cell(10, 10), Cell(11, 10), Cell(10, 11), Cell(11, 11)},
+        ),
+        (
+            WorldPoint(0.5 - 0.5e-12, 0.5 + 0.5e-12),
+            {Cell(10, 10), Cell(11, 10), Cell(10, 11), Cell(11, 11)},
+        ),
+        (WorldPoint(0.5 - 2.0e-12, 0.5 + 2.0e-12), {Cell(10, 11)}),
+    ],
+)
+def test_public_oracle_contact_cell_boundary_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    point: WorldPoint,
+    expected_cells: set[Cell],
+) -> None:
+    original = FineSafetyAnchorV2.query
+    calls: list[tuple[Cell, float]] = []
+
+    def record(self, cell, threshold=30.0):
+        calls.append((cell, threshold))
+        return original(self, cell, threshold)
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", record)
+    result = validate_legged_step_l2(
+        _candidate(
+            foot_contacts=_boundary_contacts(point),
+            target_foothold=point,
+        ),
+        _anchor(),
+        _profile(),
+        _deadline(),
+    )
+    neighborhood = {
+        Cell(x, y)
+        for y in range(9, 13)
+        for x in range(9, 13)
+    }
+    observed_cells = {
+        cell
+        for cell, threshold in calls
+        if threshold == 25.0 and cell in neighborhood
+    }
+    assert result.reason_code == "legged_step_l2_valid"
+    assert observed_cells == expected_cells
+    assert len(observed_cells) in {1, 2, 4}
+
+
 def test_exact_closed_boundaries_pass_and_next_values_fail() -> None:
     assert validate_legged_step_l2(
         _candidate(target_foothold=WorldPoint(0.85, 0.25)),
@@ -757,6 +1022,36 @@ def test_failure_precedence_is_independent_of_terrain_iteration_order(
         _deadline(),
     )
     assert result.reason_code == "terrain_query_contract_mismatch"
+
+
+def test_same_reason_foothold_and_body_ties_are_stable() -> None:
+    foothold_anchor = _anchor(
+        hard=(Cell(11, 10), Cell(10, 10), Cell(10, 9)),
+    )
+    for _ in range(3):
+        result = validate_legged_step_l2(
+            _candidate(), foothold_anchor, _profile(), _deadline()
+        )
+        assert result.reason_code == "legged_foothold_hard_obstacle"
+        assert result.failed_leg is LegIdV2.FRONT_LEFT
+        assert result.failed_cell == Cell(10, 10)
+
+    body_anchor = _anchor(
+        hard=(Cell(10, 9), Cell(9, 10), Cell(9, 9)),
+    )
+    body_candidate = _candidate(
+        foot_contacts=_wide_contacts(),
+        lift_body_state=PoseStateV2(0.0, -0.20, 0.0),
+        end_body_state=PoseStateV2(0.0, -0.20, 0.0),
+        target_foothold=WorldPoint(1.0, 0.75),
+    )
+    for _ in range(3):
+        result = validate_legged_step_l2(
+            body_candidate, body_anchor, _profile(), _deadline()
+        )
+        assert result.reason_code == "legged_body_sweep_collision"
+        assert result.failed_leg is None
+        assert result.failed_cell == Cell(9, 9)
 
 
 def test_valid_but_foreign_query_hash_precedes_local_semantic_mismatch(
@@ -872,6 +1167,150 @@ def test_query_detects_signed_zero_geometry_metadata_drift(
         _deadline(),
     )
     assert result.reason_code == "terrain_query_contract_mismatch"
+
+
+def _one_cell_anchor() -> FineSafetyAnchorV2:
+    shape = (1, 1)
+    return FineSafetyAnchorV2(
+        TerrainSnapshotV2(
+            geometry=FineGridGeometryV2(
+                width=1,
+                height=1,
+                origin=(-0.25, -0.25),
+                frame_id="moon",
+            ),
+            elevation_m=np.zeros(shape, dtype=np.float64),
+            slope_deg=np.zeros(shape, dtype=np.float64),
+            traversable_mask=np.ones(shape, dtype=bool),
+            hard_obstacle_mask=np.zeros(shape, dtype=bool),
+            observed_mask=np.ones(shape, dtype=bool),
+            confidence=np.ones(shape, dtype=np.float64),
+            provenance=TerrainProvenanceV2(
+                source_kind="synthetic_terrain_obstacle_proxy/v1",
+                source_id="one-cell-fixture",
+                source_hash="one-cell-fixture-hash",
+                physical_obstacle_cells_written=False,
+            ),
+        )
+    )
+
+
+def test_equal_by_value_one_cell_layer_replacement_is_identity_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = _one_cell_anchor()
+    replacement = _one_cell_anchor().snapshot.slope_deg
+    assert replacement is not anchor.snapshot.slope_deg
+    original = FineSafetyAnchorV2.query
+    changed = False
+
+    def replace_layer(self, cell, threshold=30.0):
+        nonlocal changed
+        query = original(self, cell, threshold)
+        if not changed:
+            changed = True
+            object.__setattr__(self.snapshot, "slope_deg", replacement)
+        return query
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", replace_layer)
+    result = validate_legged_step_l2(
+        _candidate(), anchor, _profile(), _deadline()
+    )
+    assert result.reason_code == "terrain_query_contract_mismatch"
+
+
+def test_equal_hash_string_replacement_is_identity_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = _one_cell_anchor()
+    original_hash = anchor._snapshot_hash
+    replacement = ("!" + original_hash)[1:]
+    assert type(replacement) is str
+    assert replacement == original_hash
+    assert replacement is not original_hash
+    original = FineSafetyAnchorV2.query
+    changed = False
+
+    def replace_hash(self, cell, threshold=30.0):
+        nonlocal changed
+        query = original(self, cell, threshold)
+        if not changed:
+            changed = True
+            object.__setattr__(self, "_snapshot_hash", replacement)
+        return query
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", replace_hash)
+    result = validate_legged_step_l2(
+        _candidate(), anchor, _profile(), _deadline()
+    )
+    assert result.reason_code == "terrain_query_contract_mismatch"
+
+
+def test_body_and_contact_calculation_use_canonical_geometry_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = _anchor()
+    authority_geometry = anchor.snapshot.geometry
+    seen: list[FineGridGeometryV2] = []
+    original = legged_module.oriented_rectangle_cells
+
+    def record_geometry(center, theta, length, width, geometry):
+        seen.append(geometry)
+        return original(center, theta, length, width, geometry)
+
+    monkeypatch.setattr(legged_module, "oriented_rectangle_cells", record_geometry)
+    result = validate_legged_step_l2(
+        _candidate(), anchor, _profile(), _deadline()
+    )
+    assert result.reason_code == "legged_step_l2_valid"
+    assert seen
+    assert all(type(geometry) is FineGridGeometryV2 for geometry in seen)
+    assert all(geometry is not authority_geometry for geometry in seen)
+
+
+def test_contact_cells_remain_bound_to_canonical_geometry_during_restored_drift() -> None:
+    obstacle = Cell(11, 11)
+    candidate = _candidate(
+        foot_contacts=_wide_contacts(),
+        lift_body_state=PoseStateV2(0.0, -0.20, 0.0),
+        end_body_state=PoseStateV2(0.0, -0.20, 0.0),
+        target_foothold=WorldPoint(1.25, 0.75),
+    )
+    baseline = validate_legged_step_l2(
+        candidate,
+        _anchor(hard=(obstacle,)),
+        _profile(),
+        _deadline(),
+    )
+    assert baseline.reason_code == "legged_foothold_hard_obstacle"
+    assert baseline.failed_leg is LegIdV2.FRONT_LEFT
+    assert baseline.failed_cell == obstacle
+
+    anchor = _anchor(hard=(obstacle,))
+    authority_geometry = anchor.snapshot.geometry
+    original_origin = authority_geometry.origin
+    calls = 0
+
+    def restoring_clock() -> float:
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            object.__setattr__(authority_geometry, "origin", (-4.0, -4.0))
+        elif calls == 5:
+            object.__setattr__(authority_geometry, "origin", original_origin)
+        return 0.0
+
+    result = validate_legged_step_l2(
+        candidate,
+        anchor,
+        _profile(),
+        PlanningDeadlineV2(0.0, 100.0, restoring_clock),
+    )
+    assert calls >= 5
+    assert authority_geometry.origin is original_origin
+    assert result.reason_code == "legged_foothold_hard_obstacle"
+    assert result.failed_leg is LegIdV2.FRONT_LEFT
+    assert result.failed_cell == obstacle
 
 
 def test_deadline_signed_zero_and_persistent_clock_mutation_are_contract_failures() -> None:
@@ -997,6 +1436,81 @@ def test_result_constructor_rejects_cross_reason_metadata() -> None:
             failed_leg=None,
             checked_cell_count=0,
             minimum_support_margin_m=0.05,
+        )
+
+
+def test_result_reaudits_exact_nested_evidence_types() -> None:
+    class DerivedTuple(tuple):
+        pass
+
+    class DerivedStr(str):
+        pass
+
+    for forged_checks in (
+        DerivedTuple(("legged_step_l2_valid",)),
+        (DerivedStr("legged_step_l2_valid"),),
+    ):
+        evidence = _evidence("legged_step_l2_valid", passed=True)
+        object.__setattr__(evidence, "checks", forged_checks)
+        with pytest.raises((TypeError, ValueError)):
+            LeggedValidationResultV2(
+                evidence=evidence,
+                reason_code="legged_step_l2_valid",
+                timed_out=False,
+                failed_cell=None,
+                failed_leg=None,
+                checked_cell_count=1,
+                minimum_support_margin_m=0.05,
+            )
+
+    for field, value in (
+        ("validator_id", DerivedStr(LEGGED_STATIC_STABILITY_VALIDATOR_ID_V2)),
+        ("level", "L2"),
+        ("passed", 1),
+    ):
+        evidence = _evidence("legged_step_l2_valid", passed=True)
+        object.__setattr__(evidence, field, value)
+        with pytest.raises((TypeError, ValueError)):
+            LeggedValidationResultV2(
+                evidence=evidence,
+                reason_code="legged_step_l2_valid",
+                timed_out=False,
+                failed_cell=None,
+                failed_leg=None,
+                checked_cell_count=1,
+                minimum_support_margin_m=0.05,
+            )
+
+
+@pytest.mark.parametrize(
+    ("reason", "passed", "failed_cell", "failed_leg", "margin"),
+    [
+        ("legged_foothold_grid_misaligned", False, None, LegIdV2.FRONT_LEFT, None),
+        ("legged_foothold_unknown", False, Cell(1, 1), LegIdV2.FRONT_LEFT, None),
+        ("legged_step_length_exceeded", False, None, LegIdV2.FRONT_LEFT, None),
+        ("legged_step_height_exceeded", False, None, LegIdV2.FRONT_LEFT, None),
+        ("legged_support_margin_insufficient", False, None, None, None),
+        ("legged_body_sweep_collision", False, Cell(1, 1), None, 0.05),
+        ("legged_foot_sequence_invalid", False, None, LegIdV2.FRONT_LEFT, 0.05),
+        ("legged_step_l2_valid", True, None, None, 0.05),
+    ],
+)
+def test_post_contact_results_require_positive_checked_count(
+    reason: str,
+    passed: bool,
+    failed_cell: Cell | None,
+    failed_leg: LegIdV2 | None,
+    margin: float | None,
+) -> None:
+    with pytest.raises(ValueError):
+        LeggedValidationResultV2(
+            evidence=_evidence(reason, passed=passed),
+            reason_code=reason,
+            timed_out=False,
+            failed_cell=failed_cell,
+            failed_leg=failed_leg,
+            checked_cell_count=0,
+            minimum_support_margin_m=margin,
         )
 
 

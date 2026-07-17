@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from math import ceil, cos, floor, hypot, isfinite, nextafter, pi, sin
 from numbers import Real
@@ -10,6 +10,7 @@ import numpy as np
 from path_planner.core import Cell, WorldPoint
 from path_planner.search.hybrid_astar import MAX_REPLAY_STEPS
 from path_planner.v2.contracts import (
+    PlatformKindV2,
     PoseStateV2,
     ValidationEvidenceV2,
     ValidationLevelV2,
@@ -238,7 +239,30 @@ class _DeadlineGuard:
 
 def _reaudit_profile(profile: LeggedProfileV2) -> LeggedProfileV2 | None:
     try:
-        if type(profile.profile) is not PlatformProfileV2:
+        base = profile.profile
+        if type(base) is not PlatformProfileV2:
+            return None
+        profile_id = base.profile_id
+        platform_kind = base.platform_kind
+        capability_revision = base.capability_revision
+        simulation_proxy = base.simulation_proxy
+        max_slope = base.max_traversable_slope_deg
+        position_tolerance = base.goal_position_tolerance_m
+        heading_tolerance = base.goal_heading_tolerance_rad
+        schema_version = base.schema_version
+        if (
+            type(profile_id) is not str
+            or type(platform_kind) is not PlatformKindV2
+            or type(capability_revision) is not str
+            or type(simulation_proxy) is not bool
+            or type(max_slope) is not float
+            or not isfinite(max_slope)
+            or type(position_tolerance) is not float
+            or not isfinite(position_tolerance)
+            or type(heading_tolerance) is not float
+            or not isfinite(heading_tolerance)
+            or type(schema_version) is not str
+        ):
             return None
         fixed_values = (
             (profile.body_length_m, 0.60),
@@ -253,8 +277,28 @@ def _reaudit_profile(profile: LeggedProfileV2) -> LeggedProfileV2 | None:
         )
         if any(type(value) is not float or value != expected for value, expected in fixed_values):
             return None
-        rebuilt_base = replace(profile.profile)
-        rebuilt = replace(profile, profile=rebuilt_base)
+        rebuilt_base = PlatformProfileV2(
+            profile_id=profile_id,
+            platform_kind=platform_kind,
+            capability_revision=capability_revision,
+            simulation_proxy=simulation_proxy,
+            max_traversable_slope_deg=max_slope,
+            goal_position_tolerance_m=position_tolerance,
+            goal_heading_tolerance_rad=heading_tolerance,
+            schema_version=schema_version,
+        )
+        rebuilt = LeggedProfileV2(
+            profile=rebuilt_base,
+            body_length_m=profile.body_length_m,
+            body_width_m=profile.body_width_m,
+            nominal_foot_rectangle_length_m=profile.nominal_foot_rectangle_length_m,
+            nominal_foot_rectangle_width_m=profile.nominal_foot_rectangle_width_m,
+            max_step_length_m=profile.max_step_length_m,
+            max_step_height_m=profile.max_step_height_m,
+            max_foothold_slope_deg=profile.max_foothold_slope_deg,
+            min_support_margin_m=profile.min_support_margin_m,
+            local_foothold_grid_spacing_m=profile.local_foothold_grid_spacing_m,
+        )
     except BaseException as exc:
         _propagate_critical(exc)
         return None
@@ -432,10 +476,33 @@ def _metadata_token(value: object) -> object:
     return ("invalid", type(value).__qualname__)
 
 
+def _exact_provenance_details(details: object) -> bool:
+    if type(details) is not tuple:
+        return False
+    previous_key: str | None = None
+    for detail in details:
+        if type(detail) is not tuple or len(detail) != 2:
+            return False
+        key, value = detail
+        if (
+            type(key) is not str
+            or not key.strip()
+            or (previous_key is not None and key <= previous_key)
+        ):
+            return False
+        if value is not None and type(value) not in (str, bool, int, float):
+            return False
+        if type(value) is float and not isfinite(value):
+            return False
+        previous_key = key
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class _PinnedTerrain:
     anchor: FineSafetyAnchorV2
     snapshot: TerrainSnapshotV2
+    authority_geometry: FineGridGeometryV2
     geometry: FineGridGeometryV2
     provenance: TerrainProvenanceV2
     layers: tuple[np.ndarray, ...]
@@ -458,49 +525,77 @@ class _PinnedTerrain:
             provenance = snapshot.provenance
             if type(geometry) is not FineGridGeometryV2 or type(provenance) is not TerrainProvenanceV2:
                 raise ValueError
-            replace(geometry)
-            replace(provenance)
+            width = geometry.width
+            height = geometry.height
+            origin = geometry.origin
+            frame_id = geometry.frame_id
+            resolution_m = geometry.resolution_m
+            source_kind = provenance.source_kind
+            source_id = provenance.source_id
+            source_hash = provenance.source_hash
+            physical_written = provenance.physical_obstacle_cells_written
+            details = provenance.details
+            if (
+                type(width) is not int
+                or width <= 0
+                or type(height) is not int
+                or height <= 0
+                or type(origin) is not tuple
+                or len(origin) != 2
+                or any(type(value) is not float or not isfinite(value) for value in origin)
+                or type(frame_id) is not str
+                or not frame_id.strip()
+                or type(resolution_m) is not float
+                or resolution_m != 0.5
+                or type(source_kind) is not str
+                or not source_kind.strip()
+                or type(source_id) is not str
+                or not source_id.strip()
+                or type(source_hash) is not str
+                or not source_hash.strip()
+                or type(physical_written) is not bool
+                or not _exact_provenance_details(details)
+                or (
+                    source_kind == SYNTHETIC_TERRAIN_SOURCE_KIND_V2
+                    and physical_written is not False
+                )
+            ):
+                raise ValueError
+            canonical_geometry = FineGridGeometryV2(
+                width=width,
+                height=height,
+                origin=origin,
+                frame_id=frame_id,
+                resolution_m=resolution_m,
+            )
+            TerrainProvenanceV2(
+                source_kind=source_kind,
+                source_id=source_id,
+                source_hash=source_hash,
+                physical_obstacle_cells_written=physical_written,
+                details=details,
+            )
             geometry_metadata = _metadata_token(
                 (
-                    geometry.width,
-                    geometry.height,
-                    geometry.origin,
-                    geometry.frame_id,
-                    geometry.resolution_m,
+                    width,
+                    height,
+                    origin,
+                    frame_id,
+                    resolution_m,
                 )
             )
             provenance_metadata = _metadata_token(
                 (
-                    provenance.source_kind,
-                    provenance.source_id,
-                    provenance.source_hash,
-                    provenance.physical_obstacle_cells_written,
-                    provenance.details,
+                    source_kind,
+                    source_id,
+                    source_hash,
+                    physical_written,
+                    details,
                 )
             )
-            if (
-                type(geometry.width) is not int
-                or type(geometry.height) is not int
-                or type(geometry.origin) is not tuple
-                or len(geometry.origin) != 2
-                or any(type(value) is not float for value in geometry.origin)
-                or type(geometry.frame_id) is not str
-                or type(geometry.resolution_m) is not float
-                or geometry.resolution_m != 0.5
-                or type(provenance.source_kind) is not str
-                or type(provenance.source_id) is not str
-                or type(provenance.source_hash) is not str
-                or type(provenance.physical_obstacle_cells_written) is not bool
-                or type(provenance.details) is not tuple
-                or (
-                    provenance.source_kind == SYNTHETIC_TERRAIN_SOURCE_KIND_V2
-                    and provenance.physical_obstacle_cells_written is not False
-                )
-            ):
-                raise ValueError
             layers = tuple(getattr(snapshot, name) for name, _dtype in _LAYER_SPECS)
             if any(
-                not _immutable_layer(layer, dtype, geometry.shape)
+                not _immutable_layer(layer, dtype, canonical_geometry.shape)
                 for layer, (_name, dtype) in zip(layers, _LAYER_SPECS, strict=True)
             ):
                 raise ValueError
@@ -520,6 +615,7 @@ class _PinnedTerrain:
             anchor,
             snapshot,
             geometry,
+            canonical_geometry,
             provenance,
             layers,
             geometry_metadata,
@@ -534,17 +630,23 @@ class _PinnedTerrain:
         try:
             return (
                 self.anchor.snapshot is self.snapshot
-                and self.snapshot.geometry is self.geometry
+                and self.snapshot.geometry is self.authority_geometry
                 and self.snapshot.provenance is self.provenance
-                and tuple(getattr(self.snapshot, name) for name, _dtype in _LAYER_SPECS)
-                == self.layers
+                and all(
+                    getattr(self.snapshot, name) is pinned_layer
+                    for (name, _dtype), pinned_layer in zip(
+                        _LAYER_SPECS,
+                        self.layers,
+                        strict=True,
+                    )
+                )
                 and _metadata_token(
                     (
-                        self.geometry.width,
-                        self.geometry.height,
-                        self.geometry.origin,
-                        self.geometry.frame_id,
-                        self.geometry.resolution_m,
+                        self.authority_geometry.width,
+                        self.authority_geometry.height,
+                        self.authority_geometry.origin,
+                        self.authority_geometry.frame_id,
+                        self.authority_geometry.resolution_m,
                     )
                 )
                 == self.geometry_metadata
@@ -558,7 +660,8 @@ class _PinnedTerrain:
                     )
                 )
                 == self.provenance_metadata
-                and self.anchor._snapshot_hash == self.expected_hash
+                and type(self.anchor._snapshot_hash) is str
+                and self.anchor._snapshot_hash is self.expected_hash
             )
         except BaseException as exc:
             _propagate_critical(exc)
@@ -863,8 +966,19 @@ class LeggedValidationResultV2:
             or self.evidence.validator_id != LEGGED_STATIC_STABILITY_VALIDATOR_ID_V2
         ):
             raise ValueError("evidence validator_id must be the legged L2 validator")
-        if self.evidence.level is not ValidationLevelV2.L2:
+        if (
+            type(self.evidence.level) is not ValidationLevelV2
+            or self.evidence.level is not ValidationLevelV2.L2
+        ):
             raise ValueError("evidence must be L2")
+        if type(self.evidence.passed) is not bool:
+            raise TypeError("evidence passed must be exact bool")
+        if (
+            type(self.evidence.checks) is not tuple
+            or len(self.evidence.checks) != 1
+            or type(self.evidence.checks[0]) is not str
+        ):
+            raise TypeError("evidence checks must be one exact string in an exact tuple")
         if type(self.reason_code) is not str or self.reason_code not in _REASONS:
             raise ValueError("reason_code must be a stable legged L2 reason")
         if type(self.timed_out) is not bool:
@@ -873,6 +987,22 @@ class LeggedValidationResultV2:
             raise TypeError("checked_cell_count must be an exact int")
         if self.checked_cell_count < 0:
             raise ValueError("checked_cell_count must be nonnegative")
+        post_contact_reasons = {
+            "legged_foothold_grid_misaligned",
+            "legged_foothold_unknown",
+            "legged_foothold_hard_obstacle",
+            "legged_foothold_not_traversable",
+            "legged_foothold_slope_exceeded",
+            "legged_step_length_exceeded",
+            "legged_step_height_exceeded",
+            "legged_support_margin_insufficient",
+            "legged_body_sweep_unknown",
+            "legged_body_sweep_collision",
+            "legged_foot_sequence_invalid",
+            "legged_step_l2_valid",
+        }
+        if self.reason_code in post_contact_reasons and self.checked_cell_count <= 0:
+            raise ValueError("post-contact result requires checked cells")
         if self.failed_cell is not None:
             if (
                 type(self.failed_cell) is not Cell
