@@ -2164,6 +2164,8 @@ def test_legged_route_candidate_must_bind_to_the_same_primitive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first, second = _route_primitives()
+    route = _legged_route(first)
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
     wrong = second.as_oracle_candidate()
     monkeypatch.setattr(
         LeggedStepPrimitiveV2,
@@ -2179,11 +2181,218 @@ def test_legged_route_candidate_must_bind_to_the_same_primitive(
         "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
         forbidden,
     )
-    result = _route_call(_legged_route(first))
+    result = _route_call(route)
     assert result.reason_code == "legged_primitive_contract_mismatch"
     assert result.failed_primitive_index == 0
     assert result.checked_cell_count == 0
-    assert result.validated_route_hash is None
+    assert result.validated_route_hash == expected_hash
+
+
+def test_legged_route_direct_candidate_binding_rejects_a_lying_public_matcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second = _route_primitives()
+    route = _legged_route(first)
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
+    wrong = second.as_oracle_candidate()
+    monkeypatch.setattr(
+        LeggedStepPrimitiveV2,
+        "as_oracle_candidate",
+        lambda _self: wrong,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_candidate_matches_primitive_v2",
+        lambda *_args: True,
+    )
+    a2_calls = 0
+
+    def forbidden(*_args):
+        nonlocal a2_calls
+        a2_calls += 1
+        return _a2_result()
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        forbidden,
+    )
+    result = _route_call(route)
+    assert a2_calls == 0
+    assert result.reason_code == "legged_primitive_contract_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash == expected_hash
+
+
+def test_legged_route_rechecks_bound_candidate_after_pre_a2_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
+    real_conversion = LeggedStepPrimitiveV2.as_oracle_candidate
+    candidate_box: dict[str, LeggedStepCandidateV2] = {}
+    clock_calls = 0
+    a2_calls = 0
+
+    def capture_candidate(primitive):
+        candidate = real_conversion(primitive)
+        candidate_box["value"] = candidate
+        return candidate
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 2:
+            candidate = candidate_box["value"]
+            object.__setattr__(
+                candidate,
+                "sequence_phase",
+                (candidate.sequence_phase + 1) % 4,
+            )
+        return 0.0
+
+    def forbidden(*_args):
+        nonlocal a2_calls
+        a2_calls += 1
+        return _a2_result()
+
+    monkeypatch.setattr(
+        LeggedStepPrimitiveV2,
+        "as_oracle_candidate",
+        capture_candidate,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        forbidden,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(clock),
+    )
+    assert clock_calls == 2
+    assert a2_calls == 0
+    assert result.reason_code == "legged_primitive_contract_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash == expected_hash
+
+
+@pytest.mark.parametrize("mutation_stage", ["a2", "public_result"])
+def test_legged_route_rechecks_candidate_after_a2_and_result_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation_stage: str,
+) -> None:
+    route = _single_heading_route(0.0)
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
+    real_conversion = LeggedStepPrimitiveV2.as_oracle_candidate
+    real_result_token = validation_module._legged_a2_result_token_v2
+    candidate_box: dict[str, LeggedStepCandidateV2] = {}
+
+    def capture_candidate(primitive):
+        candidate = real_conversion(primitive)
+        candidate_box["value"] = candidate
+        return candidate
+
+    def mutate_candidate() -> None:
+        candidate = candidate_box["value"]
+        object.__setattr__(
+            candidate,
+            "sequence_phase",
+            (candidate.sequence_phase + 1) % 4,
+        )
+
+    def a2_double(*_args):
+        if mutation_stage == "a2":
+            mutate_candidate()
+        return _a2_result(checked=5)
+
+    def result_token(result):
+        token = real_result_token(result)
+        if mutation_stage == "public_result":
+            mutate_candidate()
+        return token
+
+    monkeypatch.setattr(
+        LeggedStepPrimitiveV2,
+        "as_oracle_candidate",
+        capture_candidate,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_a2_result_token_v2",
+        result_token,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        a2_double,
+    )
+    result = _route_call(route)
+    assert result.reason_code == "legged_step_oracle_contract_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 5
+    assert result.validated_route_hash == expected_hash
+
+
+def test_legged_route_deadline_drift_precedes_early_dynamic_audit_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    deadline = _route_deadline()
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
+    clock_calls = 0
+    a2_calls = 0
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        return 0.0
+
+    object.__setattr__(deadline, "_monotonic_clock", clock)
+
+    def mutate_deadline_then_fail(*_args, **_kwargs):
+        object.__setattr__(deadline, "deadline_monotonic_s", 99.0)
+        raise RuntimeError("ordinary early profile audit failure")
+
+    def forbidden(*_args):
+        nonlocal a2_calls
+        a2_calls += 1
+        return _a2_result()
+
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_profile_token_v2",
+        mutate_deadline_then_fail,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        forbidden,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        deadline,
+    )
+    assert clock_calls == 0
+    assert a2_calls == 0
+    assert result.reason_code == "planning_deadline_contract_mismatch"
+    assert result.failed_primitive_index is None
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash == expected_hash
 
 
 @pytest.mark.parametrize(
