@@ -29,9 +29,13 @@ from path_planner.v2.cache import (
 )
 from path_planner.v2.runtime import PlanningDeadlineV2
 from path_planner.v2.geometry import (
+    convex_hull_xy,
     conservative_wheel_pose_cells,
     conservative_wheel_sweep_cells,
     dense_wheel_replay_step_count,
+    oriented_rectangle_cells,
+    point_margin_to_convex_polygon,
+    sample_pose_sweep,
 )
 from path_planner.v2.hierarchy import (
     HIERARCHY_SCALES_V2,
@@ -41,8 +45,20 @@ from path_planner.v2.hierarchy import (
     HierarchyHintStatusV2,
 )
 from path_planner.v2.profiles import (
+    LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2,
     WHEEL_RELATIVE_ENERGY_PROXY_ID_V2,
+    LeggedProfileV2,
     WheelProfileV2,
+)
+from path_planner.v2.oracles import (
+    LEGGED_CRAWL_SEQUENCE_V2,
+    LEGGED_FOOT_STORAGE_ORDER_V2,
+    LEGGED_STATIC_STABILITY_VALIDATOR_ID_V2,
+    LeggedFootContactV2,
+    LeggedStepCandidateV2,
+    LeggedValidationResultV2,
+    LegIdV2,
+    validate_legged_step_l2,
 )
 from path_planner.v2.providers import (
     WheelMotionPrimitiveV2,
@@ -78,12 +94,21 @@ __all__ = [
     "FailureCategoryV2",
     "HARD_TIMEOUT_MS_V2",
     "HIERARCHY_SCALES_V2",
+    "LEGGED_CRAWL_SEQUENCE_V2",
+    "LEGGED_FOOT_STORAGE_ORDER_V2",
+    "LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2",
+    "LEGGED_STATIC_STABILITY_VALIDATOR_ID_V2",
     "ConservativeHierarchyV2",
     "HierarchyCellHintV2",
     "HierarchyContractErrorV2",
     "HierarchyHintStatusV2",
     "ObjectiveProfileV2",
     "ObservationProjectionV2",
+    "LeggedFootContactV2",
+    "LeggedProfileV2",
+    "LeggedStepCandidateV2",
+    "LeggedValidationResultV2",
+    "LegIdV2",
     "PlanningFailureV2",
     "PlanningDeadlineV2",
     "PlanningOutcomeV2",
@@ -119,10 +144,15 @@ __all__ = [
     "aggregate_primitive_audit_v2",
     "aggregate_standard_episodes_v2",
     "canonical_json_bytes",
+    "convex_hull_xy",
     "conservative_wheel_pose_cells",
     "conservative_wheel_sweep_cells",
     "dense_wheel_replay_step_count",
+    "oriented_rectangle_cells",
+    "point_margin_to_convex_polygon",
+    "sample_pose_sweep",
     "validate_route_l2",
     "validate_route",
+    "validate_legged_step_l2",
     "validate_wheel_transition_l2",
 ]
