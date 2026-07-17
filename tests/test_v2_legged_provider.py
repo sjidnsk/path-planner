@@ -1933,6 +1933,233 @@ def test_legged_route_public_authority_rebindings_do_not_change_pinned_calls(
     assert result.reason_code == "legged_route_l2_valid"
 
 
+@pytest.mark.parametrize(
+    ("helper_kind", "target", "expected_reason", "keeps_hash"),
+    [
+        ("primitive_token", "route", "route_structure_mismatch", False),
+        ("conversion", "route", "route_structure_mismatch", False),
+        ("candidate_match", "route", "route_structure_mismatch", False),
+        (
+            "primitive_token",
+            "request",
+            "planning_request_contract_mismatch",
+            True,
+        ),
+        ("conversion", "request", "planning_request_contract_mismatch", True),
+        (
+            "candidate_match",
+            "request",
+            "planning_request_contract_mismatch",
+            True,
+        ),
+        (
+            "primitive_token",
+            "snapshot_anchor",
+            "terrain_snapshot_hash_mismatch",
+            True,
+        ),
+        (
+            "conversion",
+            "snapshot_anchor",
+            "terrain_snapshot_hash_mismatch",
+            True,
+        ),
+        (
+            "candidate_match",
+            "snapshot_anchor",
+            "terrain_snapshot_hash_mismatch",
+            True,
+        ),
+        (
+            "primitive_token",
+            "profile",
+            "legged_profile_contract_mismatch",
+            True,
+        ),
+        (
+            "primitive_token",
+            "deadline",
+            "planning_deadline_contract_mismatch",
+            True,
+        ),
+    ],
+)
+def test_legged_route_pins_entry_authority_before_dynamic_primitive_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_kind: str,
+    target: str,
+    expected_reason: str,
+    keeps_hash: bool,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    anchor = FineSafetyAnchorV2(snapshot)
+    deadline = _route_deadline()
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
+    mutated = False
+
+    def mutate_authority() -> None:
+        nonlocal mutated
+        if mutated:
+            return
+        mutated = True
+        if target == "route":
+            object.__setattr__(route, "total_cost", 1.0)
+        elif target == "request":
+            object.__setattr__(request, "request_id", "pre-pin-request-drift")
+        elif target == "snapshot_anchor":
+            object.__setattr__(snapshot.provenance, "source_id", "pre-pin-drift")
+            object.__setattr__(anchor, "_snapshot_hash", snapshot_hash(snapshot))
+        elif target == "profile":
+            object.__setattr__(profile, "max_step_length_m", 0.25)
+        else:
+            object.__setattr__(deadline, "deadline_monotonic_s", 99.0)
+
+    if helper_kind == "primitive_token":
+        real_helper = validation_module._legged_primitive_token_v2
+
+        def primitive_token(*args, **kwargs):
+            token = real_helper(*args, **kwargs)
+            mutate_authority()
+            return token
+
+        monkeypatch.setattr(
+            validation_module,
+            "_legged_primitive_token_v2",
+            primitive_token,
+        )
+    elif helper_kind == "conversion":
+        real_conversion = LeggedStepPrimitiveV2.as_oracle_candidate
+
+        def conversion(primitive):
+            candidate = real_conversion(primitive)
+            mutate_authority()
+            return candidate
+
+        monkeypatch.setattr(
+            LeggedStepPrimitiveV2,
+            "as_oracle_candidate",
+            conversion,
+        )
+    else:
+        real_match = validation_module._legged_candidate_matches_primitive_v2
+
+        def candidate_match(*args, **kwargs):
+            matches = real_match(*args, **kwargs)
+            mutate_authority()
+            return matches
+
+        monkeypatch.setattr(
+            validation_module,
+            "_legged_candidate_matches_primitive_v2",
+            candidate_match,
+        )
+
+    a2_calls = 0
+
+    def a2_double(*_args):
+        nonlocal a2_calls
+        a2_calls += 1
+        return _a2_result()
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        a2_double,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        anchor,
+        profile,
+        deadline,
+    )
+    assert mutated is True
+    assert a2_calls == 0
+    assert result.reason_code == expected_reason
+    assert result.failed_primitive_index is None
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash == (expected_hash if keeps_hash else None)
+
+
+@pytest.mark.parametrize("helper_name", ["_legged_float_word_v2", "_legged_profile_token_v2"])
+def test_legged_route_pins_entry_before_early_dynamic_audits(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    route = _single_heading_route(0.0)
+    real_helper = getattr(validation_module, helper_name)
+    mutated = False
+
+    def mutate_after_return(*args, **kwargs):
+        nonlocal mutated
+        result = real_helper(*args, **kwargs)
+        if not mutated:
+            mutated = True
+            object.__setattr__(route, "total_cost", 1.0)
+        return result
+
+    monkeypatch.setattr(validation_module, helper_name, mutate_after_return)
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = _route_call(route)
+    assert mutated is True
+    assert result.reason_code == "route_structure_mismatch"
+    assert result.failed_primitive_index is None
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash is None
+
+
+def test_legged_route_entry_pin_covers_a_later_unreviewed_primitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second = _route_primitives()
+    route = _legged_route(first, second)
+    replacement = _route_step(
+        second.start_legged_state,
+        target=WorldPoint(-0.10, -0.50),
+        end_body=second.end_state,
+    )
+    real_conversion = LeggedStepPrimitiveV2.as_oracle_candidate
+    mutated = False
+
+    def mutate_second_after_first(primitive):
+        nonlocal mutated
+        candidate = real_conversion(primitive)
+        if not mutated:
+            mutated = True
+            for field_name in (
+                "end_legged_state",
+                "target_foothold",
+                "foot_travel_m",
+                "energy_cost",
+            ):
+                object.__setattr__(second, field_name, getattr(replacement, field_name))
+        return candidate
+
+    monkeypatch.setattr(
+        LeggedStepPrimitiveV2,
+        "as_oracle_candidate",
+        mutate_second_after_first,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = _route_call(route)
+    assert mutated is True
+    assert result.reason_code == "route_structure_mismatch"
+    assert result.failed_primitive_index is None
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash is None
+
+
 def test_legged_route_candidate_must_bind_to_the_same_primitive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
