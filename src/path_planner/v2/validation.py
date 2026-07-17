@@ -3978,6 +3978,19 @@ def validate_legged_route_l2(
             return authority_failure(reason, stable_hash)
         return None
 
+    def seal_without_callback() -> LeggedRouteValidationResultV2 | None:
+        try:
+            guard._seal()
+        except _LeggedDeadlineContractError:
+            return authority_failure(
+                "planning_deadline_contract_mismatch",
+                _legged_reseal_route_hash_without_callbacks_v2(context),
+            )
+        reason, stable_hash = _legged_seal_authority_v2(context)
+        if reason is not None:
+            return authority_failure(reason, stable_hash)
+        return None
+
     stopped = checkpoint()
     if stopped is not None:
         return stopped
@@ -4069,6 +4082,7 @@ def validate_legged_route_l2(
                 checked_cell_count=checked_cell_count,
                 validated_route_hash=route_hash,
             )
+        a2_audit_failed = False
         try:
             audited = _legged_a2_result_token_v2(a2_result)
             direct = _TRUSTED_LEGGED_A2_RESULT_TOKEN_V2(a2_result)
@@ -4086,6 +4100,11 @@ def validate_legged_route_l2(
         except (KeyboardInterrupt, SystemExit, MemoryError):
             raise
         except Exception:
+            a2_audit_failed = True
+        stopped = seal_without_callback()
+        if stopped is not None:
+            return stopped
+        if a2_audit_failed:
             return _legged_route_result_v2(
                 "legged_step_oracle_contract_mismatch",
                 failed_primitive_index=index,
@@ -4123,9 +4142,6 @@ def validate_legged_route_l2(
     stopped = checkpoint()
     if stopped is not None:
         return stopped
-    reason, stable_hash = _legged_seal_authority_v2(context)
-    if reason is not None:
-        return authority_failure(reason, stable_hash)
 
     if step_failures:
         _rank, index, selected_reason, selected_cell, selected_leg, selected_margin = min(
