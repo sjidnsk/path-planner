@@ -2820,6 +2820,143 @@ def test_legged_route_detects_a2_drift_on_public_result_token_entry(
     assert result.checked_cell_count == 0
 
 
+@pytest.mark.parametrize(
+    ("target", "mode", "expected_reason", "keeps_hash"),
+    [
+        ("route", "raise", "route_structure_mismatch", False),
+        ("request", "raise", "planning_request_contract_mismatch", True),
+        ("route", "mismatch", "route_structure_mismatch", False),
+        ("request", "mismatch", "planning_request_contract_mismatch", True),
+        ("route", "global", "route_structure_mismatch", False),
+        ("request", "global", "planning_request_contract_mismatch", True),
+    ],
+)
+def test_legged_route_post_a2_public_token_authority_drift_has_priority(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    mode: str,
+    expected_reason: str,
+    keeps_hash: bool,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
+    a2_result = (
+        _a2_result(
+            "terrain_query_contract_mismatch",
+            checked=0,
+            margin=None,
+        )
+        if mode == "global"
+        else _a2_result()
+    )
+    real_token = validation_module._legged_a2_result_token_v2
+    calls = 0
+
+    def public_token(result):
+        nonlocal calls
+        calls += 1
+        if target == "route":
+            object.__setattr__(route, "total_cost", 1.0)
+        else:
+            object.__setattr__(request, "request_id", "post-a2-token-drift")
+        if mode == "raise":
+            raise RuntimeError("ordinary public A2 token fault")
+        if mode == "mismatch":
+            return ("public-token-mismatch",)
+        return real_token(result)
+
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_a2_result_token_v2",
+        public_token,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: a2_result,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert calls == 1
+    assert result.reason_code == expected_reason
+    assert result.failed_primitive_index is None
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash == (expected_hash if keeps_hash else None)
+
+
+def test_legged_route_post_a2_public_token_deadline_drift_has_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    deadline = _route_deadline()
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
+    a2_result = _a2_result(
+        "terrain_query_contract_mismatch",
+        checked=0,
+        margin=None,
+    )
+    real_token = validation_module._legged_a2_result_token_v2
+
+    def drift_deadline(result):
+        object.__setattr__(deadline, "deadline_monotonic_s", 99.0)
+        return real_token(result)
+
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_a2_result_token_v2",
+        drift_deadline,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: a2_result,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        deadline,
+    )
+    assert result.reason_code == "planning_deadline_contract_mismatch"
+    assert result.failed_primitive_index is None
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash == expected_hash
+
+
+def test_legged_route_public_token_fault_without_authority_drift_stays_indexed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_a2_result_token_v2",
+        lambda _result: (_ for _ in ()).throw(RuntimeError("ordinary token fault")),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = _route_call(route)
+    assert result.reason_code == "legged_step_oracle_contract_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash == expected_hash
+
+
 def test_legged_route_rejects_invalid_private_route_hasher_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
