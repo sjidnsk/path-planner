@@ -4358,12 +4358,8 @@ def validate_legged_route_l2(
                 primitive_token,
             )
         ):
-            return _legged_route_result_v2(
-                "legged_primitive_contract_mismatch",
-                failed_primitive_index=index,
-                checked_cell_count=checked_cell_count,
-                validated_route_hash=route_hash,
-            )
+            record(6, "legged_primitive_contract_mismatch", index)
+            continue
         try:
             a2_result = _TRUSTED_LEGGED_STEP_VALIDATOR_V2(
                 candidate,
