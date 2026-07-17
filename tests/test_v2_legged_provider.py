@@ -2277,7 +2277,7 @@ def test_legged_route_rechecks_bound_candidate_after_pre_a2_checkpoint(
         profile,
         _route_deadline(clock),
     )
-    assert clock_calls == 2
+    assert clock_calls == 3
     assert a2_calls == 0
     assert result.reason_code == "legged_primitive_contract_mismatch"
     assert result.failed_primitive_index == 0
