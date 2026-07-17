@@ -37,6 +37,7 @@ from path_planner.v2.geometry import (
     conservative_wheel_sweep_cells,
 )
 from path_planner.v2.oracles.legged import (
+    LEGGED_CRAWL_SEQUENCE_V2,
     LEGGED_FOOT_STORAGE_ORDER_V2,
     LEGGED_STATIC_STABILITY_VALIDATOR_ID_V2,
     LeggedFootContactV2,
@@ -2404,6 +2405,11 @@ class LeggedRouteValidationResultV2:
             raise TypeError("checked_cell_count must be exact int")
         if self.checked_cell_count < 0:
             raise ValueError("checked_cell_count must be nonnegative")
+        if (
+            self.reason_code == "route_state_budget_exceeded"
+            and self.checked_cell_count != 0
+        ):
+            raise ValueError("route_state_budget_exceeded requires zero checked cells")
         margin = self.minimum_support_margin_m
         if margin is not None:
             if type(margin) is not float or not isfinite(margin):
@@ -2694,6 +2700,62 @@ def _legged_primitive_token_v2(
         nonnegative=True,
         canonical_zero=True,
     )
+    lift_pose = _legged_pose_token_v2(
+        value.lift_body_state,
+        f"{name}.lift_body_state",
+        canonical=True,
+    )
+    start_phase = start_legged[1]
+    end_phase = end_legged[1]
+    if value.moving_leg is not LEGGED_CRAWL_SEQUENCE_V2[start_phase]:
+        raise ValueError(f"{name}.moving_leg must match the crawl sequence phase")
+    if end_phase != (start_phase + 1) % 4:
+        raise ValueError(f"{name} end sequence phase must advance by one")
+    moving_index = LEGGED_FOOT_STORAGE_ORDER_V2.index(value.moving_leg)
+    for index, (start_contact, end_contact) in enumerate(
+        zip(start_legged[3], end_legged[3], strict=True)
+    ):
+        if index == moving_index:
+            if end_contact[1:] != target:
+                raise ValueError(f"{name} moving contact must bitwise match target")
+        elif end_contact != start_contact:
+            raise ValueError(f"{name} nonmoving contacts must remain unchanged")
+
+    source = value.start_legged_state.foot_contacts[moving_index].foothold
+    expected_foot = hypot(
+        value.target_foothold.x - source.x,
+        value.target_foothold.y - source.y,
+    )
+    expected_distance = hypot(
+        value.lift_body_state.x_m - value.start_state.x_m,
+        value.lift_body_state.y_m - value.start_state.y_m,
+    ) + hypot(
+        value.end_state.x_m - value.lift_body_state.x_m,
+        value.end_state.y_m - value.lift_body_state.y_m,
+    )
+    expected_energy = expected_distance + expected_foot
+    expected_resources = (
+        _legged_float_word_v2(
+            expected_distance,
+            f"{name}.independent_distance_m",
+            nonnegative=True,
+            canonical_zero=True,
+        ),
+        _legged_float_word_v2(
+            expected_energy,
+            f"{name}.independent_energy_cost",
+            nonnegative=True,
+            canonical_zero=True,
+        ),
+        _legged_float_word_v2(
+            expected_foot,
+            f"{name}.independent_foot_travel_m",
+            nonnegative=True,
+            canonical_zero=True,
+        ),
+    )
+    if (distance, energy, foot) != expected_resources:
+        raise ValueError(f"{name} resources must bitwise match direct recomputation")
     fixed_strings = (
         (value.capability, LEGGED_CAPABILITY_LEVEL_V2),
         (value.resource_proxy_id, LEGGED_RESOURCE_PROXY_ID_V2),
@@ -2711,11 +2773,7 @@ def _legged_primitive_token_v2(
         observation,
         value.validation_level,
         start_legged,
-        _legged_pose_token_v2(
-            value.lift_body_state,
-            f"{name}.lift_body_state",
-            canonical=True,
-        ),
+        lift_pose,
         end_legged,
         value.moving_leg,
         target,
