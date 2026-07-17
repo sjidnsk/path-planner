@@ -3246,7 +3246,11 @@ class _LeggedDeadlineGuardV2:
     callback: object
 
     @classmethod
-    def capture(cls, deadline: PlanningDeadlineV2) -> _LeggedDeadlineGuardV2:
+    def capture(
+        cls,
+        deadline: PlanningDeadlineV2,
+        _audit_float_word_v2=_legged_float_word_v2,
+    ) -> _LeggedDeadlineGuardV2:
         try:
             started = deadline.started_monotonic_s
             cutoff = deadline.deadline_monotonic_s
@@ -3259,11 +3263,11 @@ class _LeggedDeadlineGuardV2:
                 cutoff,
                 "deadline.deadline_monotonic_s",
             )
-            audited_started = _legged_float_word_v2(
+            audited_started = _audit_float_word_v2(
                 started,
                 "deadline.started_monotonic_s",
             )
-            audited_cutoff = _legged_float_word_v2(
+            audited_cutoff = _audit_float_word_v2(
                 cutoff,
                 "deadline.deadline_monotonic_s",
             )
@@ -3770,6 +3774,11 @@ def validate_legged_route_l2(
     if type(deadline) is not PlanningDeadlineV2:
         raise TypeError("deadline must be exact PlanningDeadlineV2")
 
+    try:
+        guard = _LeggedDeadlineGuardV2.capture(deadline)
+    except _LeggedDeadlineContractError:
+        return _legged_route_result_v2("planning_deadline_contract_mismatch")
+
     structural: list[tuple[int, int, str, int | None]] = []
 
     def record(rank: int, reason: str, index: int | None = None) -> None:
@@ -3947,19 +3956,24 @@ def validate_legged_route_l2(
             validated_route_hash=stable_hash,
         )
 
-    try:
-        guard = _LeggedDeadlineGuardV2.capture(deadline)
-    except _LeggedDeadlineContractError:
-        reason, stable_hash = _legged_independent_seal_authority_v2(
+    def resolve_dynamic_seal_failure(
+        reason: str,
+        stable_hash: str | None,
+    ) -> LeggedRouteValidationResultV2:
+        direct_reason, direct_hash = _legged_independent_seal_authority_v2(
             context,
             _direct=True,
         )
-        if reason is not None:
-            return authority_failure(reason, stable_hash)
-        return authority_failure(
-            "planning_deadline_contract_mismatch",
-            _legged_reseal_route_hash_without_callbacks_v2(context),
-        )
+        try:
+            guard._seal()
+        except _LeggedDeadlineContractError:
+            return authority_failure(
+                "planning_deadline_contract_mismatch",
+                _legged_reseal_route_hash_without_callbacks_v2(context),
+            )
+        if direct_reason is not None:
+            return authority_failure(direct_reason, direct_hash)
+        return authority_failure(reason, stable_hash)
 
     def checkpoint() -> LeggedRouteValidationResultV2 | None:
         try:
@@ -3983,7 +3997,7 @@ def validate_legged_route_l2(
                 _legged_reseal_route_hash_without_callbacks_v2(context),
             )
         if reason is not None:
-            return authority_failure(reason, stable_hash)
+            return resolve_dynamic_seal_failure(reason, stable_hash)
         return None
 
     def seal_without_callback() -> LeggedRouteValidationResultV2 | None:
@@ -4003,7 +4017,7 @@ def validate_legged_route_l2(
                 _legged_reseal_route_hash_without_callbacks_v2(context),
             )
         if reason is not None:
-            return authority_failure(reason, stable_hash)
+            return resolve_dynamic_seal_failure(reason, stable_hash)
         return None
 
     def seal_entry_without_callback() -> LeggedRouteValidationResultV2 | None:
