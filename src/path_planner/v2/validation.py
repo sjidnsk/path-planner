@@ -2833,8 +2833,9 @@ def _legged_primitive_token_v2(
 def _legged_candidate_matches_primitive_v2(
     candidate: object,
     primitive_token: tuple[object, ...],
+    _candidate_token_v2=_legged_candidate_token_v2,
 ) -> bool:
-    candidate_token = _legged_candidate_token_v2(candidate, "candidate")
+    candidate_token = _candidate_token_v2(candidate, "candidate")
     return candidate_token == (
         primitive_token[8][2],
         primitive_token[9],
@@ -3457,6 +3458,10 @@ def _legged_rebuild_route_token_v2(
 
 
 _TRUSTED_LEGGED_ROUTE_REBUILD_V2 = _legged_rebuild_route_token_v2
+_TRUSTED_LEGGED_PRIMITIVE_TOKEN_V2 = _legged_primitive_token_v2
+_TRUSTED_LEGGED_ROUTE_TOKEN_V2 = _legged_route_token_v2
+_TRUSTED_LEGGED_CANDIDATE_TOKEN_V2 = _legged_candidate_token_v2
+_TRUSTED_LEGGED_CANDIDATE_MATCH_V2 = _legged_candidate_matches_primitive_v2
 _TRUSTED_LEGGED_POSE_TOKEN_V2 = _legged_pose_token_v2
 _TRUSTED_LEGGED_REQUEST_TOKEN_V2 = _legged_request_other_token_v2
 _TRUSTED_LEGGED_PROFILE_TOKEN_V2 = _legged_profile_token_v2
@@ -3765,32 +3770,27 @@ def validate_legged_route_l2(
     if type(deadline) is not PlanningDeadlineV2:
         raise TypeError("deadline must be exact PlanningDeadlineV2")
 
-    try:
-        guard = _LeggedDeadlineGuardV2.capture(deadline)
-    except _LeggedDeadlineContractError:
-        return _legged_route_result_v2("planning_deadline_contract_mismatch")
-
     structural: list[tuple[int, int, str, int | None]] = []
 
     def record(rank: int, reason: str, index: int | None = None) -> None:
         structural.append((rank, -1 if index is None else index, reason, index))
 
     try:
-        profile_token = _legged_profile_token_v2(legged_profile)
+        profile_token = _TRUSTED_LEGGED_PROFILE_TOKEN_V2(legged_profile)
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
     except Exception:
         return _legged_route_result_v2("legged_profile_contract_mismatch")
 
     try:
-        request_other_token = _legged_request_other_token_v2(request)
+        request_other_token = _TRUSTED_LEGGED_REQUEST_TOKEN_V2(request)
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
     except Exception:
         return _legged_route_result_v2("planning_request_contract_mismatch")
 
     try:
-        request_start_token = _legged_pose_token_v2(
+        request_start_token = _TRUSTED_LEGGED_POSE_TOKEN_V2(
             request.start_state,
             "request.start_state",
             canonical=False,
@@ -3801,7 +3801,7 @@ def validate_legged_route_l2(
         request_start_token = None
         record(4, "route_start_contract_mismatch")
     try:
-        request_goal_token = _legged_pose_token_v2(
+        request_goal_token = _TRUSTED_LEGGED_POSE_TOKEN_V2(
             request.goal_state,
             "request.goal_state",
             canonical=False,
@@ -3828,8 +3828,9 @@ def validate_legged_route_l2(
         primitives: tuple[object, ...] = ()
     else:
         primitives = primitives_value
+    entry_total_word: int | None = None
     try:
-        _legged_float_word_v2(
+        entry_total_word = _TRUSTED_LEGGED_DIRECT_FLOAT_WORD_V2(
             route.total_cost,
             "route.total_cost",
             nonnegative=True,
@@ -3846,40 +3847,26 @@ def validate_legged_route_l2(
         record(3, "route_incomplete")
 
     primitive_tokens: list[tuple[object, ...] | None] = []
-    candidates: list[LeggedStepCandidateV2 | None] = []
     all_primitives_canonical = route_shape_ok
     for index, primitive in enumerate(primitives):
         if type(primitive) is not LeggedStepPrimitiveV2:
             record(5, "legged_primitive_type_mismatch", index)
             primitive_tokens.append(None)
-            candidates.append(None)
             all_primitives_canonical = False
             continue
         try:
-            before = _legged_primitive_token_v2(
+            entry_primitive_token = _TRUSTED_LEGGED_PRIMITIVE_TOKEN_V2(
                 primitive,
                 f"route.primitives[{index}]",
             )
-            candidate = primitive.as_oracle_candidate()
-            after = _legged_primitive_token_v2(
-                primitive,
-                f"route.primitives[{index}]",
-            )
-            if before != after:
-                raise ValueError("primitive conversion mutated payload")
-            matches = _legged_candidate_matches_primitive_v2(candidate, before)
-            if type(matches) is not bool or not matches:
-                raise ValueError("candidate is not bound to primitive payload")
         except (KeyboardInterrupt, SystemExit, MemoryError):
             raise
         except Exception:
             record(6, "legged_primitive_contract_mismatch", index)
             primitive_tokens.append(None)
-            candidates.append(None)
             all_primitives_canonical = False
             continue
-        primitive_tokens.append(before)
-        candidates.append(candidate)
+        primitive_tokens.append(entry_primitive_token)
 
     route_token: tuple[object, ...] | None = None
     route_bytes: bytes | None = None
@@ -3891,11 +3878,11 @@ def validate_legged_route_l2(
             )
             if len(exact_tokens) != len(primitives):
                 raise ValueError("route primitive audit did not cover every item")
-            route_token = _legged_route_token_v2(route, exact_tokens)
-            route_bytes = _legged_auditable_route_bytes_v2(route)
-            if _legged_rebuild_route_token_v2(route) != route_token:
+            route_token = _TRUSTED_LEGGED_ROUTE_TOKEN_V2(route, exact_tokens)
+            route_bytes = _TRUSTED_LEGGED_ROUTE_BYTES_V2(route)
+            if _TRUSTED_LEGGED_ROUTE_REBUILD_V2(route) != route_token:
                 raise ValueError("route serializer mutated canonical payload")
-            route_hash = _legged_auditable_route_digest_v2(route_bytes)
+            route_hash = _TRUSTED_LEGGED_ROUTE_DIGEST_V2(route_bytes)
         except (KeyboardInterrupt, SystemExit, MemoryError):
             raise
         except _LeggedRouteHashContractError:
@@ -3916,8 +3903,8 @@ def validate_legged_route_l2(
             validated_route_hash=route_hash,
         )
     try:
-        snapshot_token = _legged_snapshot_token_v2(snapshot)
-        snapshot_digest = _legged_auditable_snapshot_digest_v2(snapshot)
+        snapshot_token = _TRUSTED_LEGGED_SNAPSHOT_TOKEN_V2(snapshot)
+        snapshot_digest = _TRUSTED_LEGGED_SNAPSHOT_DIGEST_V2(snapshot)
         cached_digest = anchor._snapshot_hash
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
@@ -3960,6 +3947,20 @@ def validate_legged_route_l2(
             validated_route_hash=stable_hash,
         )
 
+    try:
+        guard = _LeggedDeadlineGuardV2.capture(deadline)
+    except _LeggedDeadlineContractError:
+        reason, stable_hash = _legged_independent_seal_authority_v2(
+            context,
+            _direct=True,
+        )
+        if reason is not None:
+            return authority_failure(reason, stable_hash)
+        return authority_failure(
+            "planning_deadline_contract_mismatch",
+            _legged_reseal_route_hash_without_callbacks_v2(context),
+        )
+
     def checkpoint() -> LeggedRouteValidationResultV2 | None:
         try:
             guard.check()
@@ -3974,6 +3975,13 @@ def validate_legged_route_l2(
                 _legged_reseal_route_hash_without_callbacks_v2(context),
             )
         reason, stable_hash = _legged_seal_authority_v2(context)
+        try:
+            guard._seal()
+        except _LeggedDeadlineContractError:
+            return authority_failure(
+                "planning_deadline_contract_mismatch",
+                _legged_reseal_route_hash_without_callbacks_v2(context),
+            )
         if reason is not None:
             return authority_failure(reason, stable_hash)
         return None
@@ -3987,9 +3995,289 @@ def validate_legged_route_l2(
                 _legged_reseal_route_hash_without_callbacks_v2(context),
             )
         reason, stable_hash = _legged_seal_authority_v2(context)
+        try:
+            guard._seal()
+        except _LeggedDeadlineContractError:
+            return authority_failure(
+                "planning_deadline_contract_mismatch",
+                _legged_reseal_route_hash_without_callbacks_v2(context),
+            )
         if reason is not None:
             return authority_failure(reason, stable_hash)
         return None
+
+    def seal_entry_without_callback() -> LeggedRouteValidationResultV2 | None:
+        """Seal entry authority without invoking any rebinding-sensitive helper."""
+
+        try:
+            guard._seal()
+        except _LeggedDeadlineContractError:
+            return authority_failure(
+                "planning_deadline_contract_mismatch",
+                _legged_reseal_route_hash_without_callbacks_v2(context),
+            )
+        reason, stable_hash = _legged_independent_seal_authority_v2(
+            context,
+            _direct=True,
+        )
+        try:
+            guard._seal()
+        except _LeggedDeadlineContractError:
+            return authority_failure(
+                "planning_deadline_contract_mismatch",
+                _legged_reseal_route_hash_without_callbacks_v2(context),
+            )
+        if reason is not None:
+            return authority_failure(reason, stable_hash)
+        return None
+
+    stopped = seal_entry_without_callback()
+    if stopped is not None:
+        return stopped
+
+    profile_audit_failed = False
+    try:
+        audited_profile_token = _legged_profile_token_v2(
+            legged_profile,
+            _float_word_v2=_legged_float_word_v2,
+        )
+        if audited_profile_token != profile_token:
+            raise ValueError("legged profile audit disagreed with entry token")
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        profile_audit_failed = True
+    stopped = seal_entry_without_callback()
+    if stopped is not None:
+        return stopped
+    if profile_audit_failed:
+        return authority_failure("legged_profile_contract_mismatch", route_hash)
+
+    request_audit_failed = False
+    try:
+        audited_request_token = _legged_request_other_token_v2(request)
+        if audited_request_token != request_other_token:
+            raise ValueError("planning request audit disagreed with entry token")
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        request_audit_failed = True
+    stopped = seal_entry_without_callback()
+    if stopped is not None:
+        return stopped
+    if request_audit_failed:
+        return authority_failure("planning_request_contract_mismatch", route_hash)
+
+    for value, name, canonical, entry_token, rank, reason_code in (
+        (
+            request.start_state,
+            "request.start_state",
+            False,
+            request_start_token,
+            4,
+            "route_start_contract_mismatch",
+        ),
+        (
+            request.goal_state,
+            "request.goal_state",
+            False,
+            request_goal_token,
+            8,
+            "route_goal_contract_mismatch",
+        ),
+    ):
+        pose_audit_failed = False
+        try:
+            audited_pose_token = _legged_pose_token_v2(
+                value,
+                name,
+                canonical=canonical,
+            )
+            if entry_token is None or audited_pose_token != entry_token:
+                raise ValueError(f"{name} audit disagreed with entry token")
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            pose_audit_failed = True
+        stopped = seal_entry_without_callback()
+        if stopped is not None:
+            return stopped
+        if pose_audit_failed:
+            record(rank, reason_code)
+
+    total_audit_failed = False
+    try:
+        audited_total_word = _legged_float_word_v2(
+            route.total_cost,
+            "route.total_cost",
+            nonnegative=True,
+        )
+        if entry_total_word is None or audited_total_word != entry_total_word:
+            raise ValueError("route total audit disagreed with entry token")
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        total_audit_failed = True
+    stopped = seal_entry_without_callback()
+    if stopped is not None:
+        return stopped
+    if total_audit_failed:
+        record(2, "route_structure_mismatch")
+        route_hash = None
+
+    candidates: list[LeggedStepCandidateV2 | None] = []
+    candidate_tokens: list[tuple[object, ...] | None] = []
+    for index, primitive in enumerate(primitives):
+        entry_primitive_token = primitive_tokens[index]
+        if entry_primitive_token is None:
+            candidates.append(None)
+            candidate_tokens.append(None)
+            continue
+        primitive_audit_failed = False
+        candidate: LeggedStepCandidateV2 | None = None
+        bound_candidate_token: tuple[object, ...] | None = None
+        try:
+            before = _legged_primitive_token_v2(
+                primitive,
+                f"route.primitives[{index}]",
+            )
+            if before != entry_primitive_token:
+                raise ValueError("primitive audit disagreed with entry token")
+            candidate = primitive.as_oracle_candidate()
+            after = _legged_primitive_token_v2(
+                primitive,
+                f"route.primitives[{index}]",
+            )
+            direct_after = _TRUSTED_LEGGED_PRIMITIVE_TOKEN_V2(
+                primitive,
+                f"route.primitives[{index}]",
+            )
+            if after != entry_primitive_token or direct_after != entry_primitive_token:
+                raise ValueError("primitive conversion mutated entry payload")
+            bound_candidate_token = _TRUSTED_LEGGED_CANDIDATE_TOKEN_V2(
+                candidate,
+                f"route.candidates[{index}]",
+            )
+            audited_candidate_token = _legged_candidate_token_v2(
+                candidate,
+                f"route.candidates[{index}]",
+            )
+            public_matches = _legged_candidate_matches_primitive_v2(
+                candidate,
+                entry_primitive_token,
+            )
+            direct_matches = _TRUSTED_LEGGED_CANDIDATE_MATCH_V2(
+                candidate,
+                entry_primitive_token,
+            )
+            final_candidate_token = _TRUSTED_LEGGED_CANDIDATE_TOKEN_V2(
+                candidate,
+                f"route.candidates[{index}]",
+            )
+            if (
+                audited_candidate_token != bound_candidate_token
+                or final_candidate_token != bound_candidate_token
+                or type(public_matches) is not bool
+                or not public_matches
+                or type(direct_matches) is not bool
+                or not direct_matches
+            ):
+                raise ValueError("candidate is not bound to entry primitive")
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            primitive_audit_failed = True
+        stopped = seal_entry_without_callback()
+        if stopped is not None:
+            return stopped
+        if primitive_audit_failed:
+            record(6, "legged_primitive_contract_mismatch", index)
+            candidates.append(None)
+            candidate_tokens.append(None)
+        else:
+            candidates.append(candidate)
+            candidate_tokens.append(bound_candidate_token)
+
+    if context.route_token is not None:
+        route_audit_failed = False
+        route_hash_failed = False
+        try:
+            exact_tokens = tuple(
+                token for token in primitive_tokens if token is not None
+            )
+            audited_route_token = _legged_route_token_v2(route, exact_tokens)
+            audited_route_bytes = _legged_auditable_route_bytes_v2(route)
+            rebuilt_route_token = _legged_rebuild_route_token_v2(route)
+            audited_route_hash = _legged_auditable_route_digest_v2(
+                audited_route_bytes,
+            )
+            if (
+                audited_route_token != context.route_token
+                or audited_route_bytes != context.route_bytes
+                or rebuilt_route_token != context.route_token
+                or audited_route_hash != context.route_hash
+            ):
+                raise ValueError("route audit disagreed with entry authority")
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except _LeggedRouteHashContractError:
+            route_hash_failed = True
+        except Exception:
+            route_audit_failed = True
+        stopped = seal_entry_without_callback()
+        if stopped is not None:
+            return stopped
+        if route_hash_failed:
+            return authority_failure("route_hash_contract_mismatch", None)
+        if route_audit_failed:
+            record(2, "route_structure_mismatch")
+            route_hash = None
+
+    snapshot_audit_failed = False
+    try:
+        audited_snapshot_token = _legged_snapshot_token_v2(snapshot)
+        audited_snapshot_digest = _legged_auditable_snapshot_digest_v2(snapshot)
+        audited_cached_digest = anchor._snapshot_hash
+        if (
+            audited_snapshot_token != snapshot_token
+            or audited_snapshot_digest != snapshot_digest
+            or type(audited_cached_digest) is not str
+            or audited_cached_digest != snapshot_digest
+        ):
+            raise ValueError("snapshot audit disagreed with entry authority")
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        snapshot_audit_failed = True
+    stopped = seal_entry_without_callback()
+    if stopped is not None:
+        return stopped
+    if snapshot_audit_failed:
+        return authority_failure("terrain_snapshot_hash_mismatch", route_hash)
+
+    def candidate_matches_entry(
+        candidate: LeggedStepCandidateV2,
+        candidate_token: tuple[object, ...],
+        primitive_token: tuple[object, ...],
+    ) -> bool:
+        try:
+            current_token = _TRUSTED_LEGGED_CANDIDATE_TOKEN_V2(
+                candidate,
+                "candidate",
+            )
+            matches = _TRUSTED_LEGGED_CANDIDATE_MATCH_V2(
+                candidate,
+                primitive_token,
+            )
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            return False
+        return (
+            current_token == candidate_token
+            and type(matches) is bool
+            and matches
+        )
 
     stopped = checkpoint()
     if stopped is not None:
@@ -4045,6 +4333,23 @@ def validate_legged_route_l2(
         stopped = checkpoint()
         if stopped is not None:
             return stopped
+        candidate_token = candidate_tokens[index]
+        primitive_token = primitive_tokens[index]
+        if (
+            candidate_token is None
+            or primitive_token is None
+            or not candidate_matches_entry(
+                candidate,
+                candidate_token,
+                primitive_token,
+            )
+        ):
+            return _legged_route_result_v2(
+                "legged_primitive_contract_mismatch",
+                failed_primitive_index=index,
+                checked_cell_count=checked_cell_count,
+                validated_route_hash=route_hash,
+            )
         try:
             a2_result = _TRUSTED_LEGGED_STEP_VALIDATOR_V2(
                 candidate,
@@ -4107,6 +4412,17 @@ def validate_legged_route_l2(
         if stopped is not None:
             return stopped
         if a2_audit_failed:
+            return _legged_route_result_v2(
+                "legged_step_oracle_contract_mismatch",
+                failed_primitive_index=index,
+                checked_cell_count=checked_cell_count,
+                validated_route_hash=route_hash,
+            )
+        if not candidate_matches_entry(
+            candidate,
+            candidate_token,
+            primitive_token,
+        ):
             return _legged_route_result_v2(
                 "legged_step_oracle_contract_mismatch",
                 failed_primitive_index=index,
