@@ -1375,6 +1375,26 @@ def test_legged_route_result_rejects_reason_metadata_mismatches(
         )
 
 
+def test_legged_route_result_budget_failure_requires_zero_checked_count() -> None:
+    with pytest.raises(ValueError):
+        validation_module.LeggedRouteValidationResultV2(
+            evidence=ValidationEvidenceV2(
+                validator_id=validation_module.LEGGED_ROUTE_VALIDATOR_ID_V2,
+                level=ValidationLevelV2.L2,
+                passed=False,
+                checks=("route_state_budget_exceeded",),
+            ),
+            reason_code="route_state_budget_exceeded",
+            timed_out=False,
+            failed_cell=None,
+            failed_leg=None,
+            failed_primitive_index=0,
+            checked_cell_count=1,
+            minimum_support_margin_m=None,
+            validated_route_hash="a" * 64,
+        )
+
+
 def test_legged_route_happy_path_replays_every_step_and_aggregates_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1877,6 +1897,53 @@ def test_legged_route_candidate_must_bind_to_the_same_primitive(
         forbidden,
     )
     result = _route_call(_legged_route(first))
+    assert result.reason_code == "legged_primitive_contract_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash is None
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["moving_end_contact", "end_phase", "distance", "foot_travel", "energy"],
+)
+def test_legged_route_independently_reaudits_primitive_relations_and_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    primitive = _single_heading_route(0.0).primitives[0]
+    candidate = primitive.as_oracle_candidate()
+    route = _legged_route(primitive)
+    if fault == "moving_end_contact":
+        moving_index = LEGGED_FOOT_STORAGE_ORDER_V2.index(primitive.moving_leg)
+        object.__setattr__(
+            primitive.end_legged_state.foot_contacts[moving_index],
+            "foothold",
+            WorldPoint(4.0, 4.0),
+        )
+    elif fault == "end_phase":
+        object.__setattr__(primitive.end_legged_state, "sequence_phase", 3)
+    elif fault == "distance":
+        object.__setattr__(primitive, "distance_m", 9.0)
+    elif fault == "foot_travel":
+        object.__setattr__(primitive, "foot_travel_m", 9.0)
+    else:
+        object.__setattr__(primitive, "energy_cost", 9.0)
+    monkeypatch.setattr(
+        LeggedStepPrimitiveV2,
+        "as_oracle_candidate",
+        lambda _self: candidate,
+    )
+
+    def forbidden(*_args):
+        raise AssertionError("forged primitive must not reach A2")
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        forbidden,
+    )
+    result = _route_call(route)
     assert result.reason_code == "legged_primitive_contract_mismatch"
     assert result.failed_primitive_index == 0
     assert result.checked_cell_count == 0
