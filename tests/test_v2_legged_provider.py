@@ -2249,6 +2249,46 @@ def test_legged_route_final_helper_call_cannot_leave_persistent_drift(
     assert result.reason_code == expected
 
 
+def test_legged_route_direct_postcondition_catches_final_low_level_float_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    real_word = validation_module._legged_float_word_v2
+    profile_audits = 0
+
+    def drift_after_final_profile_float(value, name, **kwargs):
+        nonlocal profile_audits
+        word = real_word(value, name, **kwargs)
+        if name == "legged_profile.local_foothold_grid_spacing_m":
+            profile_audits += 1
+            if profile_audits == 5:
+                object.__setattr__(request, "request_id", "low-level-final-drift")
+        return word
+
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_float_word_v2",
+        drift_after_final_profile_float,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert profile_audits == 5
+    assert result.reason_code == "planning_request_contract_mismatch"
+
+
 def test_legged_route_allows_equal_value_immutable_nested_request_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
