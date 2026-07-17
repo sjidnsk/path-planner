@@ -3095,7 +3095,7 @@ def _legged_snapshot_token_v2(
         ):
             raise ValueError(f"snapshot layer {name} must be finite")
         layers[name] = layer
-        layer_tokens.append((name, id(layer), dtype.str, shape, layer.tobytes(order="C")))
+        layer_tokens.append((name, dtype.str, shape, layer.tobytes(order="C")))
     if bool(_np_any_v2(layers["slope_deg"] < 0.0)):
         raise ValueError("snapshot slope must be nonnegative")
     confidence = layers["confidence"]
@@ -3107,13 +3107,11 @@ def _legged_snapshot_token_v2(
         raise ValueError("snapshot traversable and obstacle layers conflict")
     return (
         id(snapshot),
-        id(geometry),
         geometry.width,
         geometry.height,
         origin,
         geometry.frame_id,
         resolution,
-        id(provenance),
         provenance.source_kind,
         provenance.source_id,
         provenance.source_hash,
