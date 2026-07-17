@@ -1289,6 +1289,13 @@ def _a2_result(
     )
 
 
+def _mutate_a2_failure_to_pass(result: LeggedValidationResultV2) -> None:
+    object.__setattr__(result.evidence, "passed", True)
+    object.__setattr__(result.evidence, "checks", ("legged_step_l2_valid",))
+    object.__setattr__(result, "reason_code", "legged_step_l2_valid")
+    object.__setattr__(result, "failed_cell", None)
+
+
 def _route_call(
     route: TypedRouteV2 | None = None,
     *,
@@ -1718,6 +1725,54 @@ def test_legged_route_budget_is_prechecked_before_any_a2(
     )
     assert result.reason_code == "route_state_budget_exceeded"
     assert result.failed_primitive_index == expected_index
+    assert result.checked_cell_count == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("total_cost", "bad"),
+        ("is_complete", "bad"),
+        ("platform_kind", "bad"),
+    ],
+)
+def test_legged_route_budget_precedes_nonempty_top_level_structure_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(
+        snapshot,
+        profile,
+        route,
+        max_route_states=0,
+    )
+    object.__setattr__(route, field, value)
+    calls = 0
+
+    def a2_double(*_args):
+        nonlocal calls
+        calls += 1
+        return _a2_result()
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        a2_double,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert calls == 0
+    assert result.reason_code == "route_state_budget_exceeded"
+    assert result.failed_primitive_index == 0
     assert result.checked_cell_count == 0
 
 
@@ -2696,6 +2751,73 @@ def test_legged_route_freezes_audited_a2_failure_before_final_clock(
     assert clock_calls == 4
     assert result.reason_code == "legged_body_sweep_collision"
     assert result.failed_cell == Cell(2, 3)
+
+
+def test_legged_route_detects_a2_failure_drift_in_post_a2_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a2_result = _a2_result(
+        "legged_body_sweep_collision",
+        cell=Cell(2, 3),
+        margin=0.08,
+    )
+    clock_calls = 0
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 3:
+            _mutate_a2_failure_to_pass(a2_result)
+        return 0.0
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: a2_result,
+    )
+    result = _route_call(
+        _single_heading_route(0.0),
+        deadline=_route_deadline(clock),
+    )
+    assert clock_calls == 3
+    assert result.reason_code == "legged_step_oracle_contract_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
+
+
+def test_legged_route_detects_a2_drift_on_public_result_token_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a2_result = _a2_result(
+        "legged_body_sweep_collision",
+        cell=Cell(2, 3),
+        margin=0.08,
+    )
+    real_token = validation_module._legged_a2_result_token_v2
+    calls = 0
+
+    def mutate_on_entry(result):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            _mutate_a2_failure_to_pass(result)
+        return real_token(result)
+
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_a2_result_token_v2",
+        mutate_on_entry,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: a2_result,
+    )
+    result = _route_call(_single_heading_route(0.0))
+    assert calls == 1
+    assert result.reason_code == "legged_step_oracle_contract_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
 
 
 def test_legged_route_rejects_invalid_private_route_hasher_contract(
