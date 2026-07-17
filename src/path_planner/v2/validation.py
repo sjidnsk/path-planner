@@ -3982,7 +3982,7 @@ def validate_legged_route_l2(
     if stopped is not None:
         return stopped
 
-    if route_shape_ok and primitives:
+    if type(primitives_value) is tuple and len(primitives_value) > 0:
         overflow_index = _legged_route_budget_overflow_index_v2(
             len(primitives),
             request.resource_budget.max_route_states,
@@ -4051,24 +4051,38 @@ def validate_legged_route_l2(
                 checked_cell_count=checked_cell_count,
                 validated_route_hash=route_hash,
             )
+        try:
+            initial_a2_token = _TRUSTED_LEGGED_A2_RESULT_TOKEN_V2(a2_result)
+            initial_a2_margin = a2_result.minimum_support_margin_m
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            initial_a2_token = None
+            initial_a2_margin = None
         stopped = checkpoint()
         if stopped is not None:
             return stopped
+        if initial_a2_token is None:
+            return _legged_route_result_v2(
+                "legged_step_oracle_contract_mismatch",
+                failed_primitive_index=index,
+                checked_cell_count=checked_cell_count,
+                validated_route_hash=route_hash,
+            )
         try:
-            before = _legged_a2_result_token_v2(a2_result)
-            after = _legged_a2_result_token_v2(a2_result)
-            sealed = _TRUSTED_LEGGED_A2_RESULT_TOKEN_V2(a2_result)
-            if before != after or after != sealed:
+            audited = _legged_a2_result_token_v2(a2_result)
+            direct = _TRUSTED_LEGGED_A2_RESULT_TOKEN_V2(a2_result)
+            if audited != initial_a2_token or direct != initial_a2_token:
                 raise ValueError("A2 result audit mutated payload")
-            audited_reason = sealed[4]
+            audited_reason = initial_a2_token[4]
             audited_cell = (
                 None
-                if sealed[6] is None
-                else Cell(sealed[6][0], sealed[6][1])
+                if initial_a2_token[6] is None
+                else Cell(initial_a2_token[6][0], initial_a2_token[6][1])
             )
-            audited_leg = sealed[7]
-            audited_checked = sealed[8]
-            audited_margin = a2_result.minimum_support_margin_m
+            audited_leg = initial_a2_token[7]
+            audited_checked = initial_a2_token[8]
+            audited_margin = initial_a2_margin
         except (KeyboardInterrupt, SystemExit, MemoryError):
             raise
         except Exception:
