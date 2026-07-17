@@ -2821,14 +2821,18 @@ def test_legged_route_detects_a2_drift_on_public_result_token_entry(
 
 
 @pytest.mark.parametrize(
-    ("target", "mode", "expected_reason", "keeps_hash"),
+    ("target", "mode", "expected_reason", "keeps_hash", "expected_checked"),
     [
-        ("route", "raise", "route_structure_mismatch", False),
-        ("request", "raise", "planning_request_contract_mismatch", True),
-        ("route", "mismatch", "route_structure_mismatch", False),
-        ("request", "mismatch", "planning_request_contract_mismatch", True),
-        ("route", "global", "route_structure_mismatch", False),
-        ("request", "global", "planning_request_contract_mismatch", True),
+        ("route", "raise", "route_structure_mismatch", False, 0),
+        ("request", "raise", "planning_request_contract_mismatch", True, 0),
+        ("route", "mismatch", "route_structure_mismatch", False, 0),
+        ("request", "mismatch", "planning_request_contract_mismatch", True, 0),
+        ("route", "pass", "route_structure_mismatch", False, 5),
+        ("request", "pass", "planning_request_contract_mismatch", True, 5),
+        ("route", "step", "route_structure_mismatch", False, 5),
+        ("request", "step", "planning_request_contract_mismatch", True, 5),
+        ("route", "global", "route_structure_mismatch", False, 5),
+        ("request", "global", "planning_request_contract_mismatch", True, 5),
     ],
 )
 def test_legged_route_post_a2_public_token_authority_drift_has_priority(
@@ -2837,21 +2841,28 @@ def test_legged_route_post_a2_public_token_authority_drift_has_priority(
     mode: str,
     expected_reason: str,
     keeps_hash: bool,
+    expected_checked: int,
 ) -> None:
     route = _single_heading_route(0.0)
     snapshot = _route_snapshot()
     profile = _route_profile()
     request = _route_request(snapshot, profile, route)
     expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
-    a2_result = (
-        _a2_result(
+    if mode == "global":
+        a2_result = _a2_result(
             "terrain_query_contract_mismatch",
-            checked=0,
+            checked=5,
             margin=None,
         )
-        if mode == "global"
-        else _a2_result()
-    )
+    elif mode == "step":
+        a2_result = _a2_result(
+            "legged_body_sweep_collision",
+            checked=5,
+            cell=Cell(2, 3),
+            margin=0.08,
+        )
+    else:
+        a2_result = _a2_result(checked=5)
     real_token = validation_module._legged_a2_result_token_v2
     calls = 0
 
@@ -2888,7 +2899,7 @@ def test_legged_route_post_a2_public_token_authority_drift_has_priority(
     assert calls == 1
     assert result.reason_code == expected_reason
     assert result.failed_primitive_index is None
-    assert result.checked_cell_count == 0
+    assert result.checked_cell_count == expected_checked
     assert result.validated_route_hash == (expected_hash if keeps_hash else None)
 
 
@@ -2903,7 +2914,7 @@ def test_legged_route_post_a2_public_token_deadline_drift_has_priority(
     expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
     a2_result = _a2_result(
         "terrain_query_contract_mismatch",
-        checked=0,
+        checked=5,
         margin=None,
     )
     real_token = validation_module._legged_a2_result_token_v2
@@ -2931,7 +2942,7 @@ def test_legged_route_post_a2_public_token_deadline_drift_has_priority(
     )
     assert result.reason_code == "planning_deadline_contract_mismatch"
     assert result.failed_primitive_index is None
-    assert result.checked_cell_count == 0
+    assert result.checked_cell_count == 5
     assert result.validated_route_hash == expected_hash
 
 
