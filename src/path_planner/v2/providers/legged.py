@@ -592,6 +592,11 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
     primitive_schema_version: str = LEGGED_STEP_PRIMITIVE_SCHEMA_V2
 
     def __post_init__(self) -> None:
+        raw_resource_evidence = (
+            self.foot_travel_m,
+            self.distance_m,
+            self.energy_cost,
+        )
         result = _call_contract_helper_v2(
             "legged step primitive construction",
             self._initialize_canonical_payload,
@@ -602,6 +607,7 @@ class LeggedStepPrimitiveV2(RoutePrimitiveV2):
             "legged step primitive postcondition",
             _seal_primitive_canonical_postcondition_v2,
             self,
+            raw_resource_evidence,
         )
         if seal_result is not None:
             raise ValueError("legged step primitive postcondition must return None")
@@ -944,7 +950,10 @@ def _audit_primitive_canonical(value: object) -> LeggedStepPrimitiveV2:
     return value
 
 
-def _seal_primitive_canonical_postcondition_v2(value: object) -> None:
+def _seal_primitive_canonical_postcondition_v2(
+    value: object,
+    raw_resource_evidence: object | None = None,
+) -> None:
     if type(value) is not LeggedStepPrimitiveV2:
         raise TypeError("primitive must be exact LeggedStepPrimitiveV2")
     if type(value.kind) is not PrimitiveKindV2:
@@ -1067,6 +1076,39 @@ def _seal_primitive_canonical_postcondition_v2(value: object) -> None:
             nonnegative=True,
         ),
     )
+    if raw_resource_evidence is not None:
+        if type(raw_resource_evidence) is not tuple:
+            raise TypeError("raw resource evidence must be an exact tuple")
+        if len(raw_resource_evidence) != 3:
+            raise ValueError("raw resource evidence must contain exactly three values")
+        raw_values: list[float] = []
+        for raw_value, name in zip(
+            raw_resource_evidence,
+            ("raw foot_travel_m", "raw distance_m", "raw energy_cost"),
+            strict=True,
+        ):
+            if type(raw_value) is not float:
+                raise TypeError(f"{name} must be an exact built-in float")
+            if not isfinite(raw_value):
+                raise ValueError(f"{name} must be finite")
+            if raw_value < 0.0:
+                raise ValueError(f"{name} must be nonnegative")
+            raw_values.append(raw_value)
+        for raw_value, expected_value, name in zip(
+            raw_values,
+            (foot_expected, distance_expected, energy_expected),
+            ("foot_travel_m", "distance_m", "energy_cost"),
+            strict=True,
+        ):
+            if not isclose(
+                raw_value,
+                expected_value,
+                rel_tol=_RESOURCE_REL_TOL,
+                abs_tol=_RESOURCE_ABS_TOL,
+            ):
+                raise ValueError(
+                    f"raw {name} must match the direct relative resource proxy"
+                )
     if (foot_word, distance_word, energy_word) != expected_words:
         raise ValueError("primitive resources must bitwise match direct recomputation")
 

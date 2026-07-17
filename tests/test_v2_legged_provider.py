@@ -1053,3 +1053,25 @@ def test_candidate_rejects_exact_type_with_forged_nested_payload(
     )
     with pytest.raises((TypeError, ValueError)):
         _primitive().as_oracle_candidate()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"distance_m": 9.0},
+        {"foot_travel_m": 8.0},
+        {"energy_cost": 17.0},
+        {"distance_m": 9.0, "foot_travel_m": 8.0, "energy_cost": 17.0},
+    ],
+)
+def test_constructor_preserves_raw_resource_evidence_when_matcher_is_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: dict[str, float],
+) -> None:
+    monkeypatch.setattr(
+        legged_module,
+        "_resource_matches",
+        lambda *_args: True,
+    )
+    with pytest.raises(ValueError):
+        _primitive(**overrides)
