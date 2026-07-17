@@ -57,6 +57,7 @@ from path_planner.v2.terrain import (
     FineSafetyAnchorV2,
     TerrainProvenanceV2,
     TerrainSnapshotV2,
+    snapshot_hash,
 )
 
 
@@ -2321,6 +2322,104 @@ def test_legged_route_allows_equal_value_immutable_nested_request_replacement(
         profile,
         _route_deadline(clock),
     )
+    assert result.reason_code == "legged_route_l2_valid"
+
+
+@pytest.mark.parametrize("field", ["geometry", "provenance"])
+def test_legged_route_allows_equal_value_nested_snapshot_metadata_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    anchor = FineSafetyAnchorV2(snapshot)
+    expected_snapshot_hash = snapshot_hash(snapshot)
+    replacement = replace(getattr(snapshot, field))
+    assert type(replacement) is type(getattr(snapshot, field))
+    assert replacement == getattr(snapshot, field)
+    assert replacement is not getattr(snapshot, field)
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            object.__setattr__(snapshot, field, replacement)
+        return 0.0
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        anchor,
+        profile,
+        _route_deadline(clock),
+    )
+    assert snapshot_hash(snapshot) == expected_snapshot_hash
+    assert result.reason_code == "legged_route_l2_valid"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "elevation_m",
+        "slope_deg",
+        "traversable_mask",
+        "hard_obstacle_mask",
+        "observed_mask",
+        "confidence",
+    ],
+)
+def test_legged_route_allows_bit_equal_canonical_snapshot_layer_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    anchor = FineSafetyAnchorV2(snapshot)
+    expected_snapshot_hash = snapshot_hash(snapshot)
+    original = getattr(snapshot, field)
+    replacement = np.frombuffer(
+        original.tobytes(order="C"),
+        dtype=original.dtype,
+    ).reshape(original.shape)
+    assert type(replacement) is np.ndarray
+    assert replacement is not original
+    assert replacement.dtype == original.dtype
+    assert replacement.shape == original.shape
+    assert replacement.flags.c_contiguous
+    assert not replacement.flags.writeable
+    assert replacement.tobytes(order="C") == original.tobytes(order="C")
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            object.__setattr__(snapshot, field, replacement)
+        return 0.0
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        anchor,
+        profile,
+        _route_deadline(clock),
+    )
+    assert snapshot_hash(snapshot) == expected_snapshot_hash
     assert result.reason_code == "legged_route_l2_valid"
 
 
