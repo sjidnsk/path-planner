@@ -4101,6 +4101,8 @@ def validate_legged_route_l2(
             raise
         except Exception:
             a2_audit_failed = True
+        if not a2_audit_failed:
+            checked_cell_count += audited_checked
         stopped = seal_without_callback()
         if stopped is not None:
             return stopped
@@ -4111,7 +4113,6 @@ def validate_legged_route_l2(
                 checked_cell_count=checked_cell_count,
                 validated_route_hash=route_hash,
             )
-        checked_cell_count += audited_checked
         if audited_reason in _LEGGED_GLOBAL_A2_FAILURE_REASONS_V2:
             return _legged_route_result_v2(
                 audited_reason,
