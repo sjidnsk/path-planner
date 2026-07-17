@@ -2395,6 +2395,122 @@ def test_legged_route_deadline_drift_precedes_early_dynamic_audit_exception(
     assert result.validated_route_hash == expected_hash
 
 
+@pytest.mark.parametrize("invalid_source", ["snapshot_identity", "profile"])
+def test_legged_route_invalid_entry_deadline_precedes_baseline_audits(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_source: str,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    anchor = FineSafetyAnchorV2(snapshot)
+    deadline = _route_deadline()
+    object.__setattr__(deadline, "deadline_monotonic_s", 0)
+    if invalid_source == "snapshot_identity":
+        anchor = FineSafetyAnchorV2(_route_snapshot())
+    else:
+        object.__setattr__(profile, "max_step_length_m", 0.25)
+    clock_calls = 0
+    a2_calls = 0
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        return 0.0
+
+    object.__setattr__(deadline, "_monotonic_clock", clock)
+
+    def forbidden(*_args):
+        nonlocal a2_calls
+        a2_calls += 1
+        return _a2_result()
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        forbidden,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        anchor,
+        profile,
+        deadline,
+    )
+    assert clock_calls == 0
+    assert a2_calls == 0
+    assert result.reason_code == "planning_deadline_contract_mismatch"
+    assert result.failed_primitive_index is None
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash is None
+
+
+@pytest.mark.parametrize(
+    ("drift_call", "expected_clock_calls", "expected_a2_calls", "expected_checked"),
+    [(2, 1, 0, 0), (5, 3, 1, 5)],
+)
+def test_legged_route_dynamic_seal_failure_rechecks_direct_route_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    drift_call: int,
+    expected_clock_calls: int,
+    expected_a2_calls: int,
+    expected_checked: int,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    real_profile_token = validation_module._legged_profile_token_v2
+    profile_calls = 0
+    clock_calls = 0
+    a2_calls = 0
+
+    def drift_route_then_fail(*args, **kwargs):
+        nonlocal profile_calls
+        profile_calls += 1
+        token = real_profile_token(*args, **kwargs)
+        if profile_calls == drift_call:
+            object.__setattr__(route, "total_cost", 1.0)
+            raise RuntimeError("dynamic profile audit left route drift")
+        return token
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        return 0.0
+
+    def a2_double(*_args):
+        nonlocal a2_calls
+        a2_calls += 1
+        return _a2_result(checked=5)
+
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_profile_token_v2",
+        drift_route_then_fail,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        a2_double,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(clock),
+    )
+    assert profile_calls == drift_call
+    assert clock_calls == expected_clock_calls
+    assert a2_calls == expected_a2_calls
+    assert result.reason_code == "route_structure_mismatch"
+    assert result.failed_primitive_index is None
+    assert result.checked_cell_count == expected_checked
+    assert result.validated_route_hash is None
+
+
 @pytest.mark.parametrize(
     "fault",
     ["moving_end_contact", "end_phase", "distance", "foot_travel", "energy"],
