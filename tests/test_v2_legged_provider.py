@@ -2023,6 +2023,96 @@ def test_legged_route_clock_requires_exact_finite_float(
     assert result.reason_code == "planning_deadline_contract_mismatch"
 
 
+@pytest.mark.parametrize("drift", ["cutoff", "callback"])
+def test_legged_route_clock_result_helper_cannot_hide_deadline_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    clock_calls = 0
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        if drift == "cutoff" and clock_calls == 4:
+            return 150.0
+        return 0.0
+
+    deadline = _route_deadline(clock)
+    real_word = validation_module._legged_float_word_v2
+    result_audits = 0
+
+    def audit_then_drift(value, name, **kwargs):
+        nonlocal result_audits
+        word = real_word(value, name, **kwargs)
+        if name == "deadline clock result":
+            result_audits += 1
+            if result_audits == 4:
+                if drift == "cutoff":
+                    object.__setattr__(deadline, "deadline_monotonic_s", 200.0)
+                else:
+                    object.__setattr__(deadline, "_monotonic_clock", lambda: 0.0)
+        return word
+
+    monkeypatch.setattr(validation_module, "_legged_float_word_v2", audit_then_drift)
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = _route_call(_single_heading_route(0.0), deadline=deadline)
+    assert clock_calls == 4
+    assert result_audits == 4
+    assert result.reason_code == "planning_deadline_contract_mismatch"
+
+
+@pytest.mark.parametrize("fault_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_legged_route_clock_result_audit_propagates_critical_faults(
+    monkeypatch: pytest.MonkeyPatch,
+    fault_type: type[BaseException],
+) -> None:
+    real_word = validation_module._legged_float_word_v2
+
+    def fault(value, name, **kwargs):
+        if name == "deadline clock result":
+            raise fault_type()
+        return real_word(value, name, **kwargs)
+
+    monkeypatch.setattr(validation_module, "_legged_float_word_v2", fault)
+    with pytest.raises(fault_type):
+        _route_call(_single_heading_route(0.0))
+
+
+@pytest.mark.parametrize("drift", ["route", "request", "profile"])
+def test_legged_route_deadline_reason_reseals_only_route_hash_without_callback(
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    expected_hash = sha256(canonical_json_bytes(route)).hexdigest()
+
+    def expire_with_drift() -> float:
+        if drift == "route":
+            object.__setattr__(route, "total_cost", 1.0)
+        elif drift == "request":
+            object.__setattr__(request, "request_id", "expired-request-drift")
+        else:
+            object.__setattr__(profile, "max_step_length_m", 0.25)
+        return 100.0
+
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(expire_with_drift),
+    )
+    assert result.reason_code == "planning_deadline_expired"
+    assert result.validated_route_hash == (None if drift == "route" else expected_hash)
+
+
 def test_legged_route_final_deadline_callback_is_last_external_clock_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2089,6 +2179,73 @@ def test_legged_route_callback_mutation_is_caught_by_detached_tokens(
         profile,
         _route_deadline(clock),
     )
+    assert result.reason_code == expected
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "target", "field", "value", "expected"),
+    [
+        (
+            "_legged_rebuild_route_token_v2",
+            "route",
+            "total_cost",
+            1.0,
+            "route_structure_mismatch",
+        ),
+        (
+            "_legged_request_other_token_v2",
+            "request",
+            "request_id",
+            "last-helper-drift",
+            "planning_request_contract_mismatch",
+        ),
+        (
+            "_legged_profile_token_v2",
+            "profile",
+            "max_step_length_m",
+            0.25,
+            "legged_profile_contract_mismatch",
+        ),
+    ],
+)
+def test_legged_route_final_helper_call_cannot_leave_persistent_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+    target: str,
+    field: str,
+    value: object,
+    expected: str,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    objects = {"route": route, "request": request, "profile": profile}
+    real_helper = getattr(validation_module, helper_name)
+    calls = 0
+
+    def drift_after_last_audit(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        token = real_helper(*args, **kwargs)
+        if calls == 6:
+            object.__setattr__(objects[target], field, value)
+        return token
+
+    monkeypatch.setattr(validation_module, helper_name, drift_after_last_audit)
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert calls == 6
     assert result.reason_code == expected
 
 
