@@ -2454,6 +2454,122 @@ def test_legged_route_serializer_failure_and_byte_drift_have_stable_reasons(
     assert drift.validated_route_hash is None
 
 
+def test_legged_route_final_route_bytes_helper_cannot_hide_route_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    real_route_bytes = validation_module._legged_trusted_route_bytes_v2
+    calls = 0
+
+    def drift_after_final_route_bytes(value):
+        nonlocal calls
+        payload = real_route_bytes(value)
+        calls += 1
+        if calls == 16:
+            object.__setattr__(route, "total_cost", 1.0)
+        return payload
+
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_trusted_route_bytes_v2",
+        drift_after_final_route_bytes,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = _route_call(route)
+    assert calls == 16
+    assert result.reason_code == "route_structure_mismatch"
+    assert result.validated_route_hash is None
+
+
+def test_legged_route_final_snapshot_digest_helper_cannot_hide_provenance_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    real_digest = validation_module._legged_trusted_snapshot_digest_v2
+    calls = 0
+
+    def drift_after_final_snapshot_digest(value):
+        nonlocal calls
+        digest = real_digest(value)
+        calls += 1
+        if calls == 11:
+            object.__setattr__(
+                snapshot,
+                "provenance",
+                replace(snapshot.provenance, source_id="final-digest-drift"),
+            )
+        return digest
+
+    monkeypatch.setattr(
+        validation_module,
+        "_legged_trusted_snapshot_digest_v2",
+        drift_after_final_snapshot_digest,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert calls == 11
+    assert result.reason_code == "terrain_snapshot_hash_mismatch"
+
+
+def test_legged_route_freezes_audited_a2_failure_before_final_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failed_cell = Cell(2, 3)
+    a2_result = _a2_result(
+        "legged_body_sweep_collision",
+        cell=failed_cell,
+        margin=0.08,
+    )
+    clock_calls = 0
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 4:
+            object.__setattr__(
+                a2_result,
+                "reason_code",
+                "legged_body_sweep_unknown",
+            )
+            object.__setattr__(
+                a2_result.evidence,
+                "checks",
+                ("legged_body_sweep_unknown",),
+            )
+            object.__setattr__(failed_cell, "x", 9)
+        return 0.0
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: a2_result,
+    )
+    result = _route_call(
+        _single_heading_route(0.0),
+        deadline=_route_deadline(clock),
+    )
+    assert clock_calls == 4
+    assert result.reason_code == "legged_body_sweep_collision"
+    assert result.failed_cell == Cell(2, 3)
+
+
 def test_legged_route_rejects_invalid_private_route_hasher_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
