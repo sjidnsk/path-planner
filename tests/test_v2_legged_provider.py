@@ -4,8 +4,9 @@ import os
 import struct
 import subprocess
 import sys
-from dataclasses import FrozenInstanceError, fields
-from math import isfinite, pi
+from dataclasses import FrozenInstanceError, fields, replace
+from hashlib import sha256
+from math import isfinite, nextafter, pi
 
 import numpy as np
 import pytest
@@ -13,20 +14,32 @@ import pytest
 import path_planner.v2 as v2
 import path_planner.v2.providers as provider_exports
 import path_planner.v2.providers.legged as legged_module
-from path_planner.core import WorldPoint
+import path_planner.v2.validation as validation_module
+from path_planner.core import Cell, WorldPoint
+from path_planner.search.hybrid_astar import MAX_REPLAY_STEPS
 from path_planner.v2.contracts import (
+    AcceleratorPolicyV2,
+    ObjectiveProfileV2,
+    PlanningRequestV2,
+    PlatformKindV2,
     PoseStateV2,
     PrimitiveKindV2,
+    ResourceBudgetV2,
     RoutePrimitiveV2,
+    TypedRouteV2,
+    ValidationEvidenceV2,
     ValidationLevelV2,
 )
 from path_planner.v2.oracles.legged import (
     LEGGED_CRAWL_SEQUENCE_V2,
     LEGGED_FOOT_STORAGE_ORDER_V2,
+    LEGGED_STATIC_STABILITY_VALIDATOR_ID_V2,
     LeggedFootContactV2,
     LeggedStepCandidateV2,
+    LeggedValidationResultV2,
     LegIdV2,
 )
+from path_planner.v2.profiles import LeggedProfileV2, PlatformProfileV2
 from path_planner.v2.providers.legged import (
     LEGGED_CAPABILITY_LEVEL_V2,
     LEGGED_RESOURCE_PROXY_ID_V2,
@@ -38,6 +51,13 @@ from path_planner.v2.providers.legged import (
     nominal_legged_search_state_v2,
 )
 from path_planner.v2.serialization import canonical_json_bytes
+from path_planner.v2.runtime import PlanningDeadlineV2
+from path_planner.v2.terrain import (
+    FineGridGeometryV2,
+    FineSafetyAnchorV2,
+    TerrainProvenanceV2,
+    TerrainSnapshotV2,
+)
 
 
 class FloatSubclass(float):
@@ -167,6 +187,32 @@ def _forge_pose(field: str, value: object) -> PoseStateV2:
 
 def _float_bits(value: float) -> int:
     return int.from_bytes(struct.pack(">d", value), "big", signed=False)
+
+
+def test_public_legged_route_l2_validation_surface_is_frozen() -> None:
+    assert validation_module.LEGGED_ROUTE_VALIDATOR_ID_V2 == (
+        "path-planner-v2-legged-route-l2/v1"
+    )
+    assert v2.LEGGED_ROUTE_VALIDATOR_ID_V2 == (
+        "path-planner-v2-legged-route-l2/v1"
+    )
+    assert v2.LeggedRouteValidationResultV2 is (
+        validation_module.LeggedRouteValidationResultV2
+    )
+    assert v2.validate_legged_route_l2 is validation_module.validate_legged_route_l2
+    assert tuple(
+        field.name for field in fields(validation_module.LeggedRouteValidationResultV2)
+    ) == (
+        "evidence",
+        "reason_code",
+        "timed_out",
+        "failed_cell",
+        "failed_leg",
+        "failed_primitive_index",
+        "checked_cell_count",
+        "minimum_support_margin_m",
+        "validated_route_hash",
+    )
 
 
 def test_public_legged_provider_constants_are_frozen_and_exported() -> None:
@@ -1075,3 +1121,999 @@ def test_constructor_preserves_raw_resource_evidence_when_matcher_is_replaced(
     )
     with pytest.raises(ValueError):
         _primitive(**overrides)
+
+
+def _route_profile() -> LeggedProfileV2:
+    return LeggedProfileV2(
+        profile=PlatformProfileV2(
+            profile_id="legged-static-crawl/v1",
+            platform_kind=PlatformKindV2.LEGGED,
+            capability_revision="simulation_proxy_static_crawl/v1",
+            simulation_proxy=True,
+            max_traversable_slope_deg=30.0,
+        )
+    )
+
+
+def _route_snapshot() -> TerrainSnapshotV2:
+    shape = (20, 20)
+    return TerrainSnapshotV2(
+        geometry=FineGridGeometryV2(
+            width=20,
+            height=20,
+            origin=(-5.0, -5.0),
+            frame_id="moon",
+        ),
+        elevation_m=np.zeros(shape, dtype=np.float64),
+        slope_deg=np.zeros(shape, dtype=np.float64),
+        traversable_mask=np.ones(shape, dtype=bool),
+        hard_obstacle_mask=np.zeros(shape, dtype=bool),
+        observed_mask=np.ones(shape, dtype=bool),
+        confidence=np.ones(shape, dtype=np.float64),
+        provenance=TerrainProvenanceV2(
+            source_kind="synthetic_terrain_obstacle_proxy/v1",
+            source_id="legged-route-fixture",
+            source_hash="legged-route-fixture-hash",
+            physical_obstacle_cells_written=False,
+        ),
+    )
+
+
+def _route_step(
+    start: LeggedSearchStateV2,
+    *,
+    target: WorldPoint,
+    end_body: PoseStateV2,
+) -> LeggedStepPrimitiveV2:
+    moving_leg = LEGGED_CRAWL_SEQUENCE_V2[start.sequence_phase]
+    moving_index = LEGGED_FOOT_STORAGE_ORDER_V2.index(moving_leg)
+    contacts = list(start.foot_contacts)
+    contacts[moving_index] = LeggedFootContactV2(moving_leg, target)
+    end = LeggedSearchStateV2(
+        body_state=end_body,
+        foot_contacts=tuple(contacts),
+        sequence_phase=(start.sequence_phase + 1) % 4,
+    )
+    source = start.foot_contacts[moving_index].foothold
+    foot_travel = float(np.hypot(target.x - source.x, target.y - source.y))
+    distance = float(
+        np.hypot(
+            end.body_state.x_m - start.body_state.x_m,
+            end.body_state.y_m - start.body_state.y_m,
+        )
+    )
+    return LeggedStepPrimitiveV2(
+        kind=PrimitiveKindV2.LEG_STEP,
+        start_state=start.body_state,
+        end_state=end.body_state,
+        duration_s=1.0,
+        distance_m=distance,
+        energy_cost=distance + foot_travel,
+        observation_contribution=0.0,
+        validation_level=ValidationLevelV2.L2,
+        start_legged_state=start,
+        lift_body_state=end.body_state,
+        end_legged_state=end,
+        moving_leg=moving_leg,
+        target_foothold=target,
+        foot_travel_m=foot_travel,
+    )
+
+
+def _route_primitives() -> tuple[LeggedStepPrimitiveV2, LeggedStepPrimitiveV2]:
+    first = _route_step(
+        _state(),
+        target=WorldPoint(0.60, 0.25),
+        end_body=PoseStateV2(0.0, -0.10, 0.0),
+    )
+    second = _route_step(
+        first.end_legged_state,
+        target=WorldPoint(-0.35, -0.50),
+        end_body=PoseStateV2(0.0, -0.20, 0.0),
+    )
+    return first, second
+
+
+def _legged_route(
+    *primitives: RoutePrimitiveV2,
+    complete: bool = True,
+    platform: PlatformKindV2 = PlatformKindV2.LEGGED,
+) -> TypedRouteV2:
+    chosen = _route_primitives() if not primitives else primitives
+    return TypedRouteV2(
+        platform_kind=platform,
+        primitives=tuple(chosen),
+        total_cost=0.0,
+        is_complete=complete,
+    )
+
+
+def _route_request(
+    snapshot: TerrainSnapshotV2,
+    profile: LeggedProfileV2,
+    route: TypedRouteV2,
+    *,
+    start: PoseStateV2 | None = None,
+    goal: PoseStateV2 | None = None,
+    max_route_states: int = 10_000,
+    profile_id: str | None = None,
+) -> PlanningRequestV2:
+    first = route.primitives[0]
+    last = route.primitives[-1]
+    return PlanningRequestV2(
+        request_id="legged-route-request",
+        platform_profile_id=(
+            profile.profile.profile_id if profile_id is None else profile_id
+        ),
+        start_state=first.start_state if start is None else start,
+        goal_state=last.end_state if goal is None else goal,
+        terrain_snapshot=snapshot,
+        objective_profile=ObjectiveProfileV2(),
+        resource_budget=ResourceBudgetV2(max_route_states=max_route_states),
+        timeout_s=10.0,
+        accelerator_policy=AcceleratorPolicyV2.DISABLED,
+        determinism_seed=7,
+    )
+
+
+def _route_deadline(clock=None) -> PlanningDeadlineV2:
+    return PlanningDeadlineV2(
+        0.0,
+        100.0,
+        (lambda: 0.0) if clock is None else clock,
+    )
+
+
+def _a2_result(
+    reason: str = "legged_step_l2_valid",
+    *,
+    checked: int = 3,
+    cell: Cell | None = None,
+    leg: LegIdV2 | None = None,
+    margin: float | None = 0.08,
+) -> LeggedValidationResultV2:
+    return LeggedValidationResultV2(
+        evidence=ValidationEvidenceV2(
+            validator_id=LEGGED_STATIC_STABILITY_VALIDATOR_ID_V2,
+            level=ValidationLevelV2.L2,
+            passed=reason == "legged_step_l2_valid",
+            checks=(reason,),
+        ),
+        reason_code=reason,
+        timed_out=reason == "planning_deadline_expired",
+        failed_cell=cell,
+        failed_leg=leg,
+        checked_cell_count=checked,
+        minimum_support_margin_m=margin,
+    )
+
+
+def _route_call(
+    route: TypedRouteV2 | None = None,
+    *,
+    request: PlanningRequestV2 | None = None,
+    anchor: FineSafetyAnchorV2 | None = None,
+    profile: LeggedProfileV2 | None = None,
+    deadline: PlanningDeadlineV2 | None = None,
+):
+    chosen_route = _legged_route() if route is None else route
+    chosen_profile = _route_profile() if profile is None else profile
+    chosen_anchor = FineSafetyAnchorV2(_route_snapshot()) if anchor is None else anchor
+    chosen_request = (
+        _route_request(chosen_anchor.snapshot, chosen_profile, chosen_route)
+        if request is None
+        else request
+    )
+    return validation_module.validate_legged_route_l2(
+        chosen_route,
+        chosen_request,
+        chosen_anchor,
+        chosen_profile,
+        _route_deadline() if deadline is None else deadline,
+    )
+
+
+def test_legged_route_result_is_frozen_slotted_and_enforces_pass_contract() -> None:
+    digest = "a" * 64
+    result = validation_module.LeggedRouteValidationResultV2(
+        evidence=ValidationEvidenceV2(
+            validator_id=validation_module.LEGGED_ROUTE_VALIDATOR_ID_V2,
+            level=ValidationLevelV2.L2,
+            passed=True,
+            checks=("legged_route_l2_valid",),
+        ),
+        reason_code="legged_route_l2_valid",
+        timed_out=False,
+        failed_cell=None,
+        failed_leg=None,
+        failed_primitive_index=None,
+        checked_cell_count=1,
+        minimum_support_margin_m=0.05,
+        validated_route_hash=digest,
+    )
+    assert result.validated_route_hash == digest
+    assert not hasattr(result, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        result.reason_code = "route_incomplete"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("reason", "index", "cell", "leg", "margin"),
+    [
+        ("legged_route_l2_valid", 0, None, None, 0.05),
+        ("route_start_mismatch", None, None, None, None),
+        ("route_start_mismatch", 1, None, None, None),
+        ("route_connectivity_mismatch", None, None, None, None),
+        ("planning_deadline_expired", None, Cell(0, 0), None, None),
+        ("route_incomplete", None, None, LegIdV2.FRONT_LEFT, None),
+        ("route_goal_tolerance_exceeded", 1, Cell(0, 0), None, None),
+    ],
+)
+def test_legged_route_result_rejects_reason_metadata_mismatches(
+    reason: str,
+    index: int | None,
+    cell: Cell | None,
+    leg: LegIdV2 | None,
+    margin: float | None,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        validation_module.LeggedRouteValidationResultV2(
+            evidence=ValidationEvidenceV2(
+                validator_id=validation_module.LEGGED_ROUTE_VALIDATOR_ID_V2,
+                level=ValidationLevelV2.L2,
+                passed=reason == "legged_route_l2_valid",
+                checks=(reason,),
+            ),
+            reason_code=reason,
+            timed_out=reason == "planning_deadline_expired",
+            failed_cell=cell,
+            failed_leg=leg,
+            failed_primitive_index=index,
+            checked_cell_count=1,
+            minimum_support_margin_m=margin,
+            validated_route_hash="a" * 64,
+        )
+
+
+def test_legged_route_happy_path_replays_every_step_and_aggregates_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _legged_route()
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    calls: list[LeggedStepCandidateV2] = []
+
+    def exact_authority(candidate, _anchor, _profile, _deadline):
+        calls.append(candidate)
+        return _a2_result(
+            checked=5 + len(calls),
+            margin=(0.08, 0.07)[len(calls) - 1],
+        )
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        exact_authority,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert len(calls) == 2
+    assert result.reason_code == "legged_route_l2_valid"
+    assert result.checked_cell_count == 13
+    assert result.minimum_support_margin_m == 0.07
+    assert result.failed_primitive_index is None
+    assert result.validated_route_hash == sha256(canonical_json_bytes(route)).hexdigest()
+
+
+def test_legged_route_default_path_replays_the_real_pinned_a2_oracle() -> None:
+    route = _single_heading_route(0.0)
+    result = _route_call(route)
+    assert result.reason_code == "legged_route_l2_valid"
+    assert result.checked_cell_count > 0
+    assert result.minimum_support_margin_m is not None
+    assert result.minimum_support_margin_m >= 0.05
+    assert result.validated_route_hash == sha256(canonical_json_bytes(route)).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("reason", "cell", "leg", "margin"),
+    [
+        ("legged_step_structure_mismatch", None, None, None),
+        ("legged_foothold_grid_misaligned", None, LegIdV2.FRONT_LEFT, None),
+        ("legged_foothold_unknown", Cell(1, 2), LegIdV2.FRONT_LEFT, None),
+        ("legged_foothold_hard_obstacle", Cell(1, 2), LegIdV2.FRONT_LEFT, None),
+        ("legged_foothold_not_traversable", Cell(1, 2), LegIdV2.FRONT_LEFT, None),
+        ("legged_foothold_slope_exceeded", Cell(1, 2), LegIdV2.FRONT_LEFT, None),
+        ("legged_step_length_exceeded", None, LegIdV2.FRONT_LEFT, None),
+        ("legged_step_height_exceeded", None, LegIdV2.FRONT_LEFT, None),
+        ("legged_support_margin_insufficient", None, None, None),
+        ("legged_body_sweep_unknown", Cell(1, 2), None, 0.05),
+        ("legged_body_sweep_collision", Cell(1, 2), None, 0.05),
+        ("legged_foot_sequence_invalid", None, LegIdV2.FRONT_LEFT, 0.05),
+    ],
+)
+def test_legged_route_preserves_every_a2_step_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    cell: Cell | None,
+    leg: LegIdV2 | None,
+    margin: float | None,
+) -> None:
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(
+            reason,
+            checked=2,
+            cell=cell,
+            leg=leg,
+            margin=margin,
+        ),
+    )
+    result = _route_call()
+    assert result.reason_code == reason
+    assert result.failed_primitive_index == 0
+    assert result.failed_cell == cell
+    assert result.failed_leg is leg
+    assert result.minimum_support_margin_m == margin
+    assert result.checked_cell_count == 4
+
+
+def test_legged_route_a2_reason_priority_precedes_index_and_structural_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results = iter(
+        (
+            _a2_result(
+                "legged_body_sweep_collision",
+                checked=3,
+                cell=Cell(2, 2),
+                margin=0.05,
+            ),
+            _a2_result(
+                "legged_foothold_unknown",
+                checked=4,
+                cell=Cell(1, 1),
+                leg=LegIdV2.REAR_RIGHT,
+                margin=None,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: next(results),
+    )
+    result = _route_call(_legged_route(complete=False))
+    assert result.reason_code == "legged_foothold_unknown"
+    assert result.failed_primitive_index == 1
+    assert result.failed_cell == Cell(1, 1)
+    assert result.failed_leg is LegIdV2.REAR_RIGHT
+    assert result.checked_cell_count == 7
+
+
+def _single_heading_route(heading: float) -> TypedRouteV2:
+    start = _state(PoseStateV2(0.0, 0.0, heading))
+    primitive = _route_step(
+        start,
+        target=WorldPoint(0.60, 0.25),
+        end_body=PoseStateV2(0.0, -0.10, heading),
+    )
+    return _legged_route(primitive)
+
+
+@pytest.mark.parametrize(
+    ("stored", "requested", "expected"),
+    [
+        (0.0, 2.0 * pi, "legged_route_l2_valid"),
+        (-pi, -3.0 * pi, "legged_route_l2_valid"),
+        (-pi, pi, "route_start_mismatch"),
+        (pi, -pi, "route_start_mismatch"),
+    ],
+)
+def test_legged_route_start_uses_a2_tie_canonicalization(
+    monkeypatch: pytest.MonkeyPatch,
+    stored: float,
+    requested: float,
+    expected: str,
+) -> None:
+    route = _single_heading_route(stored)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(
+        snapshot,
+        profile,
+        route,
+        start=PoseStateV2(0.0, 0.0, requested),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert result.reason_code == expected
+    assert result.failed_primitive_index == (0 if expected != "legged_route_l2_valid" else None)
+
+
+def test_legged_route_start_position_is_exact_without_tolerance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _legged_route()
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(
+        snapshot,
+        profile,
+        route,
+        start=PoseStateV2(nextafter(0.0, 1.0), 0.0, 0.0),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert result.reason_code == "route_start_mismatch"
+    assert result.failed_primitive_index == 0
+
+
+@pytest.mark.parametrize(
+    ("stored", "requested", "expected"),
+    [
+        (0.0, 2.0 * pi, "legged_route_l2_valid"),
+        (-pi, pi, "legged_route_l2_valid"),
+        (0.0, nextafter(0.0, 1.0), "route_goal_tolerance_exceeded"),
+        (0.0, 1.7976931348623157e308, "route_goal_tolerance_exceeded"),
+    ],
+)
+def test_legged_route_goal_uses_physical_heading_equivalence(
+    monkeypatch: pytest.MonkeyPatch,
+    stored: float,
+    requested: float,
+    expected: str,
+) -> None:
+    route = _single_heading_route(stored)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(
+        snapshot,
+        profile,
+        route,
+        goal=PoseStateV2(0.0, -0.10, requested),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert result.reason_code == expected
+    assert result.failed_primitive_index == (
+        0 if expected == "route_goal_tolerance_exceeded" else None
+    )
+
+
+@pytest.mark.parametrize("drift", ["contact", "phase"])
+def test_legged_route_connectivity_uses_full_legged_state(
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    first, second = _route_primitives()
+    if drift == "contact":
+        changed = list(first.end_legged_state.foot_contacts)
+        changed[1] = LeggedFootContactV2(
+            LegIdV2.FRONT_RIGHT,
+            WorldPoint(0.60, -0.25),
+        )
+        second_start = LeggedSearchStateV2(
+            first.end_state,
+            tuple(changed),
+            first.end_legged_state.sequence_phase,
+        )
+    else:
+        second_start = LeggedSearchStateV2(
+            first.end_state,
+            first.end_legged_state.foot_contacts,
+            2,
+        )
+    moving_leg = LEGGED_CRAWL_SEQUENCE_V2[second_start.sequence_phase]
+    moving_index = LEGGED_FOOT_STORAGE_ORDER_V2.index(moving_leg)
+    source = second_start.foot_contacts[moving_index].foothold
+    replacement = WorldPoint(source.x + 0.25, source.y)
+    disconnected = _route_step(
+        second_start,
+        target=replacement,
+        end_body=second.end_state,
+    )
+    route = _legged_route(first, disconnected)
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = _route_call(route)
+    assert result.reason_code == "route_connectivity_mismatch"
+    assert result.failed_primitive_index == 1
+
+
+@pytest.mark.parametrize(
+    ("limit", "expected_index"),
+    [(0, 0), (1, 0), (2, 1)],
+)
+def test_legged_route_budget_is_prechecked_before_any_a2(
+    monkeypatch: pytest.MonkeyPatch,
+    limit: int,
+    expected_index: int,
+) -> None:
+    route = _legged_route()
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(
+        snapshot,
+        profile,
+        route,
+        max_route_states=limit,
+    )
+
+    def forbidden(*_args):
+        raise AssertionError("A2 must not run after route budget precheck")
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        forbidden,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert result.reason_code == "route_state_budget_exceeded"
+    assert result.failed_primitive_index == expected_index
+    assert result.checked_cell_count == 0
+
+
+def test_legged_route_budget_hard_cap_equal_and_first_overflow_are_exact() -> None:
+    assert validation_module._legged_route_budget_overflow_index_v2(
+        MAX_REPLAY_STEPS,
+        MAX_REPLAY_STEPS + 1,
+    ) is None
+    assert validation_module._legged_route_budget_overflow_index_v2(
+        MAX_REPLAY_STEPS + 1,
+        MAX_REPLAY_STEPS + 2,
+    ) == MAX_REPLAY_STEPS
+
+
+def test_legged_route_skips_unconvertible_primitive_but_later_safety_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second = _route_primitives()
+    base_only = RoutePrimitiveV2(
+        kind=PrimitiveKindV2.LEG_STEP,
+        start_state=first.start_state,
+        end_state=first.end_state,
+        duration_s=first.duration_s,
+        distance_m=first.distance_m,
+        energy_cost=first.energy_cost,
+        observation_contribution=first.observation_contribution,
+        validation_level=ValidationLevelV2.L2,
+    )
+    route = _legged_route(base_only, second)
+    calls = 0
+
+    def safety(*_args):
+        nonlocal calls
+        calls += 1
+        return _a2_result(
+            "legged_body_sweep_collision",
+            checked=4,
+            cell=Cell(3, 3),
+            margin=0.05,
+        )
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        safety,
+    )
+    result = _route_call(route)
+    assert calls == 1
+    assert result.reason_code == "legged_body_sweep_collision"
+    assert result.failed_primitive_index == 1
+    assert result.checked_cell_count == 4
+    assert result.validated_route_hash is None
+
+
+@pytest.mark.parametrize("fault", ["wrong_type", "forged_result", "exception"])
+def test_legged_route_rejects_a2_authority_contract_faults(
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    if fault == "wrong_type":
+        authority = lambda *_args: object()
+    elif fault == "forged_result":
+        forged = _a2_result()
+        object.__setattr__(forged.evidence, "checks", ("legged_body_sweep_collision",))
+        authority = lambda *_args: forged
+    else:
+        def authority(*_args):
+            raise RuntimeError("ordinary A2 fault")
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        authority,
+    )
+    result = _route_call()
+    assert result.reason_code == "legged_step_oracle_contract_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
+    assert result.failed_cell is None
+    assert result.failed_leg is None
+    assert result.minimum_support_margin_m is None
+
+
+def test_legged_route_reseals_authority_after_an_ordinary_a2_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+
+    def mutate_then_fail(*_args):
+        object.__setattr__(request, "request_id", "drifted-by-a2")
+        raise RuntimeError("ordinary A2 fault after persistent drift")
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        mutate_then_fail,
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert result.reason_code == "planning_request_contract_mismatch"
+    assert result.failed_primitive_index is None
+
+
+@pytest.mark.parametrize("fault_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_legged_route_propagates_critical_a2_faults(
+    monkeypatch: pytest.MonkeyPatch,
+    fault_type: type[BaseException],
+) -> None:
+    def authority(*_args):
+        raise fault_type()
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        authority,
+    )
+    with pytest.raises(fault_type):
+        _route_call()
+
+
+def test_legged_route_public_authority_rebindings_do_not_change_pinned_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "validate_legged_step_l2",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("public A2 rebound")),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "canonical_json_bytes",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("public serializer rebound")),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "snapshot_hash",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("public hasher rebound")),
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "sha256",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("public SHA rebound")),
+    )
+    result = _route_call(_single_heading_route(0.0))
+    assert result.reason_code == "legged_route_l2_valid"
+
+
+def test_legged_route_candidate_must_bind_to_the_same_primitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, second = _route_primitives()
+    wrong = second.as_oracle_candidate()
+    monkeypatch.setattr(
+        LeggedStepPrimitiveV2,
+        "as_oracle_candidate",
+        lambda _self: wrong,
+    )
+
+    def forbidden(*_args):
+        raise AssertionError("mismatched candidate must not reach A2")
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        forbidden,
+    )
+    result = _route_call(_legged_route(first))
+    assert result.reason_code == "legged_primitive_contract_mismatch"
+    assert result.failed_primitive_index == 0
+    assert result.checked_cell_count == 0
+    assert result.validated_route_hash is None
+
+
+def test_legged_route_global_a2_failure_is_immediate_and_unindexed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def authority(*_args):
+        nonlocal calls
+        calls += 1
+        return _a2_result(
+            "terrain_query_contract_mismatch",
+            checked=2,
+            margin=None,
+        )
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        authority,
+    )
+    result = _route_call()
+    assert calls == 1
+    assert result.reason_code == "terrain_query_contract_mismatch"
+    assert result.failed_primitive_index is None
+    assert result.checked_cell_count == 2
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("started_monotonic_s", 1.0, "planning_deadline_contract_mismatch"),
+        ("deadline_monotonic_s", 0.0, "planning_deadline_contract_mismatch"),
+        ("_monotonic_clock", lambda: 0.0, "planning_deadline_contract_mismatch"),
+    ],
+)
+def test_legged_route_deadline_authority_drift_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+    expected: str,
+) -> None:
+    holder: dict[str, object] = {}
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            object.__setattr__(holder["deadline"], field, value)
+        return 0.0
+
+    deadline = _route_deadline(clock)
+    holder["deadline"] = deadline
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = _route_call(_single_heading_route(0.0), deadline=deadline)
+    assert result.reason_code == expected
+    assert result.failed_primitive_index is None
+
+
+@pytest.mark.parametrize("clock_value", [float("nan"), float("inf"), 1])
+def test_legged_route_clock_requires_exact_finite_float(
+    clock_value: object,
+) -> None:
+    result = _route_call(
+        _single_heading_route(0.0),
+        deadline=_route_deadline(lambda: clock_value),
+    )
+    assert result.reason_code == "planning_deadline_contract_mismatch"
+
+
+def test_legged_route_final_deadline_callback_is_last_external_clock_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        return 0.0
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = _route_call(
+        _single_heading_route(0.0),
+        deadline=_route_deadline(clock),
+    )
+    assert result.reason_code == "legged_route_l2_valid"
+    assert calls == 4
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value", "expected"),
+    [
+        ("request", "request_id", "drifted", "planning_request_contract_mismatch"),
+        ("request", "start_state", PoseStateV2(1.0, 0.0, 0.0), "route_start_contract_mismatch"),
+        ("request", "goal_state", PoseStateV2(1.0, 0.0, 0.0), "route_goal_contract_mismatch"),
+        ("profile", "max_step_length_m", 0.25, "legged_profile_contract_mismatch"),
+        ("route", "total_cost", 1.0, "route_structure_mismatch"),
+    ],
+)
+def test_legged_route_callback_mutation_is_caught_by_detached_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    field: str,
+    value: object,
+    expected: str,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    objects = {"request": request, "profile": profile, "route": route}
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            object.__setattr__(objects[target], field, value)
+        return 0.0
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(clock),
+    )
+    assert result.reason_code == expected
+
+
+def test_legged_route_allows_equal_value_immutable_nested_request_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            object.__setattr__(
+                request,
+                "objective_profile",
+                replace(request.objective_profile),
+            )
+        return 0.0
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(clock),
+    )
+    assert result.reason_code == "legged_route_l2_valid"
+
+
+def test_legged_route_serializer_failure_and_byte_drift_have_stable_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_CANONICAL_JSON_BYTES_V2",
+        lambda _route: "not-bytes",
+    )
+    invalid = _route_call(_single_heading_route(0.0))
+    assert invalid.reason_code == "route_hash_contract_mismatch"
+    assert invalid.validated_route_hash is None
+
+    real = canonical_json_bytes
+    calls = 0
+
+    def drifting(route):
+        nonlocal calls
+        calls += 1
+        payload = real(route)
+        return payload if calls == 1 else payload + b" "
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_CANONICAL_JSON_BYTES_V2",
+        drifting,
+    )
+    drift = _route_call(_single_heading_route(0.0))
+    assert drift.reason_code == "route_structure_mismatch"
+    assert drift.validated_route_hash is None
+
+
+def test_legged_route_rejects_invalid_private_route_hasher_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_ROUTE_SHA256_V2",
+        lambda _payload: object(),
+    )
+    result = _route_call(_single_heading_route(0.0))
+    assert result.reason_code == "route_hash_contract_mismatch"
+    assert result.validated_route_hash is None
+
+
+def test_legged_route_rejects_wrong_top_level_types() -> None:
+    route = _legged_route()
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    anchor = FineSafetyAnchorV2(snapshot)
+    deadline = _route_deadline()
+    values = [route, request, anchor, profile, deadline]
+    for index in range(5):
+        wrong = list(values)
+        wrong[index] = object()
+        with pytest.raises(TypeError):
+            validation_module.validate_legged_route_l2(*wrong)

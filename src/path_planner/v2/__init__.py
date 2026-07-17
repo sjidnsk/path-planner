@@ -74,10 +74,13 @@ from path_planner.v2.providers import (
 )
 from path_planner.v2.search import SearchQueueEntryV2, StableSearchQueueV2
 from path_planner.v2.validation import (
+    LEGGED_ROUTE_VALIDATOR_ID_V2,
+    LeggedRouteValidationResultV2,
     RouteValidationResultV2,
     WheelValidationResultV2,
     validate_route,
     validate_route_l2,
+    validate_legged_route_l2,
     validate_wheel_transition_l2,
 )
 from path_planner.v2.benchmark import (
@@ -106,6 +109,7 @@ __all__ = [
     "LEGGED_CAPABILITY_LEVEL_V2",
     "LEGGED_FOOT_STORAGE_ORDER_V2",
     "LEGGED_RESOURCE_PROXY_ID_V2",
+    "LEGGED_ROUTE_VALIDATOR_ID_V2",
     "LEGGED_SEARCH_STATE_SCHEMA_V2",
     "LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2",
     "LEGGED_STATIC_STABILITY_VALIDATOR_ID_V2",
@@ -118,6 +122,7 @@ __all__ = [
     "ObservationProjectionV2",
     "LeggedFootContactV2",
     "LeggedProfileV2",
+    "LeggedRouteValidationResultV2",
     "LeggedSearchStateV2",
     "LeggedStepCandidateV2",
     "LeggedStepPrimitiveV2",
@@ -170,5 +175,6 @@ __all__ = [
     "validate_route_l2",
     "validate_route",
     "validate_legged_step_l2",
+    "validate_legged_route_l2",
     "validate_wheel_transition_l2",
 ]

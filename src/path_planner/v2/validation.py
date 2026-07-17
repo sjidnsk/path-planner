@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from math import hypot, isclose, isfinite, pi, remainder
+from struct import pack
 
 import numpy as np
 
@@ -15,6 +16,8 @@ from path_planner.search import (
 )
 from path_planner.search.hybrid_astar import MAX_REPLAY_STEPS
 from path_planner.v2.contracts import (
+    AcceleratorPolicyV2,
+    ObjectiveProfileV2,
     PlanningRequestV2,
     PlatformKindV2,
     PoseStateV2,
@@ -33,7 +36,30 @@ from path_planner.v2.geometry import (
     conservative_wheel_pose_cells,
     conservative_wheel_sweep_cells,
 )
-from path_planner.v2.profiles import PlatformProfileV2, WheelProfileV2
+from path_planner.v2.oracles.legged import (
+    LEGGED_FOOT_STORAGE_ORDER_V2,
+    LEGGED_STATIC_STABILITY_VALIDATOR_ID_V2,
+    LeggedFootContactV2,
+    LeggedStepCandidateV2,
+    LeggedValidationResultV2,
+    LegIdV2,
+    validate_legged_step_l2,
+)
+from path_planner.v2.profiles import (
+    LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2,
+    PLATFORM_PROFILE_SCHEMA_VERSION_V2,
+    LeggedProfileV2,
+    PlatformProfileV2,
+    WheelProfileV2,
+)
+from path_planner.v2.providers.legged import (
+    LEGGED_CAPABILITY_LEVEL_V2,
+    LEGGED_RESOURCE_PROXY_ID_V2,
+    LEGGED_SEARCH_STATE_SCHEMA_V2,
+    LEGGED_STEP_PRIMITIVE_SCHEMA_V2,
+    LeggedSearchStateV2,
+    LeggedStepPrimitiveV2,
+)
 from path_planner.v2.providers.wheel import WheelMotionPrimitiveV2
 from path_planner.v2.runtime import PlanningDeadlineV2
 from path_planner.v2.serialization import canonical_json_bytes
@@ -52,6 +78,11 @@ WHEEL_TRANSITION_VALIDATOR_ID_V2 = "path-planner-v2-wheel-transition-l2/v1"
 WHEEL_ROUTE_VALIDATOR_ID_V2 = "path-planner-v2-wheel-route-l2/v1"
 WHEEL_ROUTE_L0_VALIDATOR_ID_V2 = "path-planner-v2-wheel-route-l0/v1"
 WHEEL_ROUTE_L1_VALIDATOR_ID_V2 = "path-planner-v2-wheel-route-l1/v1"
+LEGGED_ROUTE_VALIDATOR_ID_V2 = "path-planner-v2-legged-route-l2/v1"
+_TRUSTED_LEGGED_STEP_VALIDATOR_V2 = validate_legged_step_l2
+_TRUSTED_CANONICAL_JSON_BYTES_V2 = canonical_json_bytes
+_TRUSTED_SNAPSHOT_HASH_V2 = snapshot_hash
+_TRUSTED_ROUTE_SHA256_V2 = sha256
 _MAX_DECLARED_ROUTE_STATES = MAX_REPLAY_STEPS + 1
 _EXPECTED_CONTRACT_EXCEPTIONS = (
     TypeError,
@@ -2199,4 +2230,1510 @@ def validate_route(
         evidence,
         l2_result=l2,
         result_route=result_route,
+    )
+
+
+_LEGGED_STEP_FAILURE_REASONS_V2 = (
+    "legged_step_structure_mismatch",
+    "legged_foothold_grid_misaligned",
+    "legged_foothold_unknown",
+    "legged_foothold_hard_obstacle",
+    "legged_foothold_not_traversable",
+    "legged_foothold_slope_exceeded",
+    "legged_step_length_exceeded",
+    "legged_step_height_exceeded",
+    "legged_support_margin_insufficient",
+    "legged_body_sweep_unknown",
+    "legged_body_sweep_collision",
+    "legged_foot_sequence_invalid",
+)
+_LEGGED_GLOBAL_A2_FAILURE_REASONS_V2 = frozenset(
+    {
+        "planning_deadline_expired",
+        "planning_deadline_contract_mismatch",
+        "terrain_snapshot_hash_mismatch",
+        "terrain_query_contract_mismatch",
+        "legged_profile_contract_mismatch",
+    }
+)
+_LEGGED_ROUTE_GLOBAL_REASONS_V2 = frozenset(
+    {
+        "legged_route_l2_valid",
+        "planning_deadline_expired",
+        "planning_deadline_contract_mismatch",
+        "planning_request_contract_mismatch",
+        "terrain_snapshot_identity_mismatch",
+        "terrain_snapshot_hash_mismatch",
+        "terrain_query_contract_mismatch",
+        "legged_profile_contract_mismatch",
+        "legged_platform_identity_mismatch",
+        "legged_profile_identity_mismatch",
+        "route_incomplete",
+        "route_structure_mismatch",
+        "route_start_contract_mismatch",
+        "route_start_mismatch",
+        "route_connectivity_mismatch",
+        "route_state_budget_exceeded",
+        "route_goal_contract_mismatch",
+        "route_goal_tolerance_exceeded",
+        "route_hash_contract_mismatch",
+        "legged_primitive_type_mismatch",
+        "legged_primitive_contract_mismatch",
+        "legged_step_oracle_contract_mismatch",
+        *_LEGGED_STEP_FAILURE_REASONS_V2,
+    }
+)
+_LEGGED_ROUTE_NO_INDEX_REASONS_V2 = frozenset(
+    {
+        "legged_route_l2_valid",
+        "planning_deadline_expired",
+        "planning_deadline_contract_mismatch",
+        "planning_request_contract_mismatch",
+        "terrain_snapshot_identity_mismatch",
+        "terrain_snapshot_hash_mismatch",
+        "terrain_query_contract_mismatch",
+        "legged_profile_contract_mismatch",
+        "legged_platform_identity_mismatch",
+        "legged_profile_identity_mismatch",
+        "route_incomplete",
+        "route_structure_mismatch",
+        "route_start_contract_mismatch",
+        "route_goal_contract_mismatch",
+        "route_hash_contract_mismatch",
+    }
+)
+_LEGGED_ROUTE_INDEX_REASONS_V2 = (
+    _LEGGED_ROUTE_GLOBAL_REASONS_V2 - _LEGGED_ROUTE_NO_INDEX_REASONS_V2
+)
+_LEGGED_FOOTHOLD_FAILURE_REASONS_V2 = frozenset(
+    {
+        "legged_foothold_unknown",
+        "legged_foothold_hard_obstacle",
+        "legged_foothold_not_traversable",
+        "legged_foothold_slope_exceeded",
+    }
+)
+_LEGGED_LEG_ONLY_FAILURE_REASONS_V2 = frozenset(
+    {
+        "legged_foothold_grid_misaligned",
+        "legged_step_length_exceeded",
+        "legged_step_height_exceeded",
+    }
+)
+_LEGGED_BODY_FAILURE_REASONS_V2 = frozenset(
+    {"legged_body_sweep_unknown", "legged_body_sweep_collision"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class LeggedRouteValidationResultV2:
+    evidence: ValidationEvidenceV2
+    reason_code: str
+    timed_out: bool
+    failed_cell: Cell | None
+    failed_leg: LegIdV2 | None
+    failed_primitive_index: int | None
+    checked_cell_count: int
+    minimum_support_margin_m: float | None
+    validated_route_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        evidence = self.evidence
+        if type(evidence) is not ValidationEvidenceV2:
+            raise TypeError("evidence must be exact ValidationEvidenceV2")
+        if (
+            type(evidence.validator_id) is not str
+            or evidence.validator_id != LEGGED_ROUTE_VALIDATOR_ID_V2
+        ):
+            raise ValueError("evidence validator_id must be the legged route validator")
+        if (
+            type(evidence.level) is not ValidationLevelV2
+            or evidence.level is not ValidationLevelV2.L2
+        ):
+            raise ValueError("evidence must be exact L2")
+        if type(evidence.passed) is not bool:
+            raise TypeError("evidence passed must be exact bool")
+        if (
+            type(evidence.checks) is not tuple
+            or len(evidence.checks) != 1
+            or type(evidence.checks[0]) is not str
+        ):
+            raise TypeError("evidence checks must be one exact string in an exact tuple")
+        if (
+            type(self.reason_code) is not str
+            or self.reason_code not in _LEGGED_ROUTE_GLOBAL_REASONS_V2
+        ):
+            raise ValueError("reason_code must be a stable legged route L2 reason")
+        if evidence.checks != (self.reason_code,):
+            raise ValueError("evidence checks must contain exactly reason_code")
+        passed = self.reason_code == "legged_route_l2_valid"
+        if evidence.passed is not passed:
+            raise ValueError("evidence passed must agree with reason_code")
+        if type(self.timed_out) is not bool:
+            raise TypeError("timed_out must be exact bool")
+        if self.timed_out is not (self.reason_code == "planning_deadline_expired"):
+            raise ValueError("timeout fields must agree")
+
+        if self.failed_cell is not None:
+            if (
+                type(self.failed_cell) is not Cell
+                or type(self.failed_cell.x) is not int
+                or type(self.failed_cell.y) is not int
+            ):
+                raise TypeError("failed_cell must be exact Cell with exact int coordinates")
+        if self.failed_leg is not None and type(self.failed_leg) is not LegIdV2:
+            raise TypeError("failed_leg must be exact LegIdV2 or None")
+        if self.failed_primitive_index is not None:
+            if type(self.failed_primitive_index) is not int:
+                raise TypeError("failed_primitive_index must be exact int or None")
+            if self.failed_primitive_index < 0:
+                raise ValueError("failed_primitive_index must be nonnegative")
+        if self.reason_code in _LEGGED_ROUTE_NO_INDEX_REASONS_V2:
+            if self.failed_primitive_index is not None:
+                raise ValueError("reason_code forbids failed_primitive_index")
+        elif self.reason_code in _LEGGED_ROUTE_INDEX_REASONS_V2:
+            if self.failed_primitive_index is None:
+                raise ValueError("reason_code requires failed_primitive_index")
+        if (
+            self.reason_code == "route_start_mismatch"
+            and self.failed_primitive_index != 0
+        ):
+            raise ValueError("route_start_mismatch requires primitive index zero")
+
+        if type(self.checked_cell_count) is not int:
+            raise TypeError("checked_cell_count must be exact int")
+        if self.checked_cell_count < 0:
+            raise ValueError("checked_cell_count must be nonnegative")
+        margin = self.minimum_support_margin_m
+        if margin is not None:
+            if type(margin) is not float or not isfinite(margin):
+                raise TypeError("minimum_support_margin_m must be exact finite float")
+            if margin < 0.05:
+                raise ValueError("minimum_support_margin_m must meet the 0.05m boundary")
+
+        if self.reason_code in _LEGGED_FOOTHOLD_FAILURE_REASONS_V2:
+            if self.failed_cell is None or self.failed_leg is None or margin is not None:
+                raise ValueError("foothold failure metadata is inconsistent")
+            if self.checked_cell_count <= 0:
+                raise ValueError("foothold failure requires checked cells")
+        elif self.reason_code in _LEGGED_LEG_ONLY_FAILURE_REASONS_V2:
+            if self.failed_cell is not None or self.failed_leg is None or margin is not None:
+                raise ValueError("leg-only failure metadata is inconsistent")
+            if self.checked_cell_count <= 0:
+                raise ValueError("leg-only failure requires checked cells")
+        elif self.reason_code in _LEGGED_BODY_FAILURE_REASONS_V2:
+            if self.failed_cell is None or self.failed_leg is not None or margin is None:
+                raise ValueError("body failure metadata is inconsistent")
+            if self.checked_cell_count <= 0:
+                raise ValueError("body failure requires checked cells")
+        elif self.reason_code == "legged_foot_sequence_invalid":
+            if self.failed_cell is not None or self.failed_leg is None or margin is None:
+                raise ValueError("sequence failure metadata is inconsistent")
+            if self.checked_cell_count <= 0:
+                raise ValueError("sequence failure requires checked cells")
+        elif self.reason_code in {
+            "legged_step_structure_mismatch",
+            "legged_support_margin_insufficient",
+        }:
+            if self.failed_cell is not None or self.failed_leg is not None or margin is not None:
+                raise ValueError("step failure metadata is inconsistent")
+            if (
+                self.reason_code == "legged_support_margin_insufficient"
+                and self.checked_cell_count <= 0
+            ):
+                raise ValueError("support failure requires checked cells")
+        elif passed:
+            if (
+                self.timed_out
+                or self.failed_cell is not None
+                or self.failed_leg is not None
+                or self.failed_primitive_index is not None
+                or self.checked_cell_count <= 0
+                or margin is None
+            ):
+                raise ValueError("passing result metadata is inconsistent")
+        elif self.failed_cell is not None or self.failed_leg is not None or margin is not None:
+            raise ValueError("non-A2 failure must not carry A2 metadata")
+
+        route_hash = self.validated_route_hash
+        if route_hash is not None and (
+            type(route_hash) is not str
+            or len(route_hash) != 64
+            or any(character not in "0123456789abcdef" for character in route_hash)
+        ):
+            raise ValueError("validated_route_hash must be lowercase SHA-256")
+        if passed and route_hash is None:
+            raise ValueError("passing route validation requires a route hash")
+
+
+def _legged_route_result_v2(
+    reason_code: str,
+    *,
+    failed_cell: Cell | None = None,
+    failed_leg: LegIdV2 | None = None,
+    failed_primitive_index: int | None = None,
+    checked_cell_count: int = 0,
+    minimum_support_margin_m: float | None = None,
+    validated_route_hash: str | None = None,
+) -> LeggedRouteValidationResultV2:
+    return LeggedRouteValidationResultV2(
+        evidence=ValidationEvidenceV2(
+            validator_id=LEGGED_ROUTE_VALIDATOR_ID_V2,
+            level=ValidationLevelV2.L2,
+            passed=reason_code == "legged_route_l2_valid",
+            checks=(reason_code,),
+        ),
+        reason_code=reason_code,
+        timed_out=reason_code == "planning_deadline_expired",
+        failed_cell=failed_cell,
+        failed_leg=failed_leg,
+        failed_primitive_index=failed_primitive_index,
+        checked_cell_count=checked_cell_count,
+        minimum_support_margin_m=minimum_support_margin_m,
+        validated_route_hash=validated_route_hash,
+    )
+
+
+def _legged_float_word_v2(
+    value: object,
+    name: str,
+    *,
+    nonnegative: bool = False,
+    canonical_zero: bool = False,
+) -> int:
+    if type(value) is not float:
+        raise TypeError(f"{name} must be an exact built-in float")
+    if not isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if nonnegative and value < 0.0:
+        raise ValueError(f"{name} must be nonnegative")
+    if canonical_zero and value == 0.0 and pack(">d", value) != pack(">d", 0.0):
+        raise ValueError(f"{name} must use canonical positive zero")
+    return int.from_bytes(pack(">d", value), "big", signed=False)
+
+
+def _legged_pose_token_v2(
+    value: object,
+    name: str,
+    *,
+    canonical: bool,
+) -> tuple[int, int, int]:
+    if type(value) is not PoseStateV2:
+        raise TypeError(f"{name} must be exact PoseStateV2")
+    token = (
+        _legged_float_word_v2(
+            value.x_m,
+            f"{name}.x_m",
+            canonical_zero=canonical,
+        ),
+        _legged_float_word_v2(
+            value.y_m,
+            f"{name}.y_m",
+            canonical_zero=canonical,
+        ),
+        _legged_float_word_v2(
+            value.heading_rad,
+            f"{name}.heading_rad",
+            canonical_zero=canonical,
+        ),
+    )
+    if canonical and not -pi <= value.heading_rad <= pi:
+        raise ValueError(f"{name}.heading_rad must already be canonical")
+    return token
+
+
+def _legged_point_token_v2(value: object, name: str) -> tuple[int, int]:
+    if type(value) is not WorldPoint:
+        raise TypeError(f"{name} must be exact WorldPoint")
+    return (
+        _legged_float_word_v2(value.x, f"{name}.x", canonical_zero=True),
+        _legged_float_word_v2(value.y, f"{name}.y", canonical_zero=True),
+    )
+
+
+def _legged_contacts_token_v2(
+    value: object,
+    name: str,
+) -> tuple[tuple[LegIdV2, int, int], ...]:
+    if type(value) is not tuple or len(value) != 4:
+        raise TypeError(f"{name} must be an exact four-contact tuple")
+    token: list[tuple[LegIdV2, int, int]] = []
+    for index, expected_leg in enumerate(LEGGED_FOOT_STORAGE_ORDER_V2):
+        contact = value[index]
+        if type(contact) is not LeggedFootContactV2:
+            raise TypeError(f"{name}[{index}] must be exact LeggedFootContactV2")
+        if type(contact.leg_id) is not LegIdV2 or contact.leg_id is not expected_leg:
+            raise ValueError(f"{name} must preserve exact leg order")
+        point = _legged_point_token_v2(
+            contact.foothold,
+            f"{name}[{index}].foothold",
+        )
+        token.append((expected_leg, *point))
+    return tuple(token)
+
+
+def _legged_state_token_v2(value: object, name: str) -> tuple[object, ...]:
+    if type(value) is not LeggedSearchStateV2:
+        raise TypeError(f"{name} must be exact LeggedSearchStateV2")
+    if type(value.sequence_phase) is not int or not 0 <= value.sequence_phase <= 3:
+        raise ValueError(f"{name}.sequence_phase must be an exact int in [0, 3]")
+    if (
+        type(value.schema_version) is not str
+        or value.schema_version != LEGGED_SEARCH_STATE_SCHEMA_V2
+    ):
+        raise ValueError(f"{name}.schema_version must be the frozen schema")
+    return (
+        value.schema_version,
+        value.sequence_phase,
+        _legged_pose_token_v2(value.body_state, f"{name}.body_state", canonical=True),
+        _legged_contacts_token_v2(value.foot_contacts, f"{name}.foot_contacts"),
+    )
+
+
+def _legged_candidate_token_v2(
+    value: object,
+    name: str,
+) -> tuple[object, ...]:
+    if type(value) is not LeggedStepCandidateV2:
+        raise TypeError(f"{name} must be exact LeggedStepCandidateV2")
+    if type(value.moving_leg) is not LegIdV2:
+        raise TypeError(f"{name}.moving_leg must be exact LegIdV2")
+    if type(value.sequence_phase) is not int or not 0 <= value.sequence_phase <= 3:
+        raise ValueError(f"{name}.sequence_phase must be an exact int in [0, 3]")
+    return (
+        _legged_pose_token_v2(
+            value.start_body_state,
+            f"{name}.start_body_state",
+            canonical=True,
+        ),
+        _legged_pose_token_v2(
+            value.lift_body_state,
+            f"{name}.lift_body_state",
+            canonical=True,
+        ),
+        _legged_pose_token_v2(
+            value.end_body_state,
+            f"{name}.end_body_state",
+            canonical=True,
+        ),
+        _legged_contacts_token_v2(value.foot_contacts, f"{name}.foot_contacts"),
+        value.moving_leg,
+        value.sequence_phase,
+        _legged_point_token_v2(value.target_foothold, f"{name}.target_foothold"),
+    )
+
+
+def _legged_primitive_token_v2(
+    value: object,
+    name: str,
+) -> tuple[object, ...]:
+    if type(value) is not LeggedStepPrimitiveV2:
+        raise TypeError(f"{name} must be exact LeggedStepPrimitiveV2")
+    if type(value.kind) is not PrimitiveKindV2 or value.kind is not PrimitiveKindV2.LEG_STEP:
+        raise ValueError(f"{name}.kind must be exact LEG_STEP")
+    start_pose = _legged_pose_token_v2(
+        value.start_state,
+        f"{name}.start_state",
+        canonical=True,
+    )
+    end_pose = _legged_pose_token_v2(
+        value.end_state,
+        f"{name}.end_state",
+        canonical=True,
+    )
+    start_legged = _legged_state_token_v2(
+        value.start_legged_state,
+        f"{name}.start_legged_state",
+    )
+    end_legged = _legged_state_token_v2(
+        value.end_legged_state,
+        f"{name}.end_legged_state",
+    )
+    if start_pose != start_legged[2] or end_pose != end_legged[2]:
+        raise ValueError(f"{name} base body fields must bitwise match typed states")
+    duration = _legged_float_word_v2(
+        value.duration_s,
+        f"{name}.duration_s",
+        nonnegative=True,
+        canonical_zero=True,
+    )
+    distance = _legged_float_word_v2(
+        value.distance_m,
+        f"{name}.distance_m",
+        nonnegative=True,
+        canonical_zero=True,
+    )
+    energy = _legged_float_word_v2(
+        value.energy_cost,
+        f"{name}.energy_cost",
+        nonnegative=True,
+        canonical_zero=True,
+    )
+    observation = _legged_float_word_v2(
+        value.observation_contribution,
+        f"{name}.observation_contribution",
+        nonnegative=True,
+        canonical_zero=True,
+    )
+    if value.duration_s != 1.0 or value.observation_contribution != 0.0:
+        raise ValueError(f"{name} fixed base resources drifted")
+    if (
+        type(value.validation_level) is not ValidationLevelV2
+        or value.validation_level is not ValidationLevelV2.L2
+    ):
+        raise ValueError(f"{name}.validation_level must be exact L2")
+    if type(value.moving_leg) is not LegIdV2:
+        raise TypeError(f"{name}.moving_leg must be exact LegIdV2")
+    target = _legged_point_token_v2(
+        value.target_foothold,
+        f"{name}.target_foothold",
+    )
+    foot = _legged_float_word_v2(
+        value.foot_travel_m,
+        f"{name}.foot_travel_m",
+        nonnegative=True,
+        canonical_zero=True,
+    )
+    fixed_strings = (
+        (value.capability, LEGGED_CAPABILITY_LEVEL_V2),
+        (value.resource_proxy_id, LEGGED_RESOURCE_PROXY_ID_V2),
+        (value.primitive_schema_version, LEGGED_STEP_PRIMITIVE_SCHEMA_V2),
+    )
+    if any(type(actual) is not str or actual != expected for actual, expected in fixed_strings):
+        raise ValueError(f"{name} frozen string fields drifted")
+    return (
+        value.kind,
+        start_pose,
+        end_pose,
+        duration,
+        distance,
+        energy,
+        observation,
+        value.validation_level,
+        start_legged,
+        _legged_pose_token_v2(
+            value.lift_body_state,
+            f"{name}.lift_body_state",
+            canonical=True,
+        ),
+        end_legged,
+        value.moving_leg,
+        target,
+        foot,
+        value.capability,
+        value.resource_proxy_id,
+        value.primitive_schema_version,
+    )
+
+
+def _legged_candidate_matches_primitive_v2(
+    candidate: object,
+    primitive_token: tuple[object, ...],
+) -> bool:
+    candidate_token = _legged_candidate_token_v2(candidate, "candidate")
+    return candidate_token == (
+        primitive_token[8][2],
+        primitive_token[9],
+        primitive_token[10][2],
+        primitive_token[8][3],
+        primitive_token[11],
+        primitive_token[8][1],
+        primitive_token[12],
+    )
+
+
+def _legged_route_token_v2(
+    route: object,
+    primitive_tokens: tuple[tuple[object, ...], ...],
+) -> tuple[object, ...]:
+    if type(route) is not TypedRouteV2:
+        raise TypeError("route must be exact TypedRouteV2")
+    if type(route.platform_kind) is not PlatformKindV2:
+        raise TypeError("route.platform_kind must be exact PlatformKindV2")
+    if type(route.primitives) is not tuple or not route.primitives:
+        raise ValueError("route.primitives must be an exact nonempty tuple")
+    if len(route.primitives) != len(primitive_tokens):
+        raise ValueError("route primitive token count mismatch")
+    total = _legged_float_word_v2(
+        route.total_cost,
+        "route.total_cost",
+        nonnegative=True,
+    )
+    if type(route.is_complete) is not bool:
+        raise TypeError("route.is_complete must be exact bool")
+    return (route.platform_kind, primitive_tokens, total, route.is_complete)
+
+
+def _legged_request_other_token_v2(request: PlanningRequestV2) -> tuple[object, ...]:
+    if type(request.request_id) is not str or not request.request_id.strip():
+        raise ValueError("request_id must be an exact nonempty string")
+    if (
+        type(request.platform_profile_id) is not str
+        or not request.platform_profile_id.strip()
+    ):
+        raise ValueError("platform_profile_id must be an exact nonempty string")
+    objective = request.objective_profile
+    if type(objective) is not ObjectiveProfileV2:
+        raise TypeError("objective_profile must be exact ObjectiveProfileV2")
+    objective_token = tuple(
+        _legged_float_word_v2(
+            getattr(objective, name),
+            f"objective_profile.{name}",
+            nonnegative=True,
+        )
+        for name in (
+            "distance_weight",
+            "risk_weight",
+            "energy_weight",
+            "time_weight",
+        )
+    )
+    if not any(getattr(objective, name) > 0.0 for name in (
+        "distance_weight",
+        "risk_weight",
+        "energy_weight",
+        "time_weight",
+    )):
+        raise ValueError("objective weights must not all be zero")
+    budget = request.resource_budget
+    if type(budget) is not ResourceBudgetV2:
+        raise TypeError("resource_budget must be exact ResourceBudgetV2")
+    budget_token: list[int] = []
+    for name in ("max_expanded_states", "max_route_states", "max_memory_bytes"):
+        value = getattr(budget, name)
+        if type(value) is not int or value < 0:
+            raise ValueError(f"resource_budget.{name} must be exact nonnegative int")
+        budget_token.append(value)
+    timeout = _legged_float_word_v2(
+        request.timeout_s,
+        "request.timeout_s",
+        nonnegative=True,
+    )
+    if type(request.accelerator_policy) is not AcceleratorPolicyV2:
+        raise TypeError("accelerator_policy must be exact AcceleratorPolicyV2")
+    if type(request.determinism_seed) is not int:
+        raise TypeError("determinism_seed must be exact int")
+    return (
+        request.request_id,
+        request.platform_profile_id,
+        objective_token,
+        tuple(budget_token),
+        timeout,
+        request.accelerator_policy,
+        request.determinism_seed,
+    )
+
+
+def _legged_profile_token_v2(profile: LeggedProfileV2) -> tuple[object, ...]:
+    base = profile.profile
+    if type(base) is not PlatformProfileV2:
+        raise TypeError("legged profile base must be exact PlatformProfileV2")
+    if type(base.profile_id) is not str or not base.profile_id.strip():
+        raise ValueError("legged profile id must be exact nonempty str")
+    if type(base.platform_kind) is not PlatformKindV2 or base.platform_kind is not PlatformKindV2.LEGGED:
+        raise ValueError("legged profile platform must be exact LEGGED")
+    if (
+        type(base.capability_revision) is not str
+        or base.capability_revision != LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2
+    ):
+        raise ValueError("legged capability revision drifted")
+    if type(base.simulation_proxy) is not bool or base.simulation_proxy is not True:
+        raise ValueError("legged profile must be simulation proxy")
+    if (
+        type(base.schema_version) is not str
+        or base.schema_version != PLATFORM_PROFILE_SCHEMA_VERSION_V2
+    ):
+        raise ValueError("legged base profile schema drifted")
+    base_float_names = (
+        "max_traversable_slope_deg",
+        "goal_position_tolerance_m",
+        "goal_heading_tolerance_rad",
+    )
+    base_words = tuple(
+        _legged_float_word_v2(getattr(base, name), f"profile.{name}")
+        for name in base_float_names
+    )
+    if (
+        base.max_traversable_slope_deg != 30.0
+        or base.goal_position_tolerance_m != 0.0
+        or base.goal_heading_tolerance_rad != 0.0
+    ):
+        raise ValueError("legged base profile frozen floats drifted")
+    leaf_names = (
+        "body_length_m",
+        "body_width_m",
+        "nominal_foot_rectangle_length_m",
+        "nominal_foot_rectangle_width_m",
+        "max_step_length_m",
+        "max_step_height_m",
+        "max_foothold_slope_deg",
+        "min_support_margin_m",
+        "local_foothold_grid_spacing_m",
+    )
+    expected = (0.60, 0.40, 0.70, 0.50, 0.50, 0.25, 25.0, 0.05, 0.25)
+    leaf_words: list[int] = []
+    for name, expected_value in zip(leaf_names, expected, strict=True):
+        value = getattr(profile, name)
+        leaf_words.append(_legged_float_word_v2(value, f"legged_profile.{name}"))
+        if value != expected_value:
+            raise ValueError(f"legged_profile.{name} drifted")
+    return (
+        base.profile_id,
+        base.platform_kind,
+        base.capability_revision,
+        base.simulation_proxy,
+        base_words,
+        base.schema_version,
+        tuple(leaf_words),
+    )
+
+
+def _legged_detail_token_v2(value: object) -> object:
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float and isfinite(value):
+        return ("float", _legged_float_word_v2(value, "provenance detail"))
+    raise TypeError("provenance detail must be an exact JSON scalar")
+
+
+def _legged_snapshot_token_v2(snapshot: object) -> tuple[object, ...]:
+    if type(snapshot) is not TerrainSnapshotV2:
+        raise TypeError("snapshot must be exact TerrainSnapshotV2")
+    geometry = snapshot.geometry
+    provenance = snapshot.provenance
+    if type(geometry) is not FineGridGeometryV2:
+        raise TypeError("snapshot geometry must be exact FineGridGeometryV2")
+    if type(provenance) is not TerrainProvenanceV2:
+        raise TypeError("snapshot provenance must be exact TerrainProvenanceV2")
+    if type(geometry.width) is not int or geometry.width <= 0:
+        raise ValueError("geometry width must be exact positive int")
+    if type(geometry.height) is not int or geometry.height <= 0:
+        raise ValueError("geometry height must be exact positive int")
+    if type(geometry.origin) is not tuple or len(geometry.origin) != 2:
+        raise TypeError("geometry origin must be an exact pair tuple")
+    origin = tuple(
+        _legged_float_word_v2(value, f"geometry.origin[{index}]")
+        for index, value in enumerate(geometry.origin)
+    )
+    if type(geometry.frame_id) is not str or not geometry.frame_id.strip():
+        raise ValueError("geometry frame_id must be exact nonempty str")
+    resolution = _legged_float_word_v2(
+        geometry.resolution_m,
+        "geometry.resolution_m",
+    )
+    if geometry.resolution_m != 0.5:
+        raise ValueError("geometry resolution must be exactly 0.5")
+
+    for name in ("source_kind", "source_id", "source_hash"):
+        value = getattr(provenance, name)
+        if type(value) is not str or not value.strip():
+            raise ValueError(f"provenance.{name} must be exact nonempty str")
+    if type(provenance.physical_obstacle_cells_written) is not bool:
+        raise TypeError("physical_obstacle_cells_written must be exact bool")
+    if (
+        provenance.source_kind == SYNTHETIC_TERRAIN_SOURCE_KIND_V2
+        and provenance.physical_obstacle_cells_written is not False
+    ):
+        raise ValueError("synthetic terrain must remain a nonphysical proxy")
+    if type(provenance.details) is not tuple:
+        raise TypeError("provenance details must be an exact tuple")
+    details: list[tuple[str, object]] = []
+    previous: str | None = None
+    for detail in provenance.details:
+        if type(detail) is not tuple or len(detail) != 2:
+            raise TypeError("provenance detail must be an exact pair tuple")
+        key, value = detail
+        if (
+            type(key) is not str
+            or not key.strip()
+            or (previous is not None and key <= previous)
+        ):
+            raise ValueError("provenance detail keys must be exact sorted strings")
+        details.append((key, _legged_detail_token_v2(value)))
+        previous = key
+
+    shape = (geometry.height, geometry.width)
+    layer_tokens: list[tuple[object, ...]] = []
+    layers: dict[str, np.ndarray] = {}
+    for name, dtype in _SNAPSHOT_LAYER_DTYPES:
+        layer = getattr(snapshot, name)
+        if (
+            type(layer) is not np.ndarray
+            or layer.dtype != dtype
+            or layer.ndim != 2
+            or layer.shape != shape
+            or not layer.flags.c_contiguous
+            or not _has_immutable_bytes_storage(layer)
+        ):
+            raise ValueError(f"snapshot layer {name} is not canonical immutable storage")
+        if dtype == np.dtype("<f8") and not bool(np.all(np.isfinite(layer))):
+            raise ValueError(f"snapshot layer {name} must be finite")
+        layers[name] = layer
+        layer_tokens.append((name, id(layer), dtype.str, shape, layer.tobytes(order="C")))
+    if bool(np.any(layers["slope_deg"] < 0.0)):
+        raise ValueError("snapshot slope must be nonnegative")
+    confidence = layers["confidence"]
+    if bool(np.any((confidence < 0.0) | (confidence > 1.0))):
+        raise ValueError("snapshot confidence must remain in [0, 1]")
+    if bool(np.any(layers["traversable_mask"] & layers["hard_obstacle_mask"])):
+        raise ValueError("snapshot traversable and obstacle layers conflict")
+    return (
+        id(snapshot),
+        id(geometry),
+        geometry.width,
+        geometry.height,
+        origin,
+        geometry.frame_id,
+        resolution,
+        id(provenance),
+        provenance.source_kind,
+        provenance.source_id,
+        provenance.source_hash,
+        provenance.physical_obstacle_cells_written,
+        tuple(details),
+        tuple(layer_tokens),
+    )
+
+
+class _LeggedRouteHashContractError(RuntimeError):
+    pass
+
+
+class _LeggedSnapshotHashContractError(RuntimeError):
+    pass
+
+
+def _legged_trusted_route_bytes_v2(route: TypedRouteV2) -> bytes:
+    try:
+        payload = _TRUSTED_CANONICAL_JSON_BYTES_V2(route)
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:
+        raise _LeggedRouteHashContractError from exc
+    if type(payload) is not bytes:
+        raise _LeggedRouteHashContractError
+    return payload
+
+
+def _legged_trusted_route_digest_v2(payload: bytes) -> str:
+    try:
+        hasher = _TRUSTED_ROUTE_SHA256_V2(payload)
+        digest = hasher.hexdigest()
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:
+        raise _LeggedRouteHashContractError from exc
+    if (
+        type(digest) is not str
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise _LeggedRouteHashContractError
+    return digest
+
+
+def _legged_trusted_snapshot_digest_v2(snapshot: TerrainSnapshotV2) -> str:
+    try:
+        digest = _TRUSTED_SNAPSHOT_HASH_V2(snapshot)
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception as exc:
+        raise _LeggedSnapshotHashContractError from exc
+    if (
+        type(digest) is not str
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise _LeggedSnapshotHashContractError
+    return digest
+
+
+class _LeggedDeadlineContractError(RuntimeError):
+    pass
+
+
+class _LeggedDeadlineExpired(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _LeggedDeadlineGuardV2:
+    deadline: PlanningDeadlineV2
+    started_word: int
+    cutoff_word: int
+    callback: object
+
+    @classmethod
+    def capture(cls, deadline: PlanningDeadlineV2) -> _LeggedDeadlineGuardV2:
+        try:
+            started_word = _legged_float_word_v2(
+                deadline.started_monotonic_s,
+                "deadline.started_monotonic_s",
+            )
+            cutoff_word = _legged_float_word_v2(
+                deadline.deadline_monotonic_s,
+                "deadline.deadline_monotonic_s",
+            )
+            callback = deadline._monotonic_clock
+            if deadline.deadline_monotonic_s < deadline.started_monotonic_s:
+                raise ValueError("deadline cutoff precedes start")
+            if not callable(callback):
+                raise TypeError("deadline clock must be callable")
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception as exc:
+            raise _LeggedDeadlineContractError from exc
+        return cls(deadline, started_word, cutoff_word, callback)
+
+    def _seal(self) -> None:
+        try:
+            if (
+                _legged_float_word_v2(
+                    self.deadline.started_monotonic_s,
+                    "deadline.started_monotonic_s",
+                )
+                != self.started_word
+                or _legged_float_word_v2(
+                    self.deadline.deadline_monotonic_s,
+                    "deadline.deadline_monotonic_s",
+                )
+                != self.cutoff_word
+                or self.deadline._monotonic_clock is not self.callback
+            ):
+                raise ValueError("deadline authority drifted")
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception as exc:
+            raise _LeggedDeadlineContractError from exc
+
+    def check(self) -> None:
+        self._seal()
+        try:
+            now = self.callback()  # type: ignore[operator]
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception as exc:
+            raise _LeggedDeadlineContractError from exc
+        self._seal()
+        try:
+            _legged_float_word_v2(now, "deadline clock result")
+        except Exception as exc:
+            raise _LeggedDeadlineContractError from exc
+        if now >= self.deadline.deadline_monotonic_s:
+            raise _LeggedDeadlineExpired
+
+
+def _legged_a2_result_token_v2(
+    result: object,
+) -> tuple[object, ...]:
+    if type(result) is not LeggedValidationResultV2:
+        raise TypeError("A2 result must be exact LeggedValidationResultV2")
+    evidence = result.evidence
+    if type(evidence) is not ValidationEvidenceV2:
+        raise TypeError("A2 evidence must be exact ValidationEvidenceV2")
+    if (
+        type(evidence.validator_id) is not str
+        or evidence.validator_id != LEGGED_STATIC_STABILITY_VALIDATOR_ID_V2
+    ):
+        raise ValueError("A2 validator identity drifted")
+    if (
+        type(evidence.level) is not ValidationLevelV2
+        or evidence.level is not ValidationLevelV2.L2
+    ):
+        raise ValueError("A2 evidence level drifted")
+    if type(evidence.passed) is not bool:
+        raise TypeError("A2 passed must be exact bool")
+    if (
+        type(evidence.checks) is not tuple
+        or len(evidence.checks) != 1
+        or type(evidence.checks[0]) is not str
+    ):
+        raise TypeError("A2 checks must be one exact string in an exact tuple")
+    if type(result.reason_code) is not str:
+        raise TypeError("A2 reason must be exact str")
+    if type(result.timed_out) is not bool:
+        raise TypeError("A2 timed_out must be exact bool")
+    if type(result.checked_cell_count) is not int:
+        raise TypeError("A2 checked count must be exact int")
+    if result.failed_cell is not None and (
+        type(result.failed_cell) is not Cell
+        or type(result.failed_cell.x) is not int
+        or type(result.failed_cell.y) is not int
+    ):
+        raise TypeError("A2 failed cell drifted")
+    if result.failed_leg is not None and type(result.failed_leg) is not LegIdV2:
+        raise TypeError("A2 failed leg drifted")
+    if result.minimum_support_margin_m is not None and (
+        type(result.minimum_support_margin_m) is not float
+        or not isfinite(result.minimum_support_margin_m)
+    ):
+        raise TypeError("A2 support margin drifted")
+    LeggedValidationResultV2(
+        evidence=evidence,
+        reason_code=result.reason_code,
+        timed_out=result.timed_out,
+        failed_cell=result.failed_cell,
+        failed_leg=result.failed_leg,
+        checked_cell_count=result.checked_cell_count,
+        minimum_support_margin_m=result.minimum_support_margin_m,
+    )
+    return (
+        evidence.validator_id,
+        evidence.level,
+        evidence.passed,
+        evidence.checks,
+        result.reason_code,
+        result.timed_out,
+        result.failed_cell,
+        result.failed_leg,
+        result.checked_cell_count,
+        (
+            None
+            if result.minimum_support_margin_m is None
+            else _legged_float_word_v2(
+                result.minimum_support_margin_m,
+                "A2 minimum_support_margin_m",
+            )
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _LeggedAuthorityContextV2:
+    route: TypedRouteV2
+    route_token: tuple[object, ...] | None
+    route_bytes: bytes | None
+    route_hash: str | None
+    request: PlanningRequestV2
+    request_start_token: tuple[int, int, int] | None
+    request_goal_token: tuple[int, int, int] | None
+    request_other_token: tuple[object, ...]
+    profile: LeggedProfileV2
+    profile_token: tuple[object, ...]
+    anchor: FineSafetyAnchorV2
+    snapshot: TerrainSnapshotV2
+    snapshot_token: tuple[object, ...]
+    snapshot_digest: str
+
+
+def _legged_rebuild_route_token_v2(
+    route: TypedRouteV2,
+) -> tuple[object, ...]:
+    if type(route.primitives) is not tuple or not route.primitives:
+        raise ValueError("route primitives drifted")
+    primitive_tokens = tuple(
+        _legged_primitive_token_v2(primitive, f"route.primitives[{index}]")
+        for index, primitive in enumerate(route.primitives)
+    )
+    return _legged_route_token_v2(route, primitive_tokens)
+
+
+def _legged_seal_authority_v2(
+    context: _LeggedAuthorityContextV2,
+) -> tuple[str | None, str | None]:
+    route_hash = context.route_hash
+    if context.route_token is not None:
+        try:
+            current_route_token = _legged_rebuild_route_token_v2(context.route)
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            return "route_structure_mismatch", None
+        if current_route_token != context.route_token:
+            return "route_structure_mismatch", None
+        try:
+            current_bytes = _legged_trusted_route_bytes_v2(context.route)
+        except _LeggedRouteHashContractError:
+            return "route_hash_contract_mismatch", None
+        if current_bytes != context.route_bytes:
+            return "route_structure_mismatch", None
+
+    if context.request_start_token is not None:
+        try:
+            start = _legged_pose_token_v2(
+                context.request.start_state,
+                "request.start_state",
+                canonical=False,
+            )
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            return "route_start_contract_mismatch", route_hash
+        if start != context.request_start_token:
+            return "route_start_contract_mismatch", route_hash
+    if context.request_goal_token is not None:
+        try:
+            goal = _legged_pose_token_v2(
+                context.request.goal_state,
+                "request.goal_state",
+                canonical=False,
+            )
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            return "route_goal_contract_mismatch", route_hash
+        if goal != context.request_goal_token:
+            return "route_goal_contract_mismatch", route_hash
+    try:
+        current_request = _legged_request_other_token_v2(context.request)
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        return "planning_request_contract_mismatch", route_hash
+    if current_request != context.request_other_token:
+        return "planning_request_contract_mismatch", route_hash
+    try:
+        current_profile = _legged_profile_token_v2(context.profile)
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        return "legged_profile_contract_mismatch", route_hash
+    if current_profile != context.profile_token:
+        return "legged_profile_contract_mismatch", route_hash
+    if (
+        context.request.terrain_snapshot is not context.snapshot
+        or context.anchor.snapshot is not context.snapshot
+    ):
+        return "terrain_snapshot_identity_mismatch", route_hash
+    try:
+        current_snapshot = _legged_snapshot_token_v2(context.snapshot)
+        current_digest = _legged_trusted_snapshot_digest_v2(context.snapshot)
+        cached_digest = context.anchor._snapshot_hash
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        return "terrain_snapshot_hash_mismatch", route_hash
+    if (
+        current_snapshot != context.snapshot_token
+        or current_digest != context.snapshot_digest
+        or type(cached_digest) is not str
+        or cached_digest != context.snapshot_digest
+    ):
+        return "terrain_snapshot_hash_mismatch", route_hash
+    return None, route_hash
+
+
+def _legged_canonical_start_heading_v2(value: float) -> float:
+    if -pi <= value <= pi:
+        return 0.0 if value == 0.0 else value
+    wrapped = (value + pi) % (2.0 * pi) - pi
+    if wrapped == -pi and value > 0.0:
+        return pi
+    return 0.0 if wrapped == 0.0 else wrapped
+
+
+def _legged_start_matches_v2(
+    requested: PoseStateV2,
+    stored: PoseStateV2,
+) -> bool:
+    return (
+        requested.x_m == stored.x_m
+        and requested.y_m == stored.y_m
+        and _legged_canonical_start_heading_v2(requested.heading_rad)
+        == stored.heading_rad
+    )
+
+
+def _legged_goal_matches_v2(
+    requested: PoseStateV2,
+    stored: PoseStateV2,
+) -> bool:
+    requested_heading = remainder(requested.heading_rad, 2.0 * pi)
+    stored_heading = remainder(stored.heading_rad, 2.0 * pi)
+    heading_delta = remainder(requested_heading - stored_heading, 2.0 * pi)
+    return (
+        requested.x_m == stored.x_m
+        and requested.y_m == stored.y_m
+        and heading_delta == 0.0
+    )
+
+
+def _legged_route_budget_overflow_index_v2(
+    primitive_count: int,
+    max_route_states: int,
+) -> int | None:
+    if type(primitive_count) is not int or primitive_count < 0:
+        raise ValueError("primitive_count must be exact nonnegative int")
+    if type(max_route_states) is not int or max_route_states < 0:
+        raise ValueError("max_route_states must be exact nonnegative int")
+    hard_limit = min(max_route_states, _MAX_DECLARED_ROUTE_STATES)
+    if 1 + primitive_count <= hard_limit:
+        return None
+    return 0 if hard_limit <= 1 else hard_limit - 1
+
+
+def validate_legged_route_l2(
+    route: TypedRouteV2,
+    request: PlanningRequestV2,
+    anchor: FineSafetyAnchorV2,
+    legged_profile: LeggedProfileV2,
+    deadline: PlanningDeadlineV2,
+) -> LeggedRouteValidationResultV2:
+    if type(route) is not TypedRouteV2:
+        raise TypeError("route must be exact TypedRouteV2")
+    if type(request) is not PlanningRequestV2:
+        raise TypeError("request must be exact PlanningRequestV2")
+    if type(anchor) is not FineSafetyAnchorV2:
+        raise TypeError("anchor must be exact FineSafetyAnchorV2")
+    if type(legged_profile) is not LeggedProfileV2:
+        raise TypeError("legged_profile must be exact LeggedProfileV2")
+    if type(deadline) is not PlanningDeadlineV2:
+        raise TypeError("deadline must be exact PlanningDeadlineV2")
+
+    try:
+        guard = _LeggedDeadlineGuardV2.capture(deadline)
+    except _LeggedDeadlineContractError:
+        return _legged_route_result_v2("planning_deadline_contract_mismatch")
+
+    structural: list[tuple[int, int, str, int | None]] = []
+
+    def record(rank: int, reason: str, index: int | None = None) -> None:
+        structural.append((rank, -1 if index is None else index, reason, index))
+
+    try:
+        profile_token = _legged_profile_token_v2(legged_profile)
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        return _legged_route_result_v2("legged_profile_contract_mismatch")
+
+    try:
+        request_other_token = _legged_request_other_token_v2(request)
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        return _legged_route_result_v2("planning_request_contract_mismatch")
+
+    try:
+        request_start_token = _legged_pose_token_v2(
+            request.start_state,
+            "request.start_state",
+            canonical=False,
+        )
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        request_start_token = None
+        record(4, "route_start_contract_mismatch")
+    try:
+        request_goal_token = _legged_pose_token_v2(
+            request.goal_state,
+            "request.goal_state",
+            canonical=False,
+        )
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        request_goal_token = None
+        record(8, "route_goal_contract_mismatch")
+
+    if request.platform_profile_id != legged_profile.profile.profile_id:
+        record(1, "legged_profile_identity_mismatch")
+
+    route_shape_ok = True
+    primitives_value = route.primitives
+    if type(route.platform_kind) is not PlatformKindV2:
+        record(0, "legged_platform_identity_mismatch")
+        route_shape_ok = False
+    elif route.platform_kind is not PlatformKindV2.LEGGED:
+        record(0, "legged_platform_identity_mismatch")
+    if type(primitives_value) is not tuple or not primitives_value:
+        record(2, "route_structure_mismatch")
+        route_shape_ok = False
+        primitives: tuple[object, ...] = ()
+    else:
+        primitives = primitives_value
+    try:
+        _legged_float_word_v2(
+            route.total_cost,
+            "route.total_cost",
+            nonnegative=True,
+        )
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        record(2, "route_structure_mismatch")
+        route_shape_ok = False
+    if type(route.is_complete) is not bool:
+        record(2, "route_structure_mismatch")
+        route_shape_ok = False
+    elif route.is_complete is False:
+        record(3, "route_incomplete")
+
+    primitive_tokens: list[tuple[object, ...] | None] = []
+    candidates: list[LeggedStepCandidateV2 | None] = []
+    all_primitives_canonical = route_shape_ok
+    for index, primitive in enumerate(primitives):
+        if type(primitive) is not LeggedStepPrimitiveV2:
+            record(5, "legged_primitive_type_mismatch", index)
+            primitive_tokens.append(None)
+            candidates.append(None)
+            all_primitives_canonical = False
+            continue
+        try:
+            before = _legged_primitive_token_v2(
+                primitive,
+                f"route.primitives[{index}]",
+            )
+            candidate = primitive.as_oracle_candidate()
+            after = _legged_primitive_token_v2(
+                primitive,
+                f"route.primitives[{index}]",
+            )
+            if before != after:
+                raise ValueError("primitive conversion mutated payload")
+            matches = _legged_candidate_matches_primitive_v2(candidate, before)
+            if type(matches) is not bool or not matches:
+                raise ValueError("candidate is not bound to primitive payload")
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            record(6, "legged_primitive_contract_mismatch", index)
+            primitive_tokens.append(None)
+            candidates.append(None)
+            all_primitives_canonical = False
+            continue
+        primitive_tokens.append(before)
+        candidates.append(candidate)
+
+    route_token: tuple[object, ...] | None = None
+    route_bytes: bytes | None = None
+    route_hash: str | None = None
+    if all_primitives_canonical and primitives:
+        try:
+            exact_tokens = tuple(
+                token for token in primitive_tokens if token is not None
+            )
+            if len(exact_tokens) != len(primitives):
+                raise ValueError("route primitive audit did not cover every item")
+            route_token = _legged_route_token_v2(route, exact_tokens)
+            route_bytes = _legged_trusted_route_bytes_v2(route)
+            if _legged_rebuild_route_token_v2(route) != route_token:
+                raise ValueError("route serializer mutated canonical payload")
+            route_hash = _legged_trusted_route_digest_v2(route_bytes)
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except _LeggedRouteHashContractError:
+            return _legged_route_result_v2("route_hash_contract_mismatch")
+        except Exception:
+            record(2, "route_structure_mismatch")
+            route_token = None
+            route_bytes = None
+            route_hash = None
+
+    snapshot = request.terrain_snapshot
+    if (
+        type(snapshot) is not TerrainSnapshotV2
+        or anchor.snapshot is not snapshot
+    ):
+        return _legged_route_result_v2(
+            "terrain_snapshot_identity_mismatch",
+            validated_route_hash=route_hash,
+        )
+    try:
+        snapshot_token = _legged_snapshot_token_v2(snapshot)
+        snapshot_digest = _legged_trusted_snapshot_digest_v2(snapshot)
+        cached_digest = anchor._snapshot_hash
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        return _legged_route_result_v2(
+            "terrain_snapshot_hash_mismatch",
+            validated_route_hash=route_hash,
+        )
+    if type(cached_digest) is not str or cached_digest != snapshot_digest:
+        return _legged_route_result_v2(
+            "terrain_snapshot_hash_mismatch",
+            validated_route_hash=route_hash,
+        )
+
+    context = _LeggedAuthorityContextV2(
+        route=route,
+        route_token=route_token,
+        route_bytes=route_bytes,
+        route_hash=route_hash,
+        request=request,
+        request_start_token=request_start_token,
+        request_goal_token=request_goal_token,
+        request_other_token=request_other_token,
+        profile=legged_profile,
+        profile_token=profile_token,
+        anchor=anchor,
+        snapshot=snapshot,
+        snapshot_token=snapshot_token,
+        snapshot_digest=snapshot_digest,
+    )
+    checked_cell_count = 0
+
+    def authority_failure(
+        reason: str,
+        stable_hash: str | None,
+    ) -> LeggedRouteValidationResultV2:
+        return _legged_route_result_v2(
+            reason,
+            checked_cell_count=checked_cell_count,
+            validated_route_hash=stable_hash,
+        )
+
+    def checkpoint() -> LeggedRouteValidationResultV2 | None:
+        try:
+            guard.check()
+        except _LeggedDeadlineContractError:
+            return authority_failure(
+                "planning_deadline_contract_mismatch",
+                context.route_hash,
+            )
+        except _LeggedDeadlineExpired:
+            return authority_failure("planning_deadline_expired", context.route_hash)
+        reason, stable_hash = _legged_seal_authority_v2(context)
+        if reason is not None:
+            return authority_failure(reason, stable_hash)
+        return None
+
+    stopped = checkpoint()
+    if stopped is not None:
+        return stopped
+
+    if route_shape_ok and primitives:
+        overflow_index = _legged_route_budget_overflow_index_v2(
+            len(primitives),
+            request.resource_budget.max_route_states,
+        )
+        if overflow_index is not None:
+            return _legged_route_result_v2(
+                "route_state_budget_exceeded",
+                failed_primitive_index=overflow_index,
+                checked_cell_count=0,
+                validated_route_hash=route_hash,
+            )
+
+    if primitives and primitive_tokens[0] is not None and request_start_token is not None:
+        first = primitives[0]
+        if not _legged_start_matches_v2(
+            request.start_state,
+            first.start_legged_state.body_state,
+        ):
+            record(4, "route_start_mismatch", 0)
+    for index in range(1, len(primitives)):
+        previous_token = primitive_tokens[index - 1]
+        current_token = primitive_tokens[index]
+        if (
+            previous_token is not None
+            and current_token is not None
+            and previous_token[10] != current_token[8]
+        ):
+            record(7, "route_connectivity_mismatch", index)
+    if primitives and primitive_tokens[-1] is not None and request_goal_token is not None:
+        last = primitives[-1]
+        if not _legged_goal_matches_v2(
+            request.goal_state,
+            last.end_legged_state.body_state,
+        ):
+            record(8, "route_goal_tolerance_exceeded", len(primitives) - 1)
+
+    step_failures: list[tuple[int, int, LeggedValidationResultV2]] = []
+    pass_margins: list[float] = []
+    reason_rank = {
+        reason: rank for rank, reason in enumerate(_LEGGED_STEP_FAILURE_REASONS_V2)
+    }
+    for index, candidate in enumerate(candidates):
+        if candidate is None:
+            continue
+        stopped = checkpoint()
+        if stopped is not None:
+            return stopped
+        try:
+            a2_result = _TRUSTED_LEGGED_STEP_VALIDATOR_V2(
+                candidate,
+                anchor,
+                legged_profile,
+                deadline,
+            )
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            stopped = checkpoint()
+            if stopped is not None:
+                return stopped
+            return _legged_route_result_v2(
+                "legged_step_oracle_contract_mismatch",
+                failed_primitive_index=index,
+                checked_cell_count=checked_cell_count,
+                validated_route_hash=route_hash,
+            )
+        stopped = checkpoint()
+        if stopped is not None:
+            return stopped
+        try:
+            before = _legged_a2_result_token_v2(a2_result)
+            after = _legged_a2_result_token_v2(a2_result)
+            if before != after:
+                raise ValueError("A2 result audit mutated payload")
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            return _legged_route_result_v2(
+                "legged_step_oracle_contract_mismatch",
+                failed_primitive_index=index,
+                checked_cell_count=checked_cell_count,
+                validated_route_hash=route_hash,
+            )
+        checked_cell_count += a2_result.checked_cell_count
+        if a2_result.reason_code in _LEGGED_GLOBAL_A2_FAILURE_REASONS_V2:
+            return _legged_route_result_v2(
+                a2_result.reason_code,
+                checked_cell_count=checked_cell_count,
+                validated_route_hash=route_hash,
+            )
+        if a2_result.reason_code in reason_rank:
+            step_failures.append(
+                (reason_rank[a2_result.reason_code], index, a2_result)
+            )
+        elif a2_result.reason_code == "legged_step_l2_valid":
+            pass_margins.append(a2_result.minimum_support_margin_m)
+        else:
+            return _legged_route_result_v2(
+                "legged_step_oracle_contract_mismatch",
+                failed_primitive_index=index,
+                checked_cell_count=checked_cell_count - a2_result.checked_cell_count,
+                validated_route_hash=route_hash,
+            )
+
+    stopped = checkpoint()
+    if stopped is not None:
+        return stopped
+    reason, stable_hash = _legged_seal_authority_v2(context)
+    if reason is not None:
+        return authority_failure(reason, stable_hash)
+
+    if step_failures:
+        _rank, index, selected = min(step_failures, key=lambda item: (item[0], item[1]))
+        return _legged_route_result_v2(
+            selected.reason_code,
+            failed_cell=selected.failed_cell,
+            failed_leg=selected.failed_leg,
+            failed_primitive_index=index,
+            checked_cell_count=checked_cell_count,
+            minimum_support_margin_m=selected.minimum_support_margin_m,
+            validated_route_hash=route_hash,
+        )
+    if structural:
+        _rank, _tie_index, reason_code, failed_index = min(structural)
+        return _legged_route_result_v2(
+            reason_code,
+            failed_primitive_index=failed_index,
+            checked_cell_count=checked_cell_count,
+            validated_route_hash=route_hash,
+        )
+    if not pass_margins:
+        return _legged_route_result_v2(
+            "route_structure_mismatch",
+            checked_cell_count=checked_cell_count,
+            validated_route_hash=route_hash,
+        )
+    return _legged_route_result_v2(
+        "legged_route_l2_valid",
+        checked_cell_count=checked_cell_count,
+        minimum_support_margin_m=min(pass_margins),
+        validated_route_hash=route_hash,
     )
