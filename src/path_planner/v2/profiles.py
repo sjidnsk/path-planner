@@ -23,7 +23,7 @@ def _finite_float(value: object, name: str) -> float:
         raise TypeError(f"{name} must be a finite real number")
     try:
         normalized = float(value)
-    except OverflowError:
+    except (OverflowError, RuntimeError):
         raise ValueError(f"{name} must be finite") from None
     if not isfinite(normalized):
         raise ValueError(f"{name} must be finite")
@@ -58,6 +58,20 @@ def _fixed_float(value: object, name: str, expected: float) -> float:
     if normalized != expected:
         raise ValueError(f"{name} must be exactly {expected}")
     return expected
+
+
+def _exact_profile_string(value: object, name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact built-in str")
+    return value
+
+
+def _exact_profile_float(value: object, name: str) -> float:
+    if type(value) is not float:
+        raise TypeError(f"{name} must be exact built-in float")
+    if not isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,22 +229,61 @@ class LeggedProfileV2:
     def __post_init__(self) -> None:
         if type(self.profile) is not PlatformProfileV2:
             raise TypeError("profile must be exact PlatformProfileV2")
-        if self.profile.platform_kind is not PlatformKindV2.LEGGED:
+
+        profile_id = _exact_profile_string(self.profile.profile_id, "profile_id")
+        capability_revision = _exact_profile_string(
+            self.profile.capability_revision,
+            "capability_revision",
+        )
+        schema_version = _exact_profile_string(
+            self.profile.schema_version,
+            "schema_version",
+        )
+        platform_kind = self.profile.platform_kind
+        if type(platform_kind) is not PlatformKindV2:
+            raise TypeError("platform_kind must be exact PlatformKindV2")
+        simulation_proxy = self.profile.simulation_proxy
+        if type(simulation_proxy) is not bool:
+            raise TypeError("simulation_proxy must be exact bool")
+        max_slope = _exact_profile_float(
+            self.profile.max_traversable_slope_deg,
+            "max_traversable_slope_deg",
+        )
+        position_tolerance = _exact_profile_float(
+            self.profile.goal_position_tolerance_m,
+            "goal_position_tolerance_m",
+        )
+        heading_tolerance = _exact_profile_float(
+            self.profile.goal_heading_tolerance_rad,
+            "goal_heading_tolerance_rad",
+        )
+        audited_profile = PlatformProfileV2(
+            profile_id=profile_id,
+            platform_kind=platform_kind,
+            capability_revision=capability_revision,
+            simulation_proxy=simulation_proxy,
+            max_traversable_slope_deg=max_slope,
+            goal_position_tolerance_m=position_tolerance,
+            goal_heading_tolerance_rad=heading_tolerance,
+            schema_version=schema_version,
+        )
+
+        if audited_profile.platform_kind is not PlatformKindV2.LEGGED:
             raise ValueError("legged profile requires PlatformKindV2.LEGGED")
-        if self.profile.simulation_proxy is not True:
+        if audited_profile.simulation_proxy is not True:
             raise ValueError("legged profile requires simulation_proxy=True")
         if (
-            self.profile.capability_revision
+            audited_profile.capability_revision
             != LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2
         ):
             raise ValueError(
                 "capability_revision must be the fixed static-crawl simulation proxy"
             )
-        if self.profile.max_traversable_slope_deg != 30.0:
+        if audited_profile.max_traversable_slope_deg != 30.0:
             raise ValueError("legged profile slope boundary must be exactly 30.0")
-        if self.profile.goal_position_tolerance_m != 0.0:
+        if audited_profile.goal_position_tolerance_m != 0.0:
             raise ValueError("goal_position_tolerance_m must be exactly 0.0")
-        if self.profile.goal_heading_tolerance_rad != 0.0:
+        if audited_profile.goal_heading_tolerance_rad != 0.0:
             raise ValueError("goal_heading_tolerance_rad must be exactly 0.0")
 
         frozen_values = (

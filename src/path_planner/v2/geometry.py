@@ -16,7 +16,7 @@ def _finite_real(value: object, name: str) -> float:
         raise TypeError(f"{name} must be a finite real number")
     try:
         normalized = float(value)
-    except OverflowError:
+    except (OverflowError, RuntimeError):
         raise ValueError(f"{name} must be finite") from None
     if not isfinite(normalized):
         raise ValueError(f"{name} must be finite")
@@ -57,6 +57,14 @@ def _canonical_world_point(point: object, name: str) -> WorldPoint:
     x = _finite_real(point.x, f"{name} x")
     y = _finite_real(point.y, f"{name} y")
     return WorldPoint(0.0 if x == 0.0 else x, 0.0 if y == 0.0 else y)
+
+
+def _exact_finite_pose_field(value: object, name: str) -> float:
+    if type(value) is not float:
+        raise TypeError(f"{name} must be exact built-in float")
+    if not isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    return value
 
 
 def _finite_cross(
@@ -182,10 +190,20 @@ def sample_pose_sweep(
         raise TypeError("end must be exact PoseStateV2")
     step = _positive_real(step_m, "step_m")
 
-    dx = _finite_real(end.x_m - start.x_m, "derived pose dx")
-    dy = _finite_real(end.y_m - start.y_m, "derived pose dy")
+    start_x = _exact_finite_pose_field(start.x_m, "start x_m")
+    start_y = _exact_finite_pose_field(start.y_m, "start y_m")
+    start_heading = _exact_finite_pose_field(
+        start.heading_rad,
+        "start heading_rad",
+    )
+    end_x = _exact_finite_pose_field(end.x_m, "end x_m")
+    end_y = _exact_finite_pose_field(end.y_m, "end y_m")
+    end_heading = _exact_finite_pose_field(end.heading_rad, "end heading_rad")
+
+    dx = _finite_real(end_x - start_x, "derived pose dx")
+    dy = _finite_real(end_y - start_y, "derived pose dy")
     raw_heading_delta = _finite_real(
-        end.heading_rad - start.heading_rad,
+        end_heading - start_heading,
         "derived heading delta",
     )
     two_pi = 2.0 * pi
@@ -201,7 +219,11 @@ def sample_pose_sweep(
         translation + abs(heading_delta),
         "derived pose sweep length",
     )
-    if start == end:
+    if (
+        start_x == end_x
+        and start_y == end_y
+        and start_heading == end_heading
+    ):
         return (start,)
 
     step_ratio = _finite_real(proxy_length / step, "pose sweep step ratio")
@@ -217,10 +239,10 @@ def sample_pose_sweep(
         fraction = index / steps
         samples.append(
             PoseStateV2(
-                _finite_real(start.x_m + dx * fraction, "sample x_m"),
-                _finite_real(start.y_m + dy * fraction, "sample y_m"),
+                _finite_real(start_x + dx * fraction, "sample x_m"),
+                _finite_real(start_y + dy * fraction, "sample y_m"),
                 _finite_real(
-                    start.heading_rad + heading_delta * fraction,
+                    start_heading + heading_delta * fraction,
                     "sample heading_rad",
                 ),
             )

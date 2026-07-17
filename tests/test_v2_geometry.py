@@ -728,3 +728,86 @@ def test_sample_pose_sweep_requires_exact_states_and_finite_derived_motion() -> 
             PoseStateV2(0.0, 0.0, 1.0e308),
             0.5,
         )
+
+
+def test_sample_pose_sweep_rejects_forged_lying_float_before_arithmetic() -> None:
+    class LyingFloat(float):
+        def __sub__(self, _other):
+            return 0.0
+
+    start = PoseStateV2(0.0, 0.0, 0.0)
+    end = PoseStateV2(100.0, 0.0, 0.0)
+    object.__setattr__(end, "x_m", LyingFloat(100.0))
+
+    with pytest.raises(TypeError, match="x_m.*exact.*float"):
+        sample_pose_sweep(start, end, 0.5)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "field", "value"),
+    [
+        ("start", "y_m", False),
+        ("end", "heading_rad", 0),
+    ],
+)
+def test_sample_pose_sweep_rejects_forged_bool_and_int_fields(
+    endpoint,
+    field,
+    value,
+) -> None:
+    start = PoseStateV2(0.0, 0.0, 0.0)
+    end = PoseStateV2(1.0, 0.0, 0.0)
+    object.__setattr__(start if endpoint == "start" else end, field, value)
+
+    with pytest.raises(TypeError, match=f"{field}.*exact.*float"):
+        sample_pose_sweep(start, end, 0.5)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "field", "value"),
+    [
+        ("start", "x_m", float("nan")),
+        ("end", "y_m", float("inf")),
+    ],
+)
+def test_sample_pose_sweep_rejects_forged_nonfinite_float_fields(
+    endpoint,
+    field,
+    value,
+) -> None:
+    start = PoseStateV2(0.0, 0.0, 0.0)
+    end = PoseStateV2(1.0, 0.0, 0.0)
+    object.__setattr__(start if endpoint == "start" else end, field, value)
+
+    with pytest.raises(ValueError, match=f"{field}.*finite"):
+        sample_pose_sweep(start, end, 0.5)
+
+
+def test_sample_pose_sweep_returns_only_exact_float_endpoint_fields() -> None:
+    samples = sample_pose_sweep(
+        PoseStateV2(0.0, 0.0, 0.0),
+        PoseStateV2(1.0, 0.0, 2.0 * pi),
+        0.25,
+    )
+
+    assert len(samples) >= 2
+    assert all(
+        type(value) is float
+        for sample in samples
+        for value in (sample.x_m, sample.y_m, sample.heading_rad)
+    )
+
+
+def test_geometry_numeric_conversion_stabilizes_runtime_error() -> None:
+    class ExplodingInt(int):
+        def __float__(self):
+            raise RuntimeError("numeric protocol exploded")
+
+    with pytest.raises(ValueError, match="theta_rad.*finite"):
+        oriented_rectangle_cells(
+            WorldPoint(0.25, 0.25),
+            ExplodingInt(0),
+            0.60,
+            0.40,
+            FineGridGeometryV2(width=2, height=2, frame_id="moon"),
+        )

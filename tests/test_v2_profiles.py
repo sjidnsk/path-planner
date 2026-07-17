@@ -348,3 +348,50 @@ def test_legged_profile_rejects_every_frozen_numeric_deviation(field, value) -> 
 def test_legged_profile_rejects_malicious_frozen_numeric_values(field, value) -> None:
     with pytest.raises((TypeError, ValueError), match=f"{field}|finite"):
         LeggedProfileV2(profile=_legged_platform(), **{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error", "message"),
+    [
+        ("goal_position_tolerance_m", False, TypeError, "goal_position_tolerance_m.*exact.*float"),
+        ("max_traversable_slope_deg", 30, TypeError, "max_traversable_slope_deg.*exact.*float"),
+        ("goal_heading_tolerance_rad", 0, TypeError, "goal_heading_tolerance_rad.*exact.*float"),
+        ("profile_id", "", ValueError, "profile_id"),
+        ("schema_version", "forged-schema/v1", ValueError, "schema_version"),
+    ],
+)
+def test_legged_profile_reaudits_forged_base_profile_fields(
+    field,
+    value,
+    error,
+    message,
+) -> None:
+    profile = _legged_platform()
+    object.__setattr__(profile, field, value)
+
+    with pytest.raises(error, match=message):
+        LeggedProfileV2(profile=profile)
+
+
+@pytest.mark.parametrize("field", ["profile_id", "capability_revision", "schema_version"])
+def test_legged_profile_rejects_forged_string_subclasses(field) -> None:
+    class DerivedStr(str):
+        pass
+
+    profile = _legged_platform()
+    object.__setattr__(profile, field, DerivedStr(getattr(profile, field)))
+
+    with pytest.raises(TypeError, match=f"{field}.*exact.*str"):
+        LeggedProfileV2(profile=profile)
+
+
+def test_legged_profile_numeric_conversion_stabilizes_runtime_error() -> None:
+    class ExplodingInt(int):
+        def __float__(self):
+            raise RuntimeError("numeric protocol exploded")
+
+    with pytest.raises(ValueError, match="body_length_m.*finite"):
+        LeggedProfileV2(
+            profile=_legged_platform(),
+            body_length_m=ExplodingInt(1),
+        )
