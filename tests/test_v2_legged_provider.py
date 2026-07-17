@@ -2528,6 +2528,134 @@ def test_legged_route_final_snapshot_digest_helper_cannot_hide_provenance_drift(
     assert result.reason_code == "terrain_snapshot_hash_mismatch"
 
 
+def test_legged_route_direct_seal_pins_original_route_serializer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    real_serializer = validation_module._TRUSTED_CANONICAL_JSON_BYTES_V2
+    calls = 0
+
+    def mutate_after_old_final_call(value):
+        nonlocal calls
+        payload = real_serializer(value)
+        calls += 1
+        if calls == 26:
+            object.__setattr__(request, "request_id", "bottom-serializer-drift")
+        return payload
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_CANONICAL_JSON_BYTES_V2",
+        mutate_after_old_final_call,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert calls == 16
+    assert request.request_id == "legged-route-request"
+    assert result.reason_code == "legged_route_l2_valid"
+
+
+def test_legged_route_direct_seal_pins_original_route_hasher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    real_sha256 = validation_module._TRUSTED_ROUTE_SHA256_V2
+    calls = 0
+
+    class HashProxy:
+        def __init__(self, hasher, mutate: bool) -> None:
+            self._hasher = hasher
+            self._mutate = mutate
+
+        def hexdigest(self) -> str:
+            digest = self._hasher.hexdigest()
+            if self._mutate:
+                object.__setattr__(request, "request_id", "bottom-route-sha-drift")
+            return digest
+
+    def mutate_after_old_final_call(payload):
+        nonlocal calls
+        calls += 1
+        return HashProxy(real_sha256(payload), calls == 11)
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_ROUTE_SHA256_V2",
+        mutate_after_old_final_call,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert calls == 6
+    assert request.request_id == "legged-route-request"
+    assert result.reason_code == "legged_route_l2_valid"
+
+
+def test_legged_route_direct_seal_pins_original_snapshot_hasher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = _single_heading_route(0.0)
+    snapshot = _route_snapshot()
+    profile = _route_profile()
+    request = _route_request(snapshot, profile, route)
+    real_snapshot_hash = validation_module._TRUSTED_SNAPSHOT_HASH_V2
+    calls = 0
+
+    def mutate_after_old_final_call(value):
+        nonlocal calls
+        digest = real_snapshot_hash(value)
+        calls += 1
+        if calls == 16:
+            object.__setattr__(request, "request_id", "bottom-snapshot-hash-drift")
+        return digest
+
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_SNAPSHOT_HASH_V2",
+        mutate_after_old_final_call,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_LEGGED_STEP_VALIDATOR_V2",
+        lambda *_args: _a2_result(),
+    )
+    result = validation_module.validate_legged_route_l2(
+        route,
+        request,
+        FineSafetyAnchorV2(snapshot),
+        profile,
+        _route_deadline(),
+    )
+    assert calls == 11
+    assert request.request_id == "legged-route-request"
+    assert result.reason_code == "legged_route_l2_valid"
+
+
 def test_legged_route_freezes_audited_a2_failure_before_final_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
