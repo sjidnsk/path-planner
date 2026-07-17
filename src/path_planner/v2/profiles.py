@@ -10,6 +10,7 @@ from path_planner.v2.contracts import PlatformKindV2
 
 PLATFORM_PROFILE_SCHEMA_VERSION_V2 = "path-planner-v2-platform-profile/v1"
 WHEEL_RELATIVE_ENERGY_PROXY_ID_V2 = "wheel_relative_motion_energy/v1"
+LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2 = "simulation_proxy_static_crawl/v1"
 
 
 def _nonempty_string(value: object, name: str) -> None:
@@ -50,6 +51,13 @@ def _positive_float(value: object, name: str) -> float:
     if normalized <= 0.0:
         raise ValueError(f"{name} must be positive")
     return normalized
+
+
+def _fixed_float(value: object, name: str, expected: float) -> float:
+    normalized = _finite_float(value, name)
+    if normalized != expected:
+        raise ValueError(f"{name} must be exactly {expected}")
+    return expected
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +197,59 @@ class WheelProfileV2:
             "reverse_energy_multiplier",
         ):
             object.__setattr__(self, name, _goal_tolerance(getattr(self, name), name))
+
+
+@dataclass(frozen=True, slots=True)
+class LeggedProfileV2:
+    profile: PlatformProfileV2
+    body_length_m: float = 0.60
+    body_width_m: float = 0.40
+    nominal_foot_rectangle_length_m: float = 0.70
+    nominal_foot_rectangle_width_m: float = 0.50
+    max_step_length_m: float = 0.50
+    max_step_height_m: float = 0.25
+    max_foothold_slope_deg: float = 25.0
+    min_support_margin_m: float = 0.05
+    local_foothold_grid_spacing_m: float = 0.25
+
+    def __post_init__(self) -> None:
+        if type(self.profile) is not PlatformProfileV2:
+            raise TypeError("profile must be exact PlatformProfileV2")
+        if self.profile.platform_kind is not PlatformKindV2.LEGGED:
+            raise ValueError("legged profile requires PlatformKindV2.LEGGED")
+        if self.profile.simulation_proxy is not True:
+            raise ValueError("legged profile requires simulation_proxy=True")
+        if (
+            self.profile.capability_revision
+            != LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2
+        ):
+            raise ValueError(
+                "capability_revision must be the fixed static-crawl simulation proxy"
+            )
+        if self.profile.max_traversable_slope_deg != 30.0:
+            raise ValueError("legged profile slope boundary must be exactly 30.0")
+        if self.profile.goal_position_tolerance_m != 0.0:
+            raise ValueError("goal_position_tolerance_m must be exactly 0.0")
+        if self.profile.goal_heading_tolerance_rad != 0.0:
+            raise ValueError("goal_heading_tolerance_rad must be exactly 0.0")
+
+        frozen_values = (
+            ("body_length_m", 0.60),
+            ("body_width_m", 0.40),
+            ("nominal_foot_rectangle_length_m", 0.70),
+            ("nominal_foot_rectangle_width_m", 0.50),
+            ("max_step_length_m", 0.50),
+            ("max_step_height_m", 0.25),
+            ("max_foothold_slope_deg", 25.0),
+            ("min_support_margin_m", 0.05),
+            ("local_foothold_grid_spacing_m", 0.25),
+        )
+        for name, expected in frozen_values:
+            object.__setattr__(
+                self,
+                name,
+                _fixed_float(getattr(self, name), name, expected),
+            )
 
 
 @dataclass(frozen=True, slots=True)

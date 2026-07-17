@@ -3,15 +3,26 @@ from math import nextafter, pi
 
 import pytest
 
+import path_planner.v2.profiles as profiles_module
 from path_planner.v2.contracts import PlatformKindV2
 from path_planner.v2.profiles import (
+    LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2,
     PLATFORM_PROFILE_SCHEMA_VERSION_V2,
     WHEEL_RELATIVE_ENERGY_PROXY_ID_V2,
+    LeggedProfileV2,
     PlatformProfileRegistryV2,
     PlatformProfileV2,
     WheelProfileV2,
 )
 from path_planner.v2.providers import PrimitiveProviderV2
+
+
+def test_legged_profile_public_surface_exists() -> None:
+    assert (
+        profiles_module.LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2
+        == "simulation_proxy_static_crawl/v1"
+    )
+    assert hasattr(profiles_module, "LeggedProfileV2")
 
 
 def _profile(profile_id: str = "wheel-safe/v1", **overrides) -> PlatformProfileV2:
@@ -21,6 +32,20 @@ def _profile(profile_id: str = "wheel-safe/v1", **overrides) -> PlatformProfileV
         "capability_revision": "wheel-capability/v1",
         "simulation_proxy": False,
         "max_traversable_slope_deg": 30.0,
+    }
+    values.update(overrides)
+    return PlatformProfileV2(**values)
+
+
+def _legged_platform(**overrides) -> PlatformProfileV2:
+    values = {
+        "profile_id": "legged-static-crawl/v1",
+        "platform_kind": PlatformKindV2.LEGGED,
+        "capability_revision": LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2,
+        "simulation_proxy": True,
+        "max_traversable_slope_deg": 30.0,
+        "goal_position_tolerance_m": 0.0,
+        "goal_heading_tolerance_rad": 0.0,
     }
     values.update(overrides)
     return PlatformProfileV2(**values)
@@ -196,3 +221,130 @@ def test_profile_numeric_helpers_convert_huge_real_overflow_to_finite_errors() -
         WheelProfileV2(profile=_profile(), energy_normalization=huge)
     with pytest.raises(ValueError, match="translation_energy_per_m.*finite"):
         WheelProfileV2(profile=_profile(), translation_energy_per_m=huge)
+
+
+def test_legged_profile_freezes_static_crawl_proxy_contract() -> None:
+    profile = _legged_platform()
+    legged = LeggedProfileV2(profile=profile)
+
+    assert legged.profile is profile
+    assert legged.profile.platform_kind is PlatformKindV2.LEGGED
+    assert legged.profile.simulation_proxy is True
+    assert (
+        legged.profile.capability_revision
+        == LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2
+        == "simulation_proxy_static_crawl/v1"
+    )
+    assert legged.profile.max_traversable_slope_deg == 30.0
+    assert legged.profile.goal_position_tolerance_m == 0.0
+    assert legged.profile.goal_heading_tolerance_rad == 0.0
+    assert legged.body_length_m == 0.60
+    assert legged.body_width_m == 0.40
+    assert legged.nominal_foot_rectangle_length_m == 0.70
+    assert legged.nominal_foot_rectangle_width_m == 0.50
+    assert legged.max_step_length_m == 0.50
+    assert legged.max_step_height_m == 0.25
+    assert legged.max_foothold_slope_deg == 25.0
+    assert legged.min_support_margin_m == 0.05
+    assert legged.local_foothold_grid_spacing_m == 0.25
+    assert not hasattr(legged, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        legged.body_length_m = 1.0
+
+
+def test_legged_profile_accepts_signed_zero_goal_tolerances() -> None:
+    profile = _legged_platform(
+        goal_position_tolerance_m=-0.0,
+        goal_heading_tolerance_rad=-0.0,
+    )
+
+    assert LeggedProfileV2(profile=profile).profile is profile
+
+
+def test_legged_profile_requires_exact_platform_profile() -> None:
+    class DerivedPlatformProfile(PlatformProfileV2):
+        pass
+
+    derived = DerivedPlatformProfile(
+        profile_id="legged-static-crawl/v1",
+        platform_kind=PlatformKindV2.LEGGED,
+        capability_revision=LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2,
+        simulation_proxy=True,
+        max_traversable_slope_deg=30.0,
+    )
+
+    with pytest.raises(TypeError, match="exact PlatformProfileV2"):
+        LeggedProfileV2(profile=derived)
+
+
+@pytest.mark.parametrize(
+    ("profile", "message"),
+    [
+        (_profile(), "LEGGED"),
+        (_legged_platform(simulation_proxy=False), "simulation_proxy"),
+        (_legged_platform(capability_revision="simulation_proxy_static_crawl/v2"), "capability_revision"),
+        (
+            _legged_platform(
+                max_traversable_slope_deg=nextafter(30.0, float("inf"))
+            ),
+            "30.0",
+        ),
+        (
+            _legged_platform(goal_position_tolerance_m=nextafter(0.0, 1.0)),
+            "goal_position_tolerance_m",
+        ),
+        (
+            _legged_platform(goal_heading_tolerance_rad=nextafter(0.0, 1.0)),
+            "goal_heading_tolerance_rad",
+        ),
+    ],
+)
+def test_legged_profile_rejects_incompatible_base_profile(profile, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        LeggedProfileV2(profile=profile)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("body_length_m", 0.60),
+        ("body_width_m", 0.40),
+        ("nominal_foot_rectangle_length_m", 0.70),
+        ("nominal_foot_rectangle_width_m", 0.50),
+        ("max_step_length_m", 0.50),
+        ("max_step_height_m", 0.25),
+        ("max_foothold_slope_deg", 25.0),
+        ("min_support_margin_m", 0.05),
+        ("local_foothold_grid_spacing_m", 0.25),
+    ],
+)
+def test_legged_profile_rejects_every_frozen_numeric_deviation(field, value) -> None:
+    with pytest.raises(ValueError, match=field):
+        LeggedProfileV2(
+            profile=_legged_platform(),
+            **{field: nextafter(value, float("inf"))},
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "body_length_m",
+        "body_width_m",
+        "nominal_foot_rectangle_length_m",
+        "nominal_foot_rectangle_width_m",
+        "max_step_length_m",
+        "max_step_height_m",
+        "max_foothold_slope_deg",
+        "min_support_margin_m",
+        "local_foothold_grid_spacing_m",
+    ],
+)
+@pytest.mark.parametrize(
+    "value",
+    [True, float("nan"), float("inf"), float("-inf"), -0.0, 10**10_000],
+    ids=["bool", "nan", "positive_inf", "negative_inf", "signed_zero", "huge"],
+)
+def test_legged_profile_rejects_malicious_frozen_numeric_values(field, value) -> None:
+    with pytest.raises((TypeError, ValueError), match=f"{field}|finite"):
+        LeggedProfileV2(profile=_legged_platform(), **{field: value})

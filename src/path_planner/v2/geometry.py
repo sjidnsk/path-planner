@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from math import ceil, cos, floor, hypot, isfinite, nextafter, sin, sqrt
+from collections.abc import Callable, Sequence
+from math import ceil, cos, floor, hypot, isfinite, nextafter, pi, sin, sqrt
 from numbers import Real
 
-from path_planner.core import Cell
+from path_planner.core import Cell, WorldPoint
 from path_planner.search import MotionPrimitive, Pose2D, replay_motion_primitive
 from path_planner.search.hybrid_astar import MAX_REPLAY_STEPS
+from path_planner.v2.contracts import PoseStateV2
 from path_planner.v2.terrain import FineGridGeometryV2
 
 
@@ -48,6 +49,184 @@ def _raise_if_deadline_expired(
 ) -> None:
     if deadline_checker is not None and _deadline_expired(deadline_checker):
         raise TimeoutError("wheel sweep deadline expired")
+
+
+def _canonical_world_point(point: object, name: str) -> WorldPoint:
+    if type(point) is not WorldPoint:
+        raise TypeError(f"{name} must be exact WorldPoint")
+    x = _finite_real(point.x, f"{name} x")
+    y = _finite_real(point.y, f"{name} y")
+    return WorldPoint(0.0 if x == 0.0 else x, 0.0 if y == 0.0 else y)
+
+
+def _finite_cross(
+    origin: WorldPoint,
+    left: WorldPoint,
+    right: WorldPoint,
+    *,
+    name: str,
+) -> float:
+    left_dx = _finite_real(left.x - origin.x, f"{name} left dx")
+    left_dy = _finite_real(left.y - origin.y, f"{name} left dy")
+    right_dx = _finite_real(right.x - origin.x, f"{name} right dx")
+    right_dy = _finite_real(right.y - origin.y, f"{name} right dy")
+    positive = _finite_real(left_dx * right_dy, f"{name} positive product")
+    negative = _finite_real(left_dy * right_dx, f"{name} negative product")
+    return _finite_real(positive - negative, name)
+
+
+def convex_hull_xy(points: Sequence[WorldPoint]) -> Sequence[WorldPoint]:
+    """Return the canonical counter-clockwise convex hull of exact XY points."""
+
+    if not isinstance(points, Sequence):
+        raise TypeError("points must be a sequence")
+    unique = {
+        (canonical.x, canonical.y): canonical
+        for canonical in (
+            _canonical_world_point(point, "hull point") for point in points
+        )
+    }
+    ordered = tuple(unique[key] for key in sorted(unique))
+    if len(ordered) <= 1:
+        return ordered
+
+    lower: list[WorldPoint] = []
+    for point in ordered:
+        while len(lower) >= 2 and _finite_cross(
+            lower[-2],
+            lower[-1],
+            point,
+            name="hull cross",
+        ) <= 0.0:
+            lower.pop()
+        lower.append(point)
+
+    upper: list[WorldPoint] = []
+    for point in reversed(ordered):
+        while len(upper) >= 2 and _finite_cross(
+            upper[-2],
+            upper[-1],
+            point,
+            name="hull cross",
+        ) <= 0.0:
+            upper.pop()
+        upper.append(point)
+
+    return tuple(lower[:-1] + upper[:-1])
+
+
+def point_margin_to_convex_polygon(
+    point: WorldPoint,
+    polygon: Sequence[WorldPoint],
+) -> float:
+    """Return the minimum signed perpendicular margin to a convex polygon."""
+
+    query = _canonical_world_point(point, "point")
+    hull = convex_hull_xy(polygon)
+    if len(hull) < 3:
+        raise ValueError("polygon must have at least three nondegenerate hull points")
+
+    margins: list[float] = []
+    for index, edge_start in enumerate(hull):
+        edge_end = hull[(index + 1) % len(hull)]
+        edge_dx = _finite_real(edge_end.x - edge_start.x, "margin edge dx")
+        edge_dy = _finite_real(edge_end.y - edge_start.y, "margin edge dy")
+        query_dx = _finite_real(query.x - edge_start.x, "margin query dx")
+        query_dy = _finite_real(query.y - edge_start.y, "margin query dy")
+        positive = _finite_real(edge_dx * query_dy, "margin positive product")
+        negative = _finite_real(edge_dy * query_dx, "margin negative product")
+        cross = _finite_real(positive - negative, "margin cross")
+        edge_length = _finite_real(hypot(edge_dx, edge_dy), "margin edge length")
+        if edge_length <= 0.0:
+            raise ValueError("polygon must have nondegenerate support edges")
+        margins.append(_finite_real(cross / edge_length, "signed margin"))
+
+    margin = min(margins)
+    return 0.0 if margin == 0.0 else margin
+
+
+def oriented_rectangle_cells(
+    center: WorldPoint,
+    theta_rad: float,
+    length_m: float,
+    width_m: float,
+    geometry: FineGridGeometryV2,
+) -> Sequence[Cell]:
+    """Return sorted fine cells conservatively contacted by an oriented rectangle."""
+
+    canonical_center = _canonical_world_point(center, "center")
+    if type(geometry) is not FineGridGeometryV2:
+        raise TypeError("geometry must be exact FineGridGeometryV2")
+    heading = _finite_real(theta_rad, "theta_rad")
+    length = _positive_real(length_m, "length_m")
+    width = _positive_real(width_m, "width_m")
+    return conservative_wheel_pose_cells(
+        Pose2D(canonical_center.x, canonical_center.y, heading),
+        geometry,
+        body_length_m=length,
+        body_width_m=width,
+        safety_margin_m=0.0,
+    )
+
+
+def sample_pose_sweep(
+    start: PoseStateV2,
+    end: PoseStateV2,
+    step_m: float,
+) -> Sequence[PoseStateV2]:
+    """Interpolate a deterministic unit-radius SE(2) proxy sweep."""
+
+    if type(start) is not PoseStateV2:
+        raise TypeError("start must be exact PoseStateV2")
+    if type(end) is not PoseStateV2:
+        raise TypeError("end must be exact PoseStateV2")
+    step = _positive_real(step_m, "step_m")
+
+    dx = _finite_real(end.x_m - start.x_m, "derived pose dx")
+    dy = _finite_real(end.y_m - start.y_m, "derived pose dy")
+    raw_heading_delta = _finite_real(
+        end.heading_rad - start.heading_rad,
+        "derived heading delta",
+    )
+    two_pi = 2.0 * pi
+    heading_delta = _finite_real(
+        (raw_heading_delta + pi) % two_pi - pi,
+        "shortest heading delta",
+    )
+    if heading_delta == -pi and raw_heading_delta > 0.0:
+        heading_delta = pi
+
+    translation = _finite_real(hypot(dx, dy), "derived translation")
+    proxy_length = _finite_real(
+        translation + abs(heading_delta),
+        "derived pose sweep length",
+    )
+    if start == end:
+        return (start,)
+
+    step_ratio = _finite_real(proxy_length / step, "pose sweep step ratio")
+    if step_ratio > MAX_REPLAY_STEPS:
+        raise ValueError(
+            "pose sweep samples must not exceed public replay cap "
+            f"{MAX_REPLAY_STEPS}"
+        )
+    steps = max(1, int(ceil(step_ratio)))
+
+    samples: list[PoseStateV2] = [start]
+    for index in range(1, steps):
+        fraction = index / steps
+        samples.append(
+            PoseStateV2(
+                _finite_real(start.x_m + dx * fraction, "sample x_m"),
+                _finite_real(start.y_m + dy * fraction, "sample y_m"),
+                _finite_real(
+                    start.heading_rad + heading_delta * fraction,
+                    "sample heading_rad",
+                ),
+            )
+        )
+    samples.append(end)
+    return tuple(samples)
 
 
 def _motion_bound(
