@@ -1,5 +1,5 @@
 from dataclasses import FrozenInstanceError
-from math import nextafter, pi
+from math import fsum, hypot, nextafter, pi
 
 import path_planner
 import path_planner.v2 as v2
@@ -31,6 +31,16 @@ from path_planner.v2.contracts import (
     ValidationLevelV2,
 )
 from path_planner.v2.profiles import PlatformProfileRegistryV2, PlatformProfileV2
+from path_planner.v2.oracles.legged import (
+    LEGGED_FOOT_STORAGE_ORDER_V2,
+    LeggedFootContactV2,
+    LegIdV2,
+)
+from path_planner.v2.providers.legged import (
+    LeggedSearchStateV2,
+    LeggedStepPrimitiveV2,
+    nominal_legged_search_state_v2,
+)
 from path_planner.v2.serialization import canonical_json_bytes
 from path_planner.v2.terrain import (
     FineGridGeometryV2,
@@ -667,3 +677,194 @@ def test_gate3_accelerator_contracts_are_public_only_under_v2_namespace() -> Non
     assert expected <= set(v2.__all__)
     assert all(name in v2.__dict__ for name in expected)
     assert all(name not in path_planner.__dict__ for name in expected)
+
+
+def _api_legged_profile() -> PlatformProfileV2:
+    return PlatformProfileV2(
+        profile_id="legged-static-crawl/v1",
+        platform_kind=PlatformKindV2.LEGGED,
+        capability_revision="simulation_proxy_static_crawl/v1",
+        simulation_proxy=True,
+        max_traversable_slope_deg=30.0,
+        goal_position_tolerance_m=0.0,
+        goal_heading_tolerance_rad=0.0,
+    )
+
+
+def _api_legged_request(*, heading: float = 0.0) -> PlanningRequestV2:
+    start = PoseStateV2(1.25, 1.25, heading)
+    return _request(
+        profile_id="legged-static-crawl/v1",
+        start=start,
+        goal=PoseStateV2(1.1875, 1.25, heading),
+    )
+
+
+def _api_legged_success(request: PlanningRequestV2) -> PlanningSuccessV2:
+    start = nominal_legged_search_state_v2(request.start_state)
+    moving_leg = LegIdV2.FRONT_LEFT
+    moving_index = LEGGED_FOOT_STORAGE_ORDER_V2.index(moving_leg)
+    source = start.foot_contacts[moving_index].foothold
+    target = type(source)(source.x - 0.25, source.y)
+    nonmoving = tuple(
+        contact.foothold
+        for index, contact in enumerate(start.foot_contacts)
+        if index != moving_index
+    )
+    lift = PoseStateV2(
+        fsum(point.x for point in nonmoving) / 3.0,
+        fsum(point.y for point in nonmoving) / 3.0,
+        start.body_state.heading_rad,
+    )
+    contacts = list(start.foot_contacts)
+    contacts[moving_index] = LeggedFootContactV2(moving_leg, target)
+    end_body = PoseStateV2(
+        fsum(contact.foothold.x for contact in contacts) / 4.0,
+        fsum(contact.foothold.y for contact in contacts) / 4.0,
+        start.body_state.heading_rad,
+    )
+    end = LeggedSearchStateV2(end_body, tuple(contacts), 1)
+    foot_travel = hypot(target.x - source.x, target.y - source.y)
+    distance = hypot(
+        lift.x_m - start.body_state.x_m,
+        lift.y_m - start.body_state.y_m,
+    ) + hypot(end_body.x_m - lift.x_m, end_body.y_m - lift.y_m)
+    primitive = LeggedStepPrimitiveV2(
+        kind=PrimitiveKindV2.LEG_STEP,
+        start_state=start.body_state,
+        end_state=end_body,
+        duration_s=1.0,
+        distance_m=distance,
+        energy_cost=distance + foot_travel,
+        observation_contribution=0.0,
+        validation_level=ValidationLevelV2.L2,
+        start_legged_state=start,
+        lift_body_state=lift,
+        end_legged_state=end,
+        moving_leg=moving_leg,
+        target_foothold=target,
+        foot_travel_m=foot_travel,
+    )
+    objective = request.objective_profile
+    distance_cost = objective.distance_weight * primitive.distance_m
+    energy_cost = objective.energy_weight * primitive.energy_cost
+    time_cost = objective.time_weight * primitive.duration_s
+    total = sum((distance_cost, 0.0, energy_cost, time_cost))
+    return PlanningSuccessV2(
+        request_id=request.request_id,
+        platform_kind=PlatformKindV2.LEGGED,
+        route=TypedRouteV2(PlatformKindV2.LEGGED, (primitive,), total),
+        observation_projection=ObservationProjectionV2(
+            source="legged_route_body_samples_gain_not_computed/v1",
+            sample_states=(primitive.start_state, lift, primitive.end_state),
+            expected_new_observed_cells=0.0,
+            expected_information_gain=0.0,
+        ),
+        cost_breakdown=CostBreakdownV2(
+            distance_cost,
+            0.0,
+            energy_cost,
+            time_cost,
+            total,
+        ),
+        validation_evidence=ValidationEvidenceV2(
+            "path-planner-v2-legged-route-l2/v1",
+            ValidationLevelV2.L2,
+            True,
+            ("legged_route_l2_valid",),
+        ),
+        search_telemetry=_telemetry("legged_route_l2_valid"),
+        cache_evidence=CacheEvidenceV2(
+            "path-planner-v2-legged-cache-disabled/v1",
+            "legged-cache-disabled/v1",
+            False,
+        ),
+    )
+
+
+def _plan_legged_outcome(
+    request: PlanningRequestV2,
+    outcome: PlanningSuccessV2,
+):
+    profile = _api_legged_profile()
+    return plan_v2(
+        request,
+        registry=PlatformProfileRegistryV2((profile,)),
+        providers={profile.profile_id: _ProviderSpy(profile, outcome)},
+    )
+
+
+@pytest.mark.parametrize("heading", [0.0, 2.0 * pi, -3.0 * pi])
+def test_api_accepts_exact_typed_legged_success_with_canonical_start_and_goal(
+    heading: float,
+) -> None:
+    request = _api_legged_request(heading=heading)
+    expected = _api_legged_success(request)
+    outcome = _plan_legged_outcome(request, expected)
+    assert outcome is expected
+
+
+def test_api_rejects_leg_kind_base_primitive_for_legged_success() -> None:
+    request = _api_legged_request()
+    forged = _success(
+        request,
+        platform_kind=PlatformKindV2.LEGGED,
+        start=request.start_state,
+        end=request.goal_state,
+    )
+    outcome = _plan_legged_outcome(request, forged)
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "primitive_provider_outcome_invalid"
+
+
+def test_api_rejects_legged_full_state_discontinuity_even_when_body_is_connected() -> None:
+    request = _api_legged_request()
+    forged = _api_legged_success(request)
+    primitive = forged.route.primitives[0]
+    assert type(primitive) is LeggedStepPrimitiveV2
+    contacts = list(primitive.start_legged_state.foot_contacts)
+    contacts[1] = LeggedFootContactV2(
+        contacts[1].leg_id,
+        type(contacts[1].foothold)(
+            contacts[1].foothold.x + 0.25,
+            contacts[1].foothold.y,
+        ),
+    )
+    object.__setattr__(primitive.start_legged_state, "foot_contacts", tuple(contacts))
+    outcome = _plan_legged_outcome(request, forged)
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "primitive_provider_outcome_invalid"
+
+
+def test_api_rejects_legged_cost_one_ulp_drift_despite_contract_tolerance() -> None:
+    request = _api_legged_request()
+    forged = _api_legged_success(request)
+    drift = nextafter(forged.cost_breakdown.energy_cost, float("inf"))
+    delta = drift - forged.cost_breakdown.energy_cost
+    object.__setattr__(forged.cost_breakdown, "energy_cost", drift)
+    object.__setattr__(
+        forged.cost_breakdown,
+        "total_cost",
+        forged.cost_breakdown.total_cost + delta,
+    )
+    object.__setattr__(
+        forged.route,
+        "total_cost",
+        forged.route.total_cost + delta,
+    )
+    outcome = _plan_legged_outcome(request, forged)
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "primitive_provider_outcome_invalid"
+
+
+def test_api_rejects_forged_legged_final_evidence_without_replaying_validator() -> None:
+    request = _api_legged_request()
+    forged = _api_legged_success(request)
+    object.__setattr__(
+        forged.validation_evidence,
+        "validator_id",
+        "forged-legged-route-l2/v1",
+    )
+    outcome = _plan_legged_outcome(request, forged)
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "primitive_provider_outcome_invalid"

@@ -6,7 +6,7 @@ import subprocess
 import sys
 from dataclasses import FrozenInstanceError, fields, replace
 from hashlib import sha256
-from math import isfinite, nextafter, pi
+from math import copysign, fsum, hypot, isfinite, nextafter, pi
 
 import numpy as np
 import pytest
@@ -19,8 +19,11 @@ from path_planner.core import Cell, WorldPoint
 from path_planner.search.hybrid_astar import MAX_REPLAY_STEPS
 from path_planner.v2.contracts import (
     AcceleratorPolicyV2,
+    FailureCategoryV2,
     ObjectiveProfileV2,
+    PlanningFailureV2,
     PlanningRequestV2,
+    PlanningSuccessV2,
     PlatformKindV2,
     PoseStateV2,
     PrimitiveKindV2,
@@ -3650,3 +3653,412 @@ def test_legged_route_rejects_wrong_top_level_types() -> None:
         wrong[index] = object()
         with pytest.raises(TypeError):
             validation_module.validate_legged_route_l2(*wrong)
+
+
+# Task 9A3 provider behavior.  These tests use the documented private authority
+# seams so the search, geometry, accounting, and final replay remain real.
+_PROVIDER_OFFSETS = (
+    (0.0, 0.0),
+    (-0.25, 0.0),
+    (0.0, -0.25),
+    (0.0, 0.25),
+    (0.25, 0.0),
+    (-0.25, -0.25),
+    (-0.25, 0.25),
+    (0.25, -0.25),
+    (0.25, 0.25),
+    (-0.50, 0.0),
+    (0.0, -0.50),
+    (0.0, 0.50),
+    (0.50, 0.0),
+)
+
+
+def _provider_request(
+    *,
+    start: PoseStateV2 = PoseStateV2(0.0, 0.0, 0.0),
+    goal: PoseStateV2 = PoseStateV2(-0.0625, 0.0, 0.0),
+    objective: ObjectiveProfileV2 | None = None,
+    budget: ResourceBudgetV2 | None = None,
+    accelerator: AcceleratorPolicyV2 = AcceleratorPolicyV2.DISABLED,
+) -> tuple[PlanningRequestV2, FineSafetyAnchorV2, LeggedProfileV2]:
+    profile = _route_profile()
+    snapshot = _route_snapshot()
+    request = PlanningRequestV2(
+        request_id="legged-provider-request",
+        platform_profile_id=profile.profile.profile_id,
+        start_state=start,
+        goal_state=goal,
+        terrain_snapshot=snapshot,
+        objective_profile=objective or ObjectiveProfileV2(),
+        resource_budget=budget or ResourceBudgetV2(),
+        timeout_s=10.0,
+        accelerator_policy=accelerator,
+        determinism_seed=7,
+    )
+    return request, FineSafetyAnchorV2(snapshot), profile
+
+
+def _provider_pass_result(
+    candidate: LeggedStepCandidateV2,
+    *_args,
+) -> LeggedValidationResultV2:
+    if candidate.target_foothold == WorldPoint(0.35 - 0.25, 0.25):
+        return _a2_result()
+    return _a2_result(
+        "legged_step_length_exceeded",
+        checked=1,
+        leg=candidate.moving_leg,
+        margin=None,
+    )
+
+
+def _install_provider_authorities(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    a2=_provider_pass_result,
+    final_reason: str = "legged_route_l2_valid",
+) -> list[TypedRouteV2]:
+    final_calls: list[TypedRouteV2] = []
+
+    def final(route, *_args):
+        final_calls.append(route)
+        route_hash = validation_module._TRUSTED_LEGGED_ROUTE_DIGEST_AUTHORITY_V2(
+            route
+        )
+        return validation_module.LeggedRouteValidationResultV2(
+            evidence=ValidationEvidenceV2(
+                validator_id=validation_module.LEGGED_ROUTE_VALIDATOR_ID_V2,
+                level=ValidationLevelV2.L2,
+                passed=final_reason == "legged_route_l2_valid",
+                checks=(final_reason,),
+            ),
+            reason_code=final_reason,
+            timed_out=final_reason == "planning_deadline_expired",
+            failed_cell=None,
+            failed_leg=None,
+            failed_primitive_index=None,
+            checked_cell_count=(3 if final_reason == "legged_route_l2_valid" else 0),
+            minimum_support_margin_m=(
+                0.08 if final_reason == "legged_route_l2_valid" else None
+            ),
+            validated_route_hash=route_hash,
+        )
+
+    monkeypatch.setattr(
+        legged_module,
+        "_TRUSTED_VALIDATE_LEGGED_STEP_L2_V2",
+        a2,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_VALIDATE_LEGGED_ROUTE_L2_V2",
+        final,
+        raising=False,
+    )
+    return final_calls
+
+
+def test_legged_provider_public_surface_and_exact_profile_are_frozen() -> None:
+    provider_type = getattr(legged_module, "LeggedPrimitiveProviderV2")
+    assert getattr(legged_module, "LEGGED_LOCAL_FOOTHOLD_OFFSETS_V2") == (
+        _PROVIDER_OFFSETS
+    )
+    assert all(
+        type(offset) is tuple
+        and len(offset) == 2
+        and all(type(value) is float for value in offset)
+        for offset in _PROVIDER_OFFSETS
+    )
+    assert getattr(legged_module, "LEGGED_SEARCH_MEMORY_ACCOUNTING_ID_V2") == (
+        "legged_search_fixed_record_512b/v1"
+    )
+    assert getattr(legged_module, "LEGGED_SEARCH_RECORD_BYTES_V2") == 512
+    for name in (
+        "LEGGED_LOCAL_FOOTHOLD_OFFSETS_V2",
+        "LEGGED_SEARCH_MEMORY_ACCOUNTING_ID_V2",
+        "LEGGED_SEARCH_RECORD_BYTES_V2",
+        "LeggedPrimitiveProviderV2",
+    ):
+        assert getattr(provider_exports, name) is getattr(legged_module, name)
+        assert getattr(v2, name) is getattr(legged_module, name)
+    profile = _route_profile()
+    provider = provider_type(profile)
+    assert provider.profile is profile.profile
+    assert isinstance(provider, provider_exports.PrimitiveProviderV2)
+    with pytest.raises(FrozenInstanceError):
+        provider.legged_profile = profile  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        provider_type(object())
+
+
+def test_legged_provider_generates_exact_geometry_costs_and_final_replay_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_calls = _install_provider_authorities(monkeypatch)
+    request, anchor, profile = _provider_request()
+    provider = getattr(legged_module, "LeggedPrimitiveProviderV2")(profile)
+    outcome = provider.plan(request, anchor, _route_deadline())
+    assert type(outcome) is PlanningSuccessV2
+    assert len(final_calls) == 1
+    primitive = outcome.route.primitives[0]
+    assert type(primitive) is LeggedStepPrimitiveV2
+    assert primitive.start_legged_state == nominal_legged_search_state_v2(
+        request.start_state
+    )
+    assert primitive.moving_leg is LegIdV2.FRONT_LEFT
+    assert primitive.target_foothold == WorldPoint(0.35 - 0.25, 0.25)
+    assert primitive.lift_body_state == PoseStateV2(
+        fsum((0.35, -0.35, -0.35)) / 3.0,
+        fsum((-0.25, 0.25, -0.25)) / 3.0,
+        0.0,
+    )
+    assert primitive.end_state == PoseStateV2(-0.0625, 0.0, 0.0)
+    assert primitive.end_legged_state.sequence_phase == 1
+    assert primitive.end_legged_state.foot_contacts[0].foothold == WorldPoint(
+        0.35 - 0.25,
+        0.25,
+    )
+    assert primitive.end_legged_state.foot_contacts[1:] == (
+        primitive.start_legged_state.foot_contacts[1:]
+    )
+    distance = hypot(primitive.lift_body_state.x_m, primitive.lift_body_state.y_m)
+    distance += hypot(
+        primitive.end_state.x_m - primitive.lift_body_state.x_m,
+        primitive.end_state.y_m - primitive.lift_body_state.y_m,
+    )
+    assert primitive.distance_m.hex() == distance.hex()
+    assert primitive.energy_cost.hex() == (distance + 0.25).hex()
+    assert outcome.cost_breakdown.distance_cost.hex() == 0.0.hex()
+    assert outcome.cost_breakdown.risk_cost.hex() == 0.0.hex()
+    assert outcome.cost_breakdown.energy_cost.hex() == (
+        0.5 * primitive.energy_cost
+    ).hex()
+    assert outcome.cost_breakdown.time_cost.hex() == 0.5.hex()
+    assert outcome.cost_breakdown.total_cost.hex() == outcome.route.total_cost.hex()
+    assert outcome.observation_projection.sample_states == (
+        primitive.start_state,
+        primitive.lift_body_state,
+        primitive.end_state,
+    )
+    assert outcome.observation_projection.source == (
+        "legged_route_body_samples_gain_not_computed/v1"
+    )
+
+
+def test_legged_provider_success_payload_and_search_telemetry_are_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_provider_authorities(monkeypatch)
+    request, anchor, profile = _provider_request()
+    outcome = getattr(legged_module, "LeggedPrimitiveProviderV2")(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningSuccessV2
+    assert outcome.validation_evidence.validator_id == (
+        "path-planner-v2-legged-route-l2/v1"
+    )
+    assert outcome.validation_evidence.checks == ("legged_route_l2_valid",)
+    assert outcome.search_telemetry.expanded_states == 1
+    assert outcome.search_telemetry.generated_primitives == 13
+    assert outcome.search_telemetry.rejected_l2 == 12
+    assert outcome.search_telemetry.termination_reason == "legged_route_l2_valid"
+    assert outcome.search_telemetry.accelerator_used is False
+    assert outcome.search_telemetry.ackermann_feasible_claimed is False
+    assert outcome.cache_evidence.cache_namespace == (
+        "path-planner-v2-legged-cache-disabled/v1"
+    )
+    assert outcome.cache_evidence.cache_key == "legged-cache-disabled/v1"
+    assert outcome.cache_evidence.hit is False
+
+
+@pytest.mark.parametrize(
+    ("request_kwargs", "reason", "category", "stage", "details"),
+    [
+        (
+            {"objective": ObjectiveProfileV2(risk_weight=0.25)},
+            "legged_risk_objective_unsupported",
+            FailureCategoryV2.UNSUPPORTED_CAPABILITY,
+            "capability_check",
+            (),
+        ),
+        (
+            {"accelerator": AcceleratorPolicyV2.REQUIRED},
+            "legged_accelerator_required_unsupported",
+            FailureCategoryV2.UNSUPPORTED_CAPABILITY,
+            "capability_check",
+            (),
+        ),
+        (
+            {"goal": PoseStateV2(-0.0625, 0.0, 0.25)},
+            "legged_goal_heading_unreachable",
+            FailureCategoryV2.GOAL_POSE_UNREACHABLE,
+            "goal_semantics",
+            (),
+        ),
+        (
+            {"goal": PoseStateV2(0.0, 0.0, 2.0 * pi)},
+            "legged_hold_oracle_unavailable",
+            FailureCategoryV2.UNSUPPORTED_CAPABILITY,
+            "capability_check",
+            (),
+        ),
+        (
+            {"budget": ResourceBudgetV2(max_expanded_states=0)},
+            "legged_expansion_budget_exhausted",
+            FailureCategoryV2.RESOURCE_LIMIT,
+            "resource_check",
+            (("attempted_expanded_states", 1), ("max_expanded_states", 0)),
+        ),
+        (
+            {"budget": ResourceBudgetV2(max_route_states=1)},
+            "legged_route_state_budget_exhausted",
+            FailureCategoryV2.RESOURCE_LIMIT,
+            "resource_check",
+            (
+                ("attempted_route_states", 2),
+                ("effective_max_route_states", 1),
+                ("requested_max_route_states", 1),
+            ),
+        ),
+        (
+            {"budget": ResourceBudgetV2(max_memory_bytes=511)},
+            "legged_search_memory_budget_exceeded",
+            FailureCategoryV2.RESOURCE_LIMIT,
+            "resource_check",
+            (
+                ("accounting_id", "legged_search_fixed_record_512b/v1"),
+                ("attempted_record_count", 1),
+                ("max_memory_bytes", 511),
+                ("record_bytes", 512),
+                ("retained_record_count", 0),
+            ),
+        ),
+    ],
+)
+def test_legged_provider_preflight_failures_are_exact_and_do_not_call_a2(
+    monkeypatch: pytest.MonkeyPatch,
+    request_kwargs,
+    reason,
+    category,
+    stage,
+    details,
+) -> None:
+    a2_calls = []
+    monkeypatch.setattr(
+        legged_module,
+        "_TRUSTED_VALIDATE_LEGGED_STEP_L2_V2",
+        lambda *args: a2_calls.append(args),
+        raising=False,
+    )
+    request, anchor, profile = _provider_request(**request_kwargs)
+    outcome = getattr(legged_module, "LeggedPrimitiveProviderV2")(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == reason
+    assert outcome.category is category
+    assert outcome.evidence.stage == stage
+    assert outcome.evidence.checks == (reason,)
+    assert outcome.evidence.details == details
+    assert outcome.search_telemetry.termination_reason == reason
+    assert a2_calls == []
+
+
+def test_legged_provider_all_step_failures_return_no_complete_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject(candidate, *_args):
+        return _a2_result(
+            "legged_step_length_exceeded",
+            checked=1,
+            leg=candidate.moving_leg,
+            margin=None,
+        )
+
+    _install_provider_authorities(monkeypatch, a2=reject)
+    request, anchor, profile = _provider_request()
+    outcome = getattr(legged_module, "LeggedPrimitiveProviderV2")(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "legged_no_complete_route"
+    assert outcome.category is FailureCategoryV2.NO_COMPLETE_ROUTE
+    assert outcome.evidence.stage == "search"
+    assert outcome.search_telemetry.expanded_states == 1
+    assert outcome.search_telemetry.generated_primitives == 13
+    assert outcome.search_telemetry.rejected_l2 == 13
+
+
+@pytest.mark.parametrize(
+    ("a2_value", "reason", "category"),
+    [
+        (object(), "legged_step_oracle_contract_mismatch", FailureCategoryV2.INTERNAL_ERROR),
+        (
+            _a2_result("terrain_snapshot_hash_mismatch", checked=0, margin=None),
+            "terrain_snapshot_hash_mismatch",
+            FailureCategoryV2.VALIDATION_FAILED,
+        ),
+    ],
+)
+def test_legged_provider_a2_contract_and_global_failures_are_not_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+    a2_value,
+    reason,
+    category,
+) -> None:
+    _install_provider_authorities(monkeypatch, a2=lambda *_args: a2_value)
+    request, anchor, profile = _provider_request()
+    outcome = getattr(legged_module, "LeggedPrimitiveProviderV2")(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == reason
+    assert outcome.category is category
+    assert outcome.evidence.stage == "search_edge_validation"
+    assert outcome.search_telemetry.generated_primitives == 1
+    assert outcome.search_telemetry.rejected_l2 == 0
+
+
+def test_legged_provider_final_replay_nonpass_denies_found_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_provider_authorities(
+        monkeypatch,
+        final_reason="terrain_snapshot_hash_mismatch",
+    )
+    request, anchor, profile = _provider_request()
+    outcome = getattr(legged_module, "LeggedPrimitiveProviderV2")(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "terrain_snapshot_hash_mismatch"
+    assert outcome.category is FailureCategoryV2.VALIDATION_FAILED
+    assert outcome.evidence.stage == "route_validation"
+
+
+def test_legged_provider_entry_deadline_uses_exact_cutoff_and_stage() -> None:
+    request, anchor, profile = _provider_request()
+    deadline = PlanningDeadlineV2(0.0, 1.0, lambda: 1.0)
+    outcome = getattr(legged_module, "LeggedPrimitiveProviderV2")(profile).plan(
+        request,
+        anchor,
+        deadline,
+    )
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "planning_deadline_expired"
+    assert outcome.category is FailureCategoryV2.TIMEOUT
+    assert outcome.evidence.stage == "provider_entry"
+    assert outcome.search_telemetry.timed_out is True
+    assert outcome.search_telemetry.elapsed_s == 1.0
