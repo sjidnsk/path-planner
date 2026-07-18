@@ -4504,3 +4504,16 @@ def validate_legged_route_l2(
         minimum_support_margin_m=min(pass_margins),
         validated_route_hash=route_hash,
     )
+
+
+def _trusted_legged_route_digest_authority_v2(route: object) -> str:
+    return _TRUSTED_LEGGED_ROUTE_DIGEST_V2(
+        _TRUSTED_LEGGED_ROUTE_BYTES_V2(route)
+    )
+
+
+_TRUSTED_VALIDATE_LEGGED_ROUTE_L2_V2 = validate_legged_route_l2
+_TRUSTED_LEGGED_ROUTE_RESULT_TYPE_V2 = LeggedRouteValidationResultV2
+_TRUSTED_LEGGED_ROUTE_DIGEST_AUTHORITY_V2 = (
+    _trusted_legged_route_digest_authority_v2
+)

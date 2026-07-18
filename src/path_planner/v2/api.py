@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from math import floor, hypot, remainder, tau
+from math import copysign, floor, hypot, isfinite, remainder, tau
 from time import monotonic
 from typing import Callable
 
 from path_planner.core import Cell
 from path_planner.v2.contracts import (
+    CostBreakdownV2,
     FailureCategoryV2,
     FailureEvidenceV2,
     PlanningFailureV2,
@@ -16,9 +17,18 @@ from path_planner.v2.contracts import (
     PlatformKindV2,
     PoseStateV2,
     SearchTelemetryV2,
+    TypedRouteV2,
+    ValidationEvidenceV2,
+    ValidationLevelV2,
 )
 from path_planner.v2.profiles import PlatformProfileRegistryV2, PlatformProfileV2
-from path_planner.v2.providers import PrimitiveProviderV2
+from path_planner.v2.providers import (
+    LeggedSearchStateV2,
+    LeggedStepPrimitiveV2,
+    PrimitiveProviderV2,
+    legged_state_key_v2,
+    nominal_legged_search_state_v2,
+)
 from path_planner.v2.runtime import MonotonicClockV2, PlanningDeadlineV2
 from path_planner.v2.terrain import FineSafetyAnchorV2, SafetyQueryV2, TerrainSnapshotV2
 
@@ -134,6 +144,234 @@ def _safety_failure(
     )
 
 
+def _legged_exact_float_v2(
+    value: object,
+    *,
+    nonnegative: bool,
+) -> float:
+    if type(value) is not float or not isfinite(value):
+        raise ValueError("legged numeric field must be exact finite float")
+    if nonnegative and value < 0.0:
+        raise ValueError("legged numeric field must be nonnegative")
+    if value == 0.0 and copysign(1.0, value) < 0.0:
+        raise ValueError("legged numeric field must use canonical positive zero")
+    return value
+
+
+def _legged_exact_heading_equal_v2(left: float, right: float) -> bool:
+    return remainder(remainder(left, tau) - remainder(right, tau), tau) == 0.0
+
+
+def _legged_pose_exact_v2(left: object, right: object) -> bool:
+    if type(left) is not PoseStateV2 or type(right) is not PoseStateV2:
+        return False
+    values = (
+        (left.x_m, right.x_m),
+        (left.y_m, right.y_m),
+        (left.heading_rad, right.heading_rad),
+    )
+    for first, second in values:
+        _legged_exact_float_v2(first, nonnegative=False)
+        _legged_exact_float_v2(second, nonnegative=False)
+        if first.hex() != second.hex():
+            return False
+    return True
+
+
+def _legged_checked_component_v2(
+    parent: float,
+    weight: float,
+    resource: float,
+) -> float:
+    _legged_exact_float_v2(parent, nonnegative=True)
+    _legged_exact_float_v2(weight, nonnegative=True)
+    _legged_exact_float_v2(resource, nonnegative=True)
+    product = weight * resource
+    _legged_exact_float_v2(product, nonnegative=True)
+    result = parent + product
+    return _legged_exact_float_v2(result, nonnegative=True)
+
+
+def _legged_success_is_valid_v2(
+    success: PlanningSuccessV2,
+    request: PlanningRequestV2,
+    profile: PlatformProfileV2,
+) -> bool:
+    try:
+        if (
+            success.request_id != request.request_id
+            or request.platform_profile_id != profile.profile_id
+            or success.platform_kind is not PlatformKindV2.LEGGED
+            or profile.platform_kind is not PlatformKindV2.LEGGED
+            or type(success.route) is not TypedRouteV2
+        ):
+            return False
+        route = success.route
+        if (
+            route.platform_kind is not PlatformKindV2.LEGGED
+            or route.is_complete is not True
+            or type(route.primitives) is not tuple
+            or not route.primitives
+        ):
+            return False
+        primitives = route.primitives
+        if any(type(primitive) is not LeggedStepPrimitiveV2 for primitive in primitives):
+            return False
+        nominal = nominal_legged_search_state_v2(request.start_state)
+        if type(nominal) is not LeggedSearchStateV2:
+            return False
+        nominal_key = legged_state_key_v2(nominal)
+        if legged_state_key_v2(primitives[0].start_legged_state) != nominal_key:
+            return False
+
+        previous: LeggedStepPrimitiveV2 | None = None
+        previous_end_key: tuple[int, ...] | None = None
+        resource_tokens: list[tuple[float, float, float]] = []
+        for primitive in primitives:
+            if (
+                type(primitive.start_legged_state) is not LeggedSearchStateV2
+                or type(primitive.end_legged_state) is not LeggedSearchStateV2
+                or not _legged_pose_exact_v2(
+                    primitive.start_state,
+                    primitive.start_legged_state.body_state,
+                )
+                or not _legged_pose_exact_v2(
+                    primitive.end_state,
+                    primitive.end_legged_state.body_state,
+                )
+            ):
+                return False
+            start_key = legged_state_key_v2(primitive.start_legged_state)
+            end_key = legged_state_key_v2(primitive.end_legged_state)
+            if previous is not None and (
+                not _legged_pose_exact_v2(previous.end_state, primitive.start_state)
+                or previous_end_key != start_key
+            ):
+                return False
+            distance = _legged_exact_float_v2(
+                primitive.distance_m,
+                nonnegative=True,
+            )
+            energy = _legged_exact_float_v2(
+                primitive.energy_cost,
+                nonnegative=True,
+            )
+            duration = _legged_exact_float_v2(
+                primitive.duration_s,
+                nonnegative=True,
+            )
+            resource_tokens.append((distance, energy, duration))
+            previous = primitive
+            previous_end_key = end_key
+
+        last = primitives[-1]
+        end = last.end_legged_state.body_state
+        goal = request.goal_state
+        if (
+            not _legged_pose_exact_v2(last.end_state, end)
+            or end.x_m != goal.x_m
+            or end.y_m != goal.y_m
+            or not _legged_exact_heading_equal_v2(end.heading_rad, goal.heading_rad)
+        ):
+            return False
+        evidence = success.validation_evidence
+        if (
+            type(evidence) is not ValidationEvidenceV2
+            or type(evidence.validator_id) is not str
+            or evidence.validator_id != "path-planner-v2-legged-route-l2/v1"
+            or type(evidence.level) is not ValidationLevelV2
+            or evidence.level is not ValidationLevelV2.L2
+            or type(evidence.passed) is not bool
+            or evidence.passed is not True
+            or type(evidence.checks) is not tuple
+            or evidence.checks != ("legged_route_l2_valid",)
+            or type(evidence.checks[0]) is not str
+        ):
+            return False
+        if type(success.cost_breakdown) is not CostBreakdownV2:
+            return False
+
+        objective = request.objective_profile
+        weight_token = tuple(
+            _legged_exact_float_v2(getattr(objective, name), nonnegative=True)
+            for name in (
+                "distance_weight",
+                "risk_weight",
+                "energy_weight",
+                "time_weight",
+            )
+        )
+        if weight_token[1] != 0.0:
+            return False
+        distance_cost = 0.0
+        risk_cost = 0.0
+        energy_cost = 0.0
+        time_cost = 0.0
+        for primitive, resource_token in zip(
+            primitives,
+            resource_tokens,
+            strict=True,
+        ):
+            distance_cost = _legged_checked_component_v2(
+                distance_cost,
+                weight_token[0],
+                resource_token[0],
+            )
+            energy_cost = _legged_checked_component_v2(
+                energy_cost,
+                weight_token[2],
+                resource_token[1],
+            )
+            time_cost = _legged_checked_component_v2(
+                time_cost,
+                weight_token[3],
+                resource_token[2],
+            )
+            if resource_token != (
+                _legged_exact_float_v2(primitive.distance_m, nonnegative=True),
+                _legged_exact_float_v2(primitive.energy_cost, nonnegative=True),
+                _legged_exact_float_v2(primitive.duration_s, nonnegative=True),
+            ):
+                return False
+        if weight_token != tuple(
+            _legged_exact_float_v2(getattr(objective, name), nonnegative=True)
+            for name in (
+                "distance_weight",
+                "risk_weight",
+                "energy_weight",
+                "time_weight",
+            )
+        ):
+            return False
+        exact_total = sum((distance_cost, risk_cost, energy_cost, time_cost))
+        _legged_exact_float_v2(exact_total, nonnegative=True)
+        breakdown = success.cost_breakdown
+        declared = (
+            _legged_exact_float_v2(breakdown.distance_cost, nonnegative=True),
+            _legged_exact_float_v2(breakdown.risk_cost, nonnegative=True),
+            _legged_exact_float_v2(breakdown.energy_cost, nonnegative=True),
+            _legged_exact_float_v2(breakdown.time_cost, nonnegative=True),
+            _legged_exact_float_v2(breakdown.total_cost, nonnegative=True),
+            _legged_exact_float_v2(route.total_cost, nonnegative=True),
+        )
+        expected = (
+            distance_cost,
+            risk_cost,
+            energy_cost,
+            time_cost,
+            exact_total,
+            exact_total,
+        )
+        return all(
+            actual.hex() == wanted.hex()
+            for actual, wanted in zip(declared, expected, strict=True)
+        )
+    except (KeyboardInterrupt, SystemExit, MemoryError):
+        raise
+    except Exception:
+        return False
+
+
 def _outcome_is_valid(
     outcome: object,
     request: PlanningRequestV2,
@@ -141,6 +379,8 @@ def _outcome_is_valid(
 ) -> bool:
     if type(outcome) is PlanningSuccessV2:
         success = outcome
+        if profile.platform_kind is PlatformKindV2.LEGGED:
+            return _legged_success_is_valid_v2(success, request, profile)
         actual_goal = success.route.primitives[-1].end_state
         requested_goal = request.goal_state
         position_error_m = hypot(
