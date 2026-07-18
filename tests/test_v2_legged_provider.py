@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import struct
 import subprocess
 import sys
@@ -4556,3 +4557,321 @@ def test_legged_provider_final_replay_reason_mapping_is_closed(
     assert outcome.reason_code == reason
     assert outcome.category is expected_category
     assert outcome.evidence.stage == "route_validation"
+
+
+def test_legged_provider_cross_branch_equal_cost_queue_order_and_goal_pop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = nominal_legged_search_state_v2(PoseStateV2(0.0, 0.0, 0.0))
+    branch_x, _ = legged_module._provider_candidate_v2(
+        initial,
+        0.0,
+        (-0.25, 0.0),
+    )
+    branch_y, _ = legged_module._provider_candidate_v2(
+        initial,
+        0.0,
+        (0.0, -0.25),
+    )
+    assert branch_x.duration_s.hex() == branch_y.duration_s.hex()
+    expected = min(
+        (branch_x, branch_y),
+        key=lambda primitive: legged_state_key_v2(primitive.end_legged_state),
+    )
+    admitted_targets = {branch_x.target_foothold, branch_y.target_foothold}
+
+    def two_equal_branches(candidate, *_args):
+        if candidate.target_foothold in admitted_targets:
+            return _a2_result()
+        return _a2_result(
+            "legged_step_length_exceeded",
+            checked=1,
+            leg=candidate.moving_leg,
+            margin=None,
+        )
+
+    queue_events: list[tuple[str, object]] = []
+    real_queue = legged_module.StableSearchQueueV2
+
+    class TracingQueue(real_queue):
+        def extend(self, entries):
+            queue_events.extend(("push", entry) for entry in entries)
+            return super().extend(entries)
+
+        def pop_anchor(self):
+            entry = super().pop_anchor()
+            queue_events.append(("pop", entry))
+            return entry
+
+    monkeypatch.setattr(legged_module, "StableSearchQueueV2", TracingQueue)
+    _install_provider_authorities(monkeypatch, a2=two_equal_branches)
+    request, anchor, profile = _provider_request(
+        goal=expected.end_state,
+        objective=ObjectiveProfileV2(
+            distance_weight=0.0,
+            risk_weight=0.0,
+            energy_weight=0.0,
+            time_weight=1.0,
+        ),
+    )
+    outcome = LeggedPrimitiveProviderV2(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningSuccessV2
+    assert outcome.route.primitives == (expected,)
+    popped = [entry for action, entry in queue_events if action == "pop"]
+    pushed = [entry for action, entry in queue_events if action == "push"]
+    assert [entry.candidate_id for entry in popped] == [
+        "legged-node-00000000000000000000",
+        next(
+            entry.candidate_id
+            for entry in pushed
+            if entry.state_key == legged_state_key_v2(expected.end_legged_state)
+        ),
+    ]
+    assert popped[1].path_cost.hex() == outcome.route.total_cost.hex()
+    assert outcome.search_telemetry.expanded_states == 1
+
+
+def test_legged_provider_equal_cost_no_replace_and_stale_closed_skips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = nominal_legged_search_state_v2(PoseStateV2(0.0, 0.0, 0.0))
+    better, _ = legged_module._provider_candidate_v2(
+        initial,
+        0.0,
+        (-0.25, 0.0),
+    )
+    worse_lift = PoseStateV2(
+        better.lift_body_state.x_m + 1.0,
+        better.lift_body_state.y_m,
+        better.lift_body_state.heading_rad,
+    )
+    worse_distance = hypot(
+        worse_lift.x_m - better.start_state.x_m,
+        worse_lift.y_m - better.start_state.y_m,
+    ) + hypot(
+        better.end_state.x_m - worse_lift.x_m,
+        better.end_state.y_m - worse_lift.y_m,
+    )
+    worse = LeggedStepPrimitiveV2(
+        kind=PrimitiveKindV2.LEG_STEP,
+        start_state=better.start_state,
+        end_state=better.end_state,
+        duration_s=better.duration_s,
+        distance_m=worse_distance,
+        energy_cost=worse_distance + better.foot_travel_m,
+        observation_contribution=better.observation_contribution,
+        validation_level=ValidationLevelV2.L2,
+        start_legged_state=better.start_legged_state,
+        lift_body_state=worse_lift,
+        end_legged_state=better.end_legged_state,
+        moving_leg=better.moving_leg,
+        target_foothold=better.target_foothold,
+        foot_travel_m=better.foot_travel_m,
+    )
+    real_candidate = legged_module._provider_candidate_v2
+
+    def graph_candidate(state, fixed_yaw, offset):
+        if state.sequence_phase == 0:
+            if offset == _PROVIDER_OFFSETS[0]:
+                return worse, worse.as_oracle_candidate()
+            if offset in (_PROVIDER_OFFSETS[1], _PROVIDER_OFFSETS[2]):
+                return better, better.as_oracle_candidate()
+        return real_candidate(state, fixed_yaw, offset)
+
+    def phase_zero_only(candidate, *_args):
+        if (
+            candidate.sequence_phase == 0
+            and candidate.target_foothold == better.target_foothold
+        ):
+            return _a2_result()
+        return _a2_result(
+            "legged_step_length_exceeded",
+            checked=1,
+            leg=candidate.moving_leg,
+            margin=None,
+        )
+
+    queue_events: list[tuple[str, object]] = []
+    real_queue = legged_module.StableSearchQueueV2
+
+    class TracingQueue(real_queue):
+        def extend(self, entries):
+            queue_events.extend(("push", entry) for entry in entries)
+            return super().extend(entries)
+
+        def pop_anchor(self):
+            entry = super().pop_anchor()
+            queue_events.append(("pop", entry))
+            return entry
+
+    monkeypatch.setattr(legged_module, "_provider_candidate_v2", graph_candidate)
+    monkeypatch.setattr(legged_module, "StableSearchQueueV2", TracingQueue)
+    _install_provider_authorities(monkeypatch, a2=phase_zero_only)
+    request, anchor, profile = _provider_request(
+        goal=PoseStateV2(2.0, 2.0, 0.0),
+    )
+    outcome = LeggedPrimitiveProviderV2(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "legged_no_complete_route"
+    pushed = [entry for action, entry in queue_events if action == "push"]
+    popped = [entry for action, entry in queue_events if action == "pop"]
+    assert len(pushed) == 3  # start, worse, better; equal best is not reinserted
+    assert [entry.candidate_id for entry in popped] == [
+        "legged-node-00000000000000000000",
+        "legged-node-00000000000000000002",
+        "legged-node-00000000000000000001",
+    ]
+    assert popped[1].path_cost < popped[2].path_cost
+    assert outcome.search_telemetry.expanded_states == 2
+    assert outcome.search_telemetry.generated_primitives == 26
+
+
+@pytest.mark.parametrize(
+    ("clock_index", "expected_stage", "expected_a2_calls", "expected_final_calls"),
+    [
+        (1, "provider_entry", 0, 0),
+        (2, "preflight", 0, 0),
+        (3, "search_pop", 0, 0),
+        (4, "search_edge_validation", 0, 0),
+        (5, "search_edge_validation", 1, 0),
+        (31, "route_validation", 13, 0),
+        (32, "route_validation", 13, 1),
+        (33, "success_return", 13, 1),
+    ],
+)
+def test_legged_provider_deadline_stage_and_oracle_boundary_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    clock_index: int,
+    expected_stage: str,
+    expected_a2_calls: int,
+    expected_final_calls: int,
+) -> None:
+    a2_calls: list[LeggedStepCandidateV2] = []
+
+    def counted_a2(candidate, *args):
+        a2_calls.append(candidate)
+        return _provider_pass_result(candidate, *args)
+
+    final_calls = _install_provider_authorities(monkeypatch, a2=counted_a2)
+    request, anchor, profile = _provider_request()
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        return 100.0 if calls == clock_index else 0.0
+
+    outcome = LeggedPrimitiveProviderV2(profile).plan(
+        request,
+        anchor,
+        PlanningDeadlineV2(0.0, 100.0, clock),
+    )
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "planning_deadline_expired"
+    assert outcome.evidence.stage == expected_stage
+    assert len(a2_calls) == expected_a2_calls
+    assert len(final_calls) == expected_final_calls
+    assert calls == clock_index
+
+
+def test_legged_provider_fingerprint_is_repeated_and_pythonhashseed_stable() -> None:
+    script = r'''
+import json
+import runpy
+
+g = runpy.run_path("tests/test_v2_legged_provider.py")
+lm = g["legged_module"]
+vm = g["validation_module"]
+lm._TRUSTED_VALIDATE_LEGGED_STEP_L2_V2 = g["_provider_pass_result"]
+
+def final(route, *_args):
+    digest = vm._TRUSTED_LEGGED_ROUTE_DIGEST_AUTHORITY_V2(route)
+    return vm._legged_route_result_v2(
+        "legged_route_l2_valid",
+        checked_cell_count=3,
+        minimum_support_margin_m=0.08,
+        validated_route_hash=digest,
+    )
+
+vm._TRUSTED_VALIDATE_LEGGED_ROUTE_L2_V2 = final
+request, anchor, profile = g["_provider_request"]()
+outcome = g["LeggedPrimitiveProviderV2"](profile).plan(
+    request,
+    anchor,
+    g["_route_deadline"](),
+)
+primitive_tokens = []
+candidate_keys = []
+for primitive in outcome.route.primitives:
+    primitive_tokens.append(
+        vm._TRUSTED_LEGGED_ROUTE_DIGEST_AUTHORITY_V2(
+            g["TypedRouteV2"](
+                g["PlatformKindV2"].LEGGED,
+                (primitive,),
+                primitive.energy_cost,
+            )
+        )
+    )
+    candidate_keys.append(
+        [
+            list(g["legged_state_key_v2"](primitive.start_legged_state)),
+            list(g["legged_state_key_v2"](primitive.end_legged_state)),
+        ]
+    )
+telemetry = outcome.search_telemetry
+print(json.dumps({
+    "route_digest": vm._TRUSTED_LEGGED_ROUTE_DIGEST_AUTHORITY_V2(outcome.route),
+    "primitive_tokens": primitive_tokens,
+    "candidate_keys": candidate_keys,
+    "cost_words": [
+        outcome.cost_breakdown.distance_cost.hex(),
+        outcome.cost_breakdown.risk_cost.hex(),
+        outcome.cost_breakdown.energy_cost.hex(),
+        outcome.cost_breakdown.time_cost.hex(),
+        outcome.cost_breakdown.total_cost.hex(),
+        outcome.route.total_cost.hex(),
+    ],
+    "decision_telemetry": [
+        telemetry.expanded_states,
+        telemetry.generated_primitives,
+        telemetry.rejected_l2,
+        telemetry.timed_out,
+        telemetry.accelerator_used,
+        telemetry.ackermann_feasible_claimed,
+        telemetry.termination_reason,
+    ],
+}, sort_keys=True, separators=(",", ":")))
+'''
+    outputs: list[str] = []
+    for seed in ("1", "999"):
+        for _ in range(2):
+            env = os.environ.copy()
+            env["PYTHONHASHSEED"] = seed
+            env["PYTHONPATH"] = os.pathsep.join(
+                filter(
+                    None,
+                    (os.path.join(os.getcwd(), "src"), env.get("PYTHONPATH")),
+                )
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=os.getcwd(),
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            outputs.append(completed.stdout.strip())
+    assert len(set(outputs)) == 1
+    fingerprint = json.loads(outputs[0])
+    assert fingerprint["decision_telemetry"] == [1, 13, 12, False, False, False, "legged_route_l2_valid"]
+    assert len(fingerprint["primitive_tokens"]) == 1
+    assert len(fingerprint["candidate_keys"]) == 1
