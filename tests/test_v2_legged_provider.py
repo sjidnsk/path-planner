@@ -3766,6 +3766,229 @@ def _install_provider_authorities(
     return final_calls
 
 
+def _graph_step_v2(
+    start: LeggedSearchStateV2,
+    *,
+    target: WorldPoint,
+    end_body: PoseStateV2,
+    lift_body: PoseStateV2 | None = None,
+) -> LeggedStepPrimitiveV2:
+    moving_leg = LEGGED_CRAWL_SEQUENCE_V2[start.sequence_phase]
+    moving_index = LEGGED_FOOT_STORAGE_ORDER_V2.index(moving_leg)
+    contacts = list(start.foot_contacts)
+    contacts[moving_index] = LeggedFootContactV2(moving_leg, target)
+    end = LeggedSearchStateV2(
+        end_body,
+        tuple(contacts),
+        (start.sequence_phase + 1) % 4,
+    )
+    lift = start.body_state if lift_body is None else lift_body
+    foot, distance, energy = legged_module._resource_values_v2(
+        start,
+        lift,
+        end,
+        moving_leg,
+        target,
+    )
+    return LeggedStepPrimitiveV2(
+        kind=PrimitiveKindV2.LEG_STEP,
+        start_state=start.body_state,
+        end_state=end_body,
+        duration_s=1.0,
+        distance_m=distance,
+        energy_cost=energy,
+        observation_contribution=0.0,
+        validation_level=ValidationLevelV2.L2,
+        start_legged_state=start,
+        lift_body_state=lift,
+        end_legged_state=end,
+        moving_leg=moving_leg,
+        target_foothold=target,
+        foot_travel_m=foot,
+    )
+
+
+def _install_graph_v2(
+    monkeypatch: pytest.MonkeyPatch,
+    edges: tuple[
+        tuple[LeggedSearchStateV2, tuple[float, float], LeggedStepPrimitiveV2],
+        ...,
+    ],
+) -> None:
+    real_candidate = legged_module._provider_candidate_v2
+    edge_by_key = {
+        (legged_state_key_v2(start), offset): primitive
+        for start, offset, primitive in edges
+    }
+    admitted = tuple(primitive.as_oracle_candidate() for _, _, primitive in edges)
+
+    def graph_candidate(state, fixed_yaw, offset):
+        primitive = edge_by_key.get((legged_state_key_v2(state), offset))
+        if primitive is None:
+            return real_candidate(state, fixed_yaw, offset)
+        assert primitive.start_legged_state == state
+        return primitive, primitive.as_oracle_candidate()
+
+    def graph_a2(candidate, *_args):
+        if any(candidate == expected for expected in admitted):
+            return _a2_result()
+        return _a2_result(
+            "legged_step_length_exceeded",
+            checked=1,
+            leg=candidate.moving_leg,
+            margin=None,
+        )
+
+    monkeypatch.setattr(legged_module, "_provider_candidate_v2", graph_candidate)
+    _install_provider_authorities(monkeypatch, a2=graph_a2)
+
+
+def _queue_entry_token_v2(entry: object) -> tuple[object, ...]:
+    assert type(entry) is legged_module.SearchQueueEntryV2
+    return (
+        entry.candidate_id,
+        entry.primitive_key,
+        entry.state_key,
+        entry.path_cost.hex(),
+        entry.anchor_heuristic.hex(),
+        entry.auxiliary_heuristics,
+        (
+            (entry.path_cost + entry.anchor_heuristic).hex(),
+            entry.path_cost.hex(),
+            entry.state_key,
+            entry.primitive_key,
+            entry.candidate_id,
+        ),
+    )
+
+
+def _install_queue_trace_v2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, tuple[object, ...]]]:
+    events: list[tuple[str, tuple[object, ...]]] = []
+    real_queue = legged_module.StableSearchQueueV2
+
+    class TracingQueue(real_queue):
+        def extend(self, entries):
+            events.extend(
+                ("push", _queue_entry_token_v2(entry)) for entry in entries
+            )
+            return super().extend(entries)
+
+        def pop_anchor(self):
+            entry = super().pop_anchor()
+            events.append(("pop", _queue_entry_token_v2(entry)))
+            return entry
+
+    monkeypatch.setattr(legged_module, "StableSearchQueueV2", TracingQueue)
+    return events
+
+
+def _install_scripted_queue_v2(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_order: tuple[str, ...],
+) -> list[tuple[str, tuple[object, ...]]]:
+    events: list[tuple[str, tuple[object, ...]]] = []
+
+    class ScriptedQueue:
+        def __init__(self) -> None:
+            self.entries: dict[str, object] = {}
+            self.next_index = 0
+
+        def __len__(self) -> int:
+            return len(self.entries)
+
+        def extend(self, entries) -> None:
+            assert type(entries) is tuple
+            for entry in entries:
+                token = _queue_entry_token_v2(entry)
+                events.append(("push", token))
+                assert entry.candidate_id not in self.entries
+                self.entries[entry.candidate_id] = entry
+
+        def pop_anchor(self):
+            candidate_id = candidate_order[self.next_index]
+            self.next_index += 1
+            entry = self.entries.pop(candidate_id)
+            events.append(("pop", _queue_entry_token_v2(entry)))
+            return entry
+
+    monkeypatch.setattr(legged_module, "StableSearchQueueV2", ScriptedQueue)
+    return events
+
+
+def _lineage_graph_v2() -> tuple[
+    LeggedSearchStateV2,
+    tuple[
+        tuple[LeggedSearchStateV2, tuple[float, float], LeggedStepPrimitiveV2],
+        ...,
+    ],
+    tuple[LeggedStepPrimitiveV2, ...],
+]:
+    start = nominal_legged_search_state_v2(PoseStateV2(0.0, 0.0, 0.0))
+    expensive_s = _graph_step_v2(
+        start,
+        target=WorldPoint(0.10, 0.25),
+        end_body=PoseStateV2(-0.20, 0.0, 0.0),
+        lift_body=PoseStateV2(10.0, 0.0, 0.0),
+    )
+    branch_1 = _graph_step_v2(
+        start,
+        target=WorldPoint(0.20, 0.25),
+        end_body=PoseStateV2(-0.05, 0.20, 0.0),
+    )
+    branch_2 = _graph_step_v2(
+        branch_1.end_legged_state,
+        target=branch_1.end_legged_state.foot_contacts[3].foothold,
+        end_body=PoseStateV2(-0.05, 0.30, 0.0),
+    )
+    branch_3 = _graph_step_v2(
+        branch_2.end_legged_state,
+        target=branch_2.end_legged_state.foot_contacts[1].foothold,
+        end_body=PoseStateV2(-0.05, 0.40, 0.0),
+    )
+    branch_4 = _graph_step_v2(
+        branch_3.end_legged_state,
+        target=branch_3.end_legged_state.foot_contacts[2].foothold,
+        end_body=PoseStateV2(-0.05, 0.50, 0.0),
+    )
+    improved_s = _graph_step_v2(
+        branch_4.end_legged_state,
+        target=expensive_s.target_foothold,
+        end_body=expensive_s.end_state,
+        lift_body=PoseStateV2(-0.10, 0.25, 0.0),
+    )
+    child_c = _graph_step_v2(
+        expensive_s.end_legged_state,
+        target=WorldPoint(0.0, -0.25),
+        end_body=PoseStateV2(-0.40, 0.0, 0.0),
+        lift_body=PoseStateV2(-0.30, 0.0, 0.0),
+    )
+    assert improved_s.end_legged_state == expensive_s.end_legged_state
+    edges = (
+        (start, _PROVIDER_OFFSETS[0], expensive_s),
+        (start, _PROVIDER_OFFSETS[1], branch_1),
+        (expensive_s.end_legged_state, _PROVIDER_OFFSETS[0], child_c),
+        (branch_1.end_legged_state, _PROVIDER_OFFSETS[0], branch_2),
+        (branch_2.end_legged_state, _PROVIDER_OFFSETS[0], branch_3),
+        (branch_3.end_legged_state, _PROVIDER_OFFSETS[0], branch_4),
+        (branch_4.end_legged_state, _PROVIDER_OFFSETS[0], improved_s),
+    )
+    return (
+        start,
+        edges,
+        (
+            expensive_s,
+            branch_1,
+            branch_2,
+            branch_3,
+            branch_4,
+            improved_s,
+            child_c,
+        ),
+    )
+
+
 def test_legged_provider_public_surface_and_exact_profile_are_frozen() -> None:
     provider_type = getattr(legged_module, "LeggedPrimitiveProviderV2")
     assert getattr(legged_module, "LEGGED_LOCAL_FOOTHOLD_OFFSETS_V2") == (
@@ -4801,6 +5024,22 @@ g = runpy.run_path("tests/test_v2_legged_provider.py")
 lm = g["legged_module"]
 vm = g["validation_module"]
 lm._TRUSTED_VALIDATE_LEGGED_STEP_L2_V2 = g["_provider_pass_result"]
+queue_events = []
+real_queue = lm.StableSearchQueueV2
+
+class TracingQueue(real_queue):
+    def extend(self, entries):
+        queue_events.extend(
+            ["push", g["_queue_entry_token_v2"](entry)] for entry in entries
+        )
+        return super().extend(entries)
+
+    def pop_anchor(self):
+        entry = super().pop_anchor()
+        queue_events.append(["pop", g["_queue_entry_token_v2"](entry)])
+        return entry
+
+lm.StableSearchQueueV2 = TracingQueue
 
 def final(route, *_args):
     digest = vm._TRUSTED_LEGGED_ROUTE_DIGEST_AUTHORITY_V2(route)
@@ -4841,6 +5080,7 @@ print(json.dumps({
     "route_digest": vm._TRUSTED_LEGGED_ROUTE_DIGEST_AUTHORITY_V2(outcome.route),
     "primitive_tokens": primitive_tokens,
     "candidate_keys": candidate_keys,
+    "queue_events": queue_events,
     "cost_words": [
         outcome.cost_breakdown.distance_cost.hex(),
         outcome.cost_breakdown.risk_cost.hex(),
@@ -4885,3 +5125,411 @@ print(json.dumps({
     assert fingerprint["decision_telemetry"] == [1, 13, 12, False, False, False, "legged_route_l2_valid"]
     assert len(fingerprint["primitive_tokens"]) == 1
     assert len(fingerprint["candidate_keys"]) == 1
+    assert [
+        [event[0], event[1][0], event[1][1]]
+        for event in fingerprint["queue_events"]
+    ] == [
+        ["push", "legged-node-00000000000000000000", "start"],
+        ["pop", "legged-node-00000000000000000000", "start"],
+        ["push", "legged-node-00000000000000000002", "0:01"],
+        ["pop", "legged-node-00000000000000000002", "0:01"],
+    ]
+    for _, token in fingerprint["queue_events"]:
+        assert token[4] == 0.0.hex()
+        assert token[5] == []
+        assert token[6] == [
+            token[3],
+            token[3],
+            token[2],
+            token[1],
+            token[0],
+        ]
+
+
+def test_legged_provider_goal_is_accepted_only_when_cheapest_goal_is_popped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = nominal_legged_search_state_v2(PoseStateV2(0.0, 0.0, 0.0))
+    goal_body = PoseStateV2(-0.5, 0.0, 0.0)
+    direct = _graph_step_v2(
+        start,
+        target=WorldPoint(0.0, 0.25),
+        end_body=goal_body,
+        lift_body=PoseStateV2(10.0, 0.0, 0.0),
+    )
+    first = _graph_step_v2(
+        start,
+        target=WorldPoint(0.10, 0.25),
+        end_body=PoseStateV2(-0.10, 0.10, 0.0),
+    )
+    second = _graph_step_v2(
+        first.end_legged_state,
+        target=first.end_legged_state.foot_contacts[1].foothold,
+        end_body=goal_body,
+        lift_body=PoseStateV2(-0.30, 0.05, 0.0),
+    )
+    _install_graph_v2(
+        monkeypatch,
+        (
+            (start, _PROVIDER_OFFSETS[0], direct),
+            (start, _PROVIDER_OFFSETS[1], first),
+            (first.end_legged_state, _PROVIDER_OFFSETS[0], second),
+        ),
+    )
+    events = _install_queue_trace_v2(monkeypatch)
+    request, anchor, profile = _provider_request(goal=goal_body)
+    outcome = LeggedPrimitiveProviderV2(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningSuccessV2
+    assert outcome.route.primitives == (first, second)
+    direct_cost = fsum((0.5 * direct.energy_cost, 0.5 * direct.duration_s))
+    cheap_cost = fsum(
+        component
+        for primitive in (first, second)
+        for component in (0.5 * primitive.energy_cost, 0.5 * primitive.duration_s)
+    )
+    assert cheap_cost < direct_cost
+    assert outcome.route.total_cost.hex() == cheap_cost.hex()
+    pushed = [token for action, token in events if action == "push"]
+    popped = [token for action, token in events if action == "pop"]
+    assert [token[0] for token in pushed] == [
+        "legged-node-00000000000000000000",
+        "legged-node-00000000000000000001",
+        "legged-node-00000000000000000002",
+        "legged-node-00000000000000000014",
+    ]
+    assert [token[0] for token in popped] == [
+        "legged-node-00000000000000000000",
+        "legged-node-00000000000000000002",
+        "legged-node-00000000000000000014",
+    ]
+    expected_push_tokens = (
+        (
+            "legged-node-00000000000000000000",
+            "start",
+            legged_state_key_v2(start),
+            0.0.hex(),
+        ),
+        (
+            "legged-node-00000000000000000001",
+            "0:00",
+            legged_state_key_v2(direct.end_legged_state),
+            direct_cost.hex(),
+        ),
+        (
+            "legged-node-00000000000000000002",
+            "0:01",
+            legged_state_key_v2(first.end_legged_state),
+            fsum((0.5 * first.energy_cost, 0.5)).hex(),
+        ),
+        (
+            "legged-node-00000000000000000014",
+            "1:00",
+            legged_state_key_v2(second.end_legged_state),
+            cheap_cost.hex(),
+        ),
+    )
+    assert tuple(token[:4] for token in pushed) == expected_push_tokens
+    for token in (*pushed, *popped):
+        assert token[4] == 0.0.hex()
+        assert token[5] == ()
+        assert token[6] == (
+            token[3],
+            token[3],
+            token[2],
+            token[1],
+            token[0],
+        )
+    assert outcome.search_telemetry.expanded_states == 2
+    assert outcome.search_telemetry.generated_primitives == 26
+    assert outcome.search_telemetry.rejected_l2 == 23
+
+
+def test_legged_provider_lineage_survives_later_closed_state_improvement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, edges, primitives = _lineage_graph_v2()
+    (
+        expensive_s,
+        branch_1,
+        branch_2,
+        branch_3,
+        branch_4,
+        improved_s,
+        child_c,
+    ) = primitives
+    _install_graph_v2(monkeypatch, edges)
+    events = _install_scripted_queue_v2(
+        monkeypatch,
+        (
+            "legged-node-00000000000000000000",
+            "legged-node-00000000000000000001",
+            "legged-node-00000000000000000002",
+            "legged-node-00000000000000000027",
+            "legged-node-00000000000000000040",
+            "legged-node-00000000000000000053",
+            "legged-node-00000000000000000066",
+            "legged-node-00000000000000000014",
+        ),
+    )
+    request, anchor, profile = _provider_request(goal=child_c.end_state)
+    outcome = LeggedPrimitiveProviderV2(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningSuccessV2
+    assert outcome.route.primitives == (expensive_s, child_c)
+    assert outcome.route.primitives[0].end_legged_state == (
+        outcome.route.primitives[1].start_legged_state
+    )
+    assert outcome.route.primitives != (
+        branch_1,
+        branch_2,
+        branch_3,
+        branch_4,
+        improved_s,
+        child_c,
+    )
+    popped = [token for action, token in events if action == "pop"]
+    assert [token[0] for token in popped] == [
+        "legged-node-00000000000000000000",
+        "legged-node-00000000000000000001",
+        "legged-node-00000000000000000002",
+        "legged-node-00000000000000000027",
+        "legged-node-00000000000000000040",
+        "legged-node-00000000000000000053",
+        "legged-node-00000000000000000066",
+        "legged-node-00000000000000000014",
+    ]
+    expensive_entry = next(token for token in popped if token[0].endswith("01"))
+    improved_entry = next(token for token in popped if token[0].endswith("66"))
+    assert expensive_entry[2] == improved_entry[2]
+    assert float.fromhex(improved_entry[3]) < float.fromhex(expensive_entry[3])
+    assert outcome.search_telemetry.expanded_states == 6
+    assert outcome.search_telemetry.generated_primitives == 78
+    assert outcome.search_telemetry.rejected_l2 == 71
+
+
+@pytest.mark.parametrize(
+    ("max_expanded_states", "expected_type", "expected_reason"),
+    [
+        (6, PlanningSuccessV2, "legged_route_l2_valid"),
+        (5, PlanningFailureV2, "legged_expansion_budget_exhausted"),
+    ],
+)
+def test_legged_provider_runtime_expansion_budget_is_exact_n_vs_n_plus_one(
+    monkeypatch: pytest.MonkeyPatch,
+    max_expanded_states: int,
+    expected_type: type,
+    expected_reason: str,
+) -> None:
+    _, edges, primitives = _lineage_graph_v2()
+    child_c = primitives[-1]
+    _install_graph_v2(monkeypatch, edges)
+    order = (
+        "legged-node-00000000000000000000",
+        "legged-node-00000000000000000001",
+        "legged-node-00000000000000000002",
+        "legged-node-00000000000000000027",
+        "legged-node-00000000000000000040",
+        "legged-node-00000000000000000053",
+        "legged-node-00000000000000000066",
+        "legged-node-00000000000000000014",
+    )
+    events = _install_scripted_queue_v2(monkeypatch, order)
+    request, anchor, profile = _provider_request(
+        goal=child_c.end_state,
+        budget=ResourceBudgetV2(max_expanded_states=max_expanded_states),
+    )
+    outcome = LeggedPrimitiveProviderV2(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is expected_type
+    assert outcome.search_telemetry.termination_reason == expected_reason
+    if max_expanded_states == 6:
+        assert outcome.search_telemetry.expanded_states == 6
+        assert [
+            token[0] for action, token in events if action == "pop"
+        ][-2:] == [
+            "legged-node-00000000000000000066",
+            "legged-node-00000000000000000014",
+        ]
+    else:
+        assert outcome.evidence.stage == "search"
+        assert outcome.evidence.details == (
+            ("attempted_expanded_states", 6),
+            ("max_expanded_states", 5),
+        )
+        assert outcome.search_telemetry.expanded_states == 5
+        assert outcome.search_telemetry.generated_primitives == 65
+
+
+@pytest.mark.parametrize(
+    ("max_memory_bytes", "attempted", "retained", "expanded", "generated"),
+    [
+        (1024, 3, 2, 1, 2),
+        (1536, 4, 3, 2, 14),
+    ],
+)
+def test_legged_provider_memory_retains_improved_and_stale_records(
+    monkeypatch: pytest.MonkeyPatch,
+    max_memory_bytes: int,
+    attempted: int,
+    retained: int,
+    expanded: int,
+    generated: int,
+) -> None:
+    start = nominal_legged_search_state_v2(PoseStateV2(0.0, 0.0, 0.0))
+    better = _graph_step_v2(
+        start,
+        target=WorldPoint(0.10, 0.25),
+        end_body=PoseStateV2(-0.20, 0.0, 0.0),
+        lift_body=PoseStateV2(-0.10, 0.0, 0.0),
+    )
+    worse = _graph_step_v2(
+        start,
+        target=better.target_foothold,
+        end_body=better.end_state,
+        lift_body=PoseStateV2(10.0, 0.0, 0.0),
+    )
+    assert worse.end_legged_state == better.end_legged_state
+    assert worse.energy_cost > better.energy_cost
+    child = _graph_step_v2(
+        better.end_legged_state,
+        target=better.end_legged_state.foot_contacts[3].foothold,
+        end_body=PoseStateV2(-0.30, 0.0, 0.0),
+        lift_body=PoseStateV2(-0.25, 0.0, 0.0),
+    )
+    _install_graph_v2(
+        monkeypatch,
+        (
+            (start, _PROVIDER_OFFSETS[0], worse),
+            (start, _PROVIDER_OFFSETS[1], better),
+            (better.end_legged_state, _PROVIDER_OFFSETS[0], child),
+        ),
+    )
+    request, anchor, profile = _provider_request(
+        goal=PoseStateV2(2.0, 2.0, 0.0),
+        budget=ResourceBudgetV2(max_memory_bytes=max_memory_bytes),
+    )
+    outcome = LeggedPrimitiveProviderV2(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "legged_search_memory_budget_exceeded"
+    assert outcome.evidence.stage == "search"
+    assert outcome.evidence.details == (
+        ("accounting_id", "legged_search_fixed_record_512b/v1"),
+        ("attempted_record_count", attempted),
+        ("max_memory_bytes", max_memory_bytes),
+        ("record_bytes", 512),
+        ("retained_record_count", retained),
+    )
+    assert outcome.search_telemetry.expanded_states == expanded
+    assert outcome.search_telemetry.generated_primitives == generated
+
+
+def test_legged_provider_observation_keeps_adjacent_duplicate_body_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = nominal_legged_search_state_v2(PoseStateV2(0.0, 0.0, 0.0))
+    first = _graph_step_v2(
+        start,
+        target=WorldPoint(0.10, 0.25),
+        end_body=PoseStateV2(-0.20, 0.0, 0.0),
+        lift_body=PoseStateV2(-0.10, 0.0, 0.0),
+    )
+    second = _graph_step_v2(
+        first.end_legged_state,
+        target=first.end_legged_state.foot_contacts[3].foothold,
+        end_body=PoseStateV2(-0.40, 0.0, 0.0),
+        lift_body=first.end_state,
+    )
+    _install_graph_v2(
+        monkeypatch,
+        (
+            (start, _PROVIDER_OFFSETS[0], first),
+            (first.end_legged_state, _PROVIDER_OFFSETS[0], second),
+        ),
+    )
+    request, anchor, profile = _provider_request(goal=second.end_state)
+    outcome = LeggedPrimitiveProviderV2(profile).plan(
+        request,
+        anchor,
+        _route_deadline(),
+    )
+    assert type(outcome) is PlanningSuccessV2
+    samples = outcome.observation_projection.sample_states
+    assert len(samples) == 5
+    assert samples == (
+        first.start_state,
+        first.lift_body_state,
+        first.end_state,
+        second.lift_body_state,
+        second.end_state,
+    )
+    assert samples[2] == samples[3]
+
+
+def test_provider_candidate_reuses_9a1_resource_helper_exactly_once_for_derivation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = nominal_legged_search_state_v2(PoseStateV2(0.0, 0.0, 0.0))
+    real_resource_values = legged_module._resource_values_v2
+    calls: list[tuple[tuple[object, ...], tuple[float, float, float]]] = []
+
+    def counted(*args):
+        result = real_resource_values(*args)
+        calls.append((args, result))
+        return result
+
+    monkeypatch.setattr(legged_module, "_resource_values_v2", counted)
+    primitive, candidate = legged_module._provider_candidate_v2(
+        start,
+        0.0,
+        (-0.25, 0.0),
+    )
+    assert type(primitive) is LeggedStepPrimitiveV2
+    assert type(candidate) is LeggedStepCandidateV2
+    assert len(calls) == 3
+    assert all(call_args == calls[0][0] for call_args, _ in calls)
+    foot, distance, energy = calls[0][1]
+    assert primitive.foot_travel_m.hex() == foot.hex()
+    assert primitive.distance_m.hex() == distance.hex()
+    assert primitive.energy_cost.hex() == energy.hex()
+
+
+def test_provider_candidate_resource_helper_ordinary_fault_is_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = nominal_legged_search_state_v2(PoseStateV2(0.0, 0.0, 0.0))
+
+    def faulty(*_args):
+        raise RuntimeError("ordinary resource helper fault")
+
+    monkeypatch.setattr(legged_module, "_resource_values_v2", faulty)
+    with pytest.raises(ValueError):
+        legged_module._provider_candidate_v2(start, 0.0, (-0.25, 0.0))
+
+
+@pytest.mark.parametrize("critical", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_provider_candidate_resource_helper_critical_fault_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    critical,
+) -> None:
+    start = nominal_legged_search_state_v2(PoseStateV2(0.0, 0.0, 0.0))
+
+    def faulty(*_args):
+        raise critical("critical resource helper fault")
+
+    monkeypatch.setattr(legged_module, "_resource_values_v2", faulty)
+    with pytest.raises(critical):
+        legged_module._provider_candidate_v2(start, 0.0, (-0.25, 0.0))

@@ -3,6 +3,7 @@ from math import fsum, hypot, nextafter, pi
 
 import path_planner
 import path_planner.v2 as v2
+import path_planner.v2.api as api_module
 import numpy as np
 import pytest
 
@@ -975,12 +976,75 @@ def test_api_legged_final_reseal_does_not_rerun_route_validator(
     request = _api_legged_request()
     expected = _api_legged_success(request)
 
-    def forbidden(*_args):
+    calls: list[str] = []
+
+    def forbidden_public(*_args):
+        calls.append("public")
         raise AssertionError("API must not rerun final validator")
 
-    monkeypatch.setattr(validation_module, "validate_legged_route_l2", forbidden)
+    def forbidden_private(*_args):
+        calls.append("private")
+        raise AssertionError("API must not rerun trusted final validator")
+
+    monkeypatch.setattr(
+        validation_module,
+        "validate_legged_route_l2",
+        forbidden_public,
+    )
+    monkeypatch.setattr(
+        validation_module,
+        "_TRUSTED_VALIDATE_LEGGED_ROUTE_L2_V2",
+        forbidden_private,
+    )
     outcome = _plan_legged_outcome(request, expected)
     assert outcome is expected
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "resource_name",
+    ["distance_m", "energy_cost", "duration_s"],
+)
+def test_api_legged_resource_second_read_detects_calculation_boundary_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    resource_name: str,
+) -> None:
+    request = _api_legged_request()
+    expected = _api_legged_success(request)
+    primitive = expected.route.primitives[0]
+    original = getattr(primitive, resource_name)
+    real_component = api_module._legged_checked_component_v2
+    component_reads: list[str] = []
+    mutated = False
+
+    def drifting_component(parent, weight, resource):
+        nonlocal mutated
+        component_reads.append(resource.hex())
+        result = real_component(parent, weight, resource)
+        if not mutated and resource.hex() == original.hex():
+            object.__setattr__(
+                primitive,
+                resource_name,
+                nextafter(original, float("inf")),
+            )
+            mutated = True
+        return result
+
+    monkeypatch.setattr(
+        api_module,
+        "_legged_checked_component_v2",
+        drifting_component,
+    )
+    outcome = _plan_legged_outcome(request, expected)
+    assert mutated is True
+    assert original.hex() in component_reads
+    assert getattr(primitive, resource_name).hex() == nextafter(
+        original,
+        float("inf"),
+    ).hex()
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "primitive_provider_outcome_invalid"
+    assert outcome.evidence.stage == "provider_postcondition"
 
 
 @pytest.mark.parametrize("resource_name", ["distance_m", "energy_cost", "duration_s"])
