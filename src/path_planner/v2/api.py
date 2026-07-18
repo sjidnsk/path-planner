@@ -7,9 +7,11 @@ from typing import Callable
 
 from path_planner.core import Cell
 from path_planner.v2.contracts import (
+    CacheEvidenceV2,
     CostBreakdownV2,
     FailureCategoryV2,
     FailureEvidenceV2,
+    ObservationProjectionV2,
     PlanningFailureV2,
     PlanningOutcomeV2,
     PlanningRequestV2,
@@ -372,6 +374,135 @@ def _legged_success_is_valid_v2(
         return False
 
 
+def _legged_success_seal_v2(
+    success: object,
+    route_digest_authority: object,
+) -> tuple[object, ...]:
+    if type(success) is not PlanningSuccessV2 or not callable(route_digest_authority):
+        raise TypeError("legged success seal requires exact trusted inputs")
+
+    def exact_string(value: object) -> str:
+        if type(value) is not str or not value:
+            raise ValueError("legged success string must be exact and nonempty")
+        return value
+
+    def exact_bool(value: object) -> bool:
+        if type(value) is not bool:
+            raise TypeError("legged success bool must be exact")
+        return value
+
+    def exact_count(value: object) -> int:
+        if type(value) is not int or value < 0:
+            raise ValueError("legged success count must be exact and nonnegative")
+        return value
+
+    def float_word(value: object, *, nonnegative: bool) -> str:
+        return _legged_exact_float_v2(value, nonnegative=nonnegative).hex()
+
+    def pose_token(value: object) -> tuple[str, str, str]:
+        if type(value) is not PoseStateV2:
+            raise TypeError("legged observation state must be exact PoseStateV2")
+        return (
+            float_word(value.x_m, nonnegative=False),
+            float_word(value.y_m, nonnegative=False),
+            float_word(value.heading_rad, nonnegative=False),
+        )
+
+    route = success.route
+    if type(route) is not TypedRouteV2:
+        raise TypeError("legged success route must be exact TypedRouteV2")
+    route_digest = route_digest_authority(route)
+    if (
+        type(route_digest) is not str
+        or len(route_digest) != 64
+        or any(character not in "0123456789abcdef" for character in route_digest)
+    ):
+        raise ValueError("legged route digest authority returned invalid digest")
+
+    observation = success.observation_projection
+    if type(observation) is not ObservationProjectionV2:
+        raise TypeError("legged observation projection must be exact")
+    if type(observation.sample_states) is not tuple:
+        raise TypeError("legged observation states must be an exact tuple")
+    observation_token = (
+        exact_string(observation.source),
+        tuple(pose_token(state) for state in observation.sample_states),
+        float_word(observation.expected_new_observed_cells, nonnegative=True),
+        float_word(observation.expected_information_gain, nonnegative=True),
+    )
+
+    breakdown = success.cost_breakdown
+    if type(breakdown) is not CostBreakdownV2:
+        raise TypeError("legged cost breakdown must be exact")
+    cost_token = tuple(
+        float_word(getattr(breakdown, name), nonnegative=True)
+        for name in (
+            "distance_cost",
+            "risk_cost",
+            "energy_cost",
+            "time_cost",
+            "total_cost",
+        )
+    )
+
+    evidence = success.validation_evidence
+    if type(evidence) is not ValidationEvidenceV2:
+        raise TypeError("legged validation evidence must be exact")
+    if (
+        type(evidence.level) is not ValidationLevelV2
+        or type(evidence.checks) is not tuple
+        or any(type(check) is not str or not check for check in evidence.checks)
+    ):
+        raise TypeError("legged validation evidence fields must be exact")
+    evidence_token = (
+        exact_string(evidence.validator_id),
+        evidence.level,
+        exact_bool(evidence.passed),
+        evidence.checks,
+    )
+
+    telemetry = success.search_telemetry
+    if type(telemetry) is not SearchTelemetryV2:
+        raise TypeError("legged search telemetry must be exact")
+    telemetry_token = (
+        exact_count(telemetry.expanded_states),
+        exact_count(telemetry.generated_primitives),
+        exact_count(telemetry.rejected_l0),
+        exact_count(telemetry.rejected_l1),
+        exact_count(telemetry.rejected_l2),
+        float_word(telemetry.elapsed_s, nonnegative=True),
+        exact_bool(telemetry.timed_out),
+        exact_bool(telemetry.accelerator_used),
+        exact_bool(telemetry.ackermann_feasible_claimed),
+        exact_string(telemetry.termination_reason),
+    )
+
+    cache = success.cache_evidence
+    if type(cache) is not CacheEvidenceV2:
+        raise TypeError("legged cache evidence must be exact")
+    cache_token = (
+        exact_string(cache.cache_namespace),
+        exact_string(cache.cache_key),
+        exact_bool(cache.hit),
+    )
+    if type(route.platform_kind) is not PlatformKindV2:
+        raise TypeError("legged route platform kind must be exact")
+    return (
+        exact_string(success.request_id),
+        success.platform_kind,
+        exact_string(success.schema_version),
+        route.platform_kind,
+        exact_bool(route.is_complete),
+        float_word(route.total_cost, nonnegative=True),
+        route_digest,
+        observation_token,
+        cost_token,
+        evidence_token,
+        telemetry_token,
+        cache_token,
+    )
+
+
 def _outcome_is_valid(
     outcome: object,
     request: PlanningRequestV2,
@@ -538,6 +669,30 @@ def plan_v2(
             details=(("exception_type", type(exc).__name__),),
         )
 
+    legged_seal: tuple[object, ...] | None = None
+    legged_route_digest_authority: object | None = None
+    legged_initial_seal_valid = True
+    if (
+        type(outcome) is PlanningSuccessV2
+        and profile.platform_kind is PlatformKindV2.LEGGED
+    ):
+        try:
+            from path_planner.v2.validation import (
+                _TRUSTED_LEGGED_ROUTE_DIGEST_AUTHORITY_V2,
+            )
+
+            legged_route_digest_authority = (
+                _TRUSTED_LEGGED_ROUTE_DIGEST_AUTHORITY_V2
+            )
+            legged_seal = _legged_success_seal_v2(
+                outcome,
+                legged_route_digest_authority,
+            )
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            legged_initial_seal_valid = False
+
     if deadline.expired:
         return _timeout_failure(
             request=request,
@@ -546,7 +701,25 @@ def plan_v2(
             stage="provider_completion",
         )
 
-    outcome_is_valid = _outcome_is_valid(outcome, request, profile)
+    legged_completion_seal_valid = legged_initial_seal_valid
+    if legged_seal is not None:
+        try:
+            legged_completion_seal_valid = (
+                _legged_success_seal_v2(
+                    outcome,
+                    legged_route_digest_authority,
+                )
+                == legged_seal
+            )
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            legged_completion_seal_valid = False
+
+    outcome_is_valid = (
+        legged_completion_seal_valid
+        and _outcome_is_valid(outcome, request, profile)
+    )
     if deadline.expired:
         return _timeout_failure(
             request=request,
@@ -555,7 +728,22 @@ def plan_v2(
             stage="provider_postcondition",
         )
 
-    if not outcome_is_valid:
+    legged_postcondition_seal_valid = legged_completion_seal_valid
+    if legged_seal is not None:
+        try:
+            legged_postcondition_seal_valid = (
+                _legged_success_seal_v2(
+                    outcome,
+                    legged_route_digest_authority,
+                )
+                == legged_seal
+            )
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            legged_postcondition_seal_valid = False
+
+    if not outcome_is_valid or not legged_postcondition_seal_valid:
         return _failure(
             request_id=request.request_id,
             platform_kind=profile.platform_kind,

@@ -1600,19 +1600,23 @@ class _LeggedAuthorityGuardV2:
 
     def check(self) -> float:
         self.seal_without_clock()
+        clock_failed = False
         try:
             now = self.deadline._monotonic_clock()
         except (KeyboardInterrupt, SystemExit, MemoryError):
             raise
         except Exception:
-            raise _LeggedAuthorityFailure("planning_deadline_contract_mismatch") from None
+            clock_failed = True
+            now = None
         self._seal_deadline()
+        self._seal_authority()
+        if clock_failed:
+            raise _LeggedAuthorityFailure("planning_deadline_contract_mismatch")
         try:
             _provider_float_word_v2(now, "monotonic clock result")
         except Exception:
             raise _LeggedAuthorityFailure("planning_deadline_contract_mismatch") from None
         self.last_now = now
-        self._seal_authority()
         if now >= self.cutoff:
             raise _LeggedDeadlineExpired
         return now
@@ -2415,6 +2419,12 @@ class LeggedPrimitiveProviderV2:
                 if stopped is not None:
                     return stopped
                 try:
+                    _seal_primitive_canonical_postcondition_v2(primitive)
+                    audited_primitive = _audit_primitive_canonical(primitive)
+                    if audited_primitive is not primitive:
+                        raise ValueError("primitive audit changed object identity")
+                    _seal_primitive_canonical_postcondition_v2(primitive)
+                    _seal_candidate_postcondition_v2(candidate, primitive)
                     if candidate_token != (
                         _canonical_pose_snapshot_v2(candidate.start_body_state, "candidate.start"),
                         _canonical_pose_snapshot_v2(candidate.lift_body_state, "candidate.lift"),
@@ -2457,12 +2467,6 @@ class LeggedPrimitiveProviderV2:
                         "search_edge_validation",
                     )
 
-                child_depth = node.depth + 1
-                if child_depth + 1 > effective_cap:
-                    route_budget_blocked = True
-                    if route_budget_attempted_states is None:
-                        route_budget_attempted_states = child_depth + 1
-                    continue
                 try:
                     costs = _provider_child_costs_v2(node, primitive, request)
                     child_key = legged_state_key_v2(primitive.end_legged_state)
@@ -2475,6 +2479,12 @@ class LeggedPrimitiveProviderV2:
                     )
                 existing = best_by_state.get(child_key)
                 if existing is not None and not costs[4] < existing[0]:
+                    continue
+                child_depth = node.depth + 1
+                if child_depth + 1 > effective_cap:
+                    route_budget_blocked = True
+                    if route_budget_attempted_states is None:
+                        route_budget_attempted_states = child_depth + 1
                     continue
                 prospective_count = admitted_record_count + 1
                 if (
@@ -2647,6 +2657,24 @@ class LeggedPrimitiveProviderV2:
         stopped = checkpoint("success_return")
         if stopped is not None:
             return stopped
+        try:
+            guard.seal_without_clock()
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except _LeggedAuthorityFailure as error:
+            return fail(error.reason_code, "success_return")
+        try:
+            final_digest = trusted_route_digest(route)
+            final_replay_token = _provider_audit_final_v2(
+                final_result,
+                trusted_result_type,
+            )
+            if final_digest != pre_digest or final_replay_token != final_token:
+                raise ValueError("final route authority drifted before return")
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception:
+            return fail("legged_route_oracle_contract_mismatch", "route_validation")
         costs = CostBreakdownV2(
             distance_cost=goal_node.distance_cost,
             risk_cost=goal_node.risk_cost,
