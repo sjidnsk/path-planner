@@ -6,7 +6,7 @@ import path_planner.v2 as v2
 import numpy as np
 import pytest
 
-from path_planner.core import Cell, CostGrid, GridSpec, PlanRequest
+from path_planner.core import Cell, CostGrid, GridSpec, PlanRequest, WorldPoint
 from path_planner.search import AStarPlanner
 from path_planner.v2.api import plan_v2
 from path_planner.v2.contracts import (
@@ -785,12 +785,18 @@ def _api_legged_success(request: PlanningRequestV2) -> PlanningSuccessV2:
 def _plan_legged_outcome(
     request: PlanningRequestV2,
     outcome: PlanningSuccessV2,
+    *,
+    monotonic_clock=None,
 ):
     profile = _api_legged_profile()
+    kwargs = {}
+    if monotonic_clock is not None:
+        kwargs["monotonic_clock"] = monotonic_clock
     return plan_v2(
         request,
         registry=PlatformProfileRegistryV2((profile,)),
         providers={profile.profile_id: _ProviderSpy(profile, outcome)},
+        **kwargs,
     )
 
 
@@ -836,35 +842,164 @@ def test_api_rejects_legged_full_state_discontinuity_even_when_body_is_connected
     assert outcome.reason_code == "primitive_provider_outcome_invalid"
 
 
-def test_api_rejects_legged_cost_one_ulp_drift_despite_contract_tolerance() -> None:
+@pytest.mark.parametrize(
+    "declared_field",
+    [
+        "distance_cost",
+        "risk_cost",
+        "energy_cost",
+        "time_cost",
+        "total_cost",
+        "route.total_cost",
+    ],
+)
+def test_api_rejects_legged_cost_one_ulp_drift_despite_contract_tolerance(
+    declared_field: str,
+) -> None:
     request = _api_legged_request()
     forged = _api_legged_success(request)
-    drift = nextafter(forged.cost_breakdown.energy_cost, float("inf"))
-    delta = drift - forged.cost_breakdown.energy_cost
-    object.__setattr__(forged.cost_breakdown, "energy_cost", drift)
+    if declared_field == "route.total_cost":
+        current = forged.route.total_cost
+        object.__setattr__(
+            forged.route,
+            "total_cost",
+            nextafter(current, float("inf")),
+        )
+    else:
+        current = getattr(forged.cost_breakdown, declared_field)
+        object.__setattr__(
+            forged.cost_breakdown,
+            declared_field,
+            nextafter(current, float("inf")),
+        )
+    outcome = _plan_legged_outcome(request, forged)
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "primitive_provider_outcome_invalid"
+
+
+@pytest.mark.parametrize(
+    ("field", "forged_value"),
+    [
+        ("validator_id", "forged-legged-route-l2/v1"),
+        ("level", ValidationLevelV2.L1),
+        ("passed", False),
+        ("checks", ("forged-legged-route-l2",)),
+    ],
+)
+def test_api_rejects_forged_legged_final_evidence_without_replaying_validator(
+    field: str,
+    forged_value: object,
+) -> None:
+    request = _api_legged_request()
+    forged = _api_legged_success(request)
     object.__setattr__(
-        forged.cost_breakdown,
-        "total_cost",
-        forged.cost_breakdown.total_cost + delta,
-    )
-    object.__setattr__(
-        forged.route,
-        "total_cost",
-        forged.route.total_cost + delta,
+        forged.validation_evidence,
+        field,
+        forged_value,
     )
     outcome = _plan_legged_outcome(request, forged)
     assert type(outcome) is PlanningFailureV2
     assert outcome.reason_code == "primitive_provider_outcome_invalid"
 
 
-def test_api_rejects_forged_legged_final_evidence_without_replaying_validator() -> None:
+def _mutate_api_legged_payload(kind: str, outcome: PlanningSuccessV2) -> None:
+    primitive = outcome.route.primitives[0]
+    assert type(primitive) is LeggedStepPrimitiveV2
+    if kind == "target":
+        target = primitive.target_foothold
+        object.__setattr__(
+            primitive,
+            "target_foothold",
+            WorldPoint(target.x + 0.25, target.y),
+        )
+    elif kind == "full_state":
+        object.__setattr__(primitive.end_legged_state, "sequence_phase", 3)
+    elif kind == "resource":
+        object.__setattr__(
+            primitive,
+            "energy_cost",
+            nextafter(primitive.energy_cost, float("inf")),
+        )
+    elif kind == "route":
+        object.__setattr__(
+            outcome.route,
+            "total_cost",
+            nextafter(outcome.route.total_cost, float("inf")),
+        )
+    elif kind == "evidence":
+        object.__setattr__(
+            outcome.validation_evidence,
+            "checks",
+            ("forged-final-check",),
+        )
+    else:  # pragma: no cover - test helper contract
+        raise AssertionError(kind)
+
+
+@pytest.mark.parametrize("clock_index", [3, 4])
+@pytest.mark.parametrize(
+    "mutation_kind",
+    ["target", "full_state", "resource", "route", "evidence"],
+)
+def test_api_legged_post_provider_clocks_cannot_change_final_bound_payload(
+    clock_index: int,
+    mutation_kind: str,
+) -> None:
     request = _api_legged_request()
     forged = _api_legged_success(request)
-    object.__setattr__(
-        forged.validation_evidence,
-        "validator_id",
-        "forged-legged-route-l2/v1",
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        if calls == clock_index:
+            _mutate_api_legged_payload(mutation_kind, forged)
+        return 0.0
+
+    outcome = _plan_legged_outcome(
+        request,
+        forged,
+        monotonic_clock=clock,
     )
-    outcome = _plan_legged_outcome(request, forged)
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "primitive_provider_outcome_invalid"
+    assert outcome.evidence.stage == "provider_postcondition"
+    assert calls == 4
+
+
+def test_api_legged_final_reseal_does_not_rerun_route_validator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import path_planner.v2.validation as validation_module
+
+    request = _api_legged_request()
+    expected = _api_legged_success(request)
+
+    def forbidden(*_args):
+        raise AssertionError("API must not rerun final validator")
+
+    monkeypatch.setattr(validation_module, "validate_legged_route_l2", forbidden)
+    outcome = _plan_legged_outcome(request, expected)
+    assert outcome is expected
+
+
+@pytest.mark.parametrize("resource_name", ["distance_m", "energy_cost", "duration_s"])
+@pytest.mark.parametrize("bad_value", [1, True, -0.0, float("inf")])
+def test_api_legged_zero_weight_still_pre_audits_every_resource(
+    resource_name: str,
+    bad_value,
+) -> None:
+    request = _api_legged_request()
+    objective = request.objective_profile
+    weight_name = {
+        "distance_m": "distance_weight",
+        "energy_cost": "energy_weight",
+        "duration_s": "time_weight",
+    }[resource_name]
+    object.__setattr__(objective, weight_name, 0.0)
+    expected = _api_legged_success(request)
+    primitive = expected.route.primitives[0]
+    object.__setattr__(primitive, resource_name, bad_value)
+    outcome = _plan_legged_outcome(request, expected)
     assert type(outcome) is PlanningFailureV2
     assert outcome.reason_code == "primitive_provider_outcome_invalid"
