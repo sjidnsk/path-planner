@@ -1820,12 +1820,18 @@ def _provider_candidate_v2(
         tuple(end_contacts),
         (phase + 1) % 4,
     )
-    foot_travel = hypot(target.x - source.x, target.y - source.y)
-    distance = hypot(
-        lift.x_m - state.body_state.x_m,
-        lift.y_m - state.body_state.y_m,
-    ) + hypot(end_body.x_m - lift.x_m, end_body.y_m - lift.y_m)
-    energy = distance + foot_travel
+    resource_values = _call_contract_helper_v2(
+        "legged provider relative resource",
+        _resource_values_v2,
+        state,
+        lift,
+        end_state,
+        moving_leg,
+        target,
+    )
+    if type(resource_values) is not tuple or len(resource_values) != 3:
+        raise ValueError("legged resource helper must return exactly three values")
+    foot_travel, distance, energy = resource_values
     for value, name in (
         (foot_travel, "foot_travel_m"),
         (distance, "distance_m"),
