@@ -4217,7 +4217,17 @@ def _mutate_provider_authority(
         object.__setattr__(anchor, "snapshot", _route_snapshot())
         return "terrain_snapshot_identity_mismatch"
     if kind == "snapshot_hash":
-        request.terrain_snapshot.elevation_m[0, 0] = 1.0
+        replacement = np.array(
+            request.terrain_snapshot.elevation_m,
+            dtype=np.float64,
+            copy=True,
+        )
+        replacement[0, 0] = 1.0
+        object.__setattr__(
+            request.terrain_snapshot,
+            "elevation_m",
+            replacement,
+        )
         return "terrain_snapshot_hash_mismatch"
     raise AssertionError(kind)  # pragma: no cover
 
