@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil, cos, erfc, erf, floor, fsum, isfinite, pi, sin, sqrt
+from math import ceil, cos, erfc, erf, floor, fsum, isfinite, isqrt, pi, sin, sqrt
 from numbers import Real
 
 from path_planner.core.models import Cell, WorldPoint
@@ -364,6 +364,7 @@ def landing_zone_cells(
     cap = MAX_LANDING_ZONE_CANDIDATES_V2
     if type(cap) is not int or cap <= 0:
         raise ValueError("candidate cap must be an exact positive int")
+    final_radius = (isqrt(cap) - 1) // 2
 
     resolution = audited_geometry.resolution_m
     x_coordinate = _derived_finite(
@@ -387,6 +388,7 @@ def landing_zone_cells(
     )
     evaluated: list[tuple[float, float, int, int, LandingCellMassV2]] = []
     radius = 0
+    prefix_evaluation_radius = 0
     while True:
         side = 2 * radius + 1
         evaluated_count = side * side
@@ -443,6 +445,10 @@ def landing_zone_cells(
                     )
                     evaluated.append((mass, distance_sq, y_index, x_index, item))
 
+        if radius != prefix_evaluation_radius and radius != final_radius:
+            radius += 1
+            continue
+
         evaluated.sort(key=lambda row: (-row[0], row[1], row[2], row[3]))
         masses = tuple(row[0] for row in evaluated)
         prefix_length = _shortest_prefix_length(masses, threshold)
@@ -471,4 +477,6 @@ def landing_zone_cells(
                 if fsum(item.probability_mass for item in prefix[:-1]) >= threshold:
                     raise RuntimeError("landing-zone prefix is not shortest")
                 return prefix
+        if radius == prefix_evaluation_radius:
+            prefix_evaluation_radius = 2 * radius + 1
         radius += 1

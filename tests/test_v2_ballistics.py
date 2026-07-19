@@ -293,6 +293,33 @@ def test_landing_zone_handles_legal_extremes_or_hits_public_cap(monkeypatch) -> 
         landing_zone_cells(WorldPoint(0.25, 0.25), 5.0, 0.99, geometry)
 
 
+def test_landing_zone_delays_global_prefix_work_until_sparse_checkpoints(
+    monkeypatch,
+) -> None:
+    prefix_scan_sizes: list[int] = []
+    original = ballistics_module._shortest_prefix_length
+
+    def tracking_prefix_length(
+        masses: tuple[float, ...], threshold: float
+    ) -> int | None:
+        prefix_scan_sizes.append(len(masses))
+        return original(masses, threshold)
+
+    monkeypatch.setattr(ballistics_module, "MAX_LANDING_ZONE_CANDIDATES_V2", 225)
+    monkeypatch.setattr(
+        ballistics_module, "_shortest_prefix_length", tracking_prefix_length
+    )
+    with pytest.raises(ValueError, match="candidate.*225"):
+        landing_zone_cells(
+            WorldPoint(0.25, 0.25),
+            50.0,
+            0.99,
+            FineGridGeometryV2(2, 2),
+        )
+
+    assert prefix_scan_sizes == [1, 9, 49, 225]
+
+
 def test_landing_zone_reaudits_forged_exact_outer_objects() -> None:
     mean = WorldPoint(0.25, 0.25)
     object.__setattr__(mean, "x", float("nan"))
