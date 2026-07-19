@@ -1,4 +1,4 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from math import nextafter, pi
 
 import pytest
@@ -6,9 +6,12 @@ import pytest
 import path_planner.v2.profiles as profiles_module
 from path_planner.v2.contracts import PlatformKindV2
 from path_planner.v2.profiles import (
+    HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2,
+    HOPPER_PROXY_PROFILE_INCOMPLETE_REASON_V2,
     LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2,
     PLATFORM_PROFILE_SCHEMA_VERSION_V2,
     WHEEL_RELATIVE_ENERGY_PROXY_ID_V2,
+    HopperProfileV2,
     LeggedProfileV2,
     PlatformProfileRegistryV2,
     PlatformProfileV2,
@@ -42,6 +45,20 @@ def _legged_platform(**overrides) -> PlatformProfileV2:
         "profile_id": "legged-static-crawl/v1",
         "platform_kind": PlatformKindV2.LEGGED,
         "capability_revision": LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2,
+        "simulation_proxy": True,
+        "max_traversable_slope_deg": 30.0,
+        "goal_position_tolerance_m": 0.0,
+        "goal_heading_tolerance_rad": 0.0,
+    }
+    values.update(overrides)
+    return PlatformProfileV2(**values)
+
+
+def _hopper_platform(**overrides) -> PlatformProfileV2:
+    values = {
+        "profile_id": "hopper-lunar-ballistic-proxy/v1",
+        "platform_kind": PlatformKindV2.HOPPER,
+        "capability_revision": HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2,
         "simulation_proxy": True,
         "max_traversable_slope_deg": 30.0,
         "goal_position_tolerance_m": 0.0,
@@ -395,3 +412,181 @@ def test_legged_profile_numeric_conversion_stabilizes_runtime_error() -> None:
             profile=_legged_platform(),
             body_length_m=ExplodingInt(1),
         )
+
+
+def test_hopper_profile_freezes_approved_proxy_defaults() -> None:
+    hopper = HopperProfileV2(profile=_hopper_platform())
+    assert tuple(field.name for field in fields(HopperProfileV2)) == (
+        "profile",
+        "gravity_mps2",
+        "launch_speeds_mps",
+        "launch_elevations_rad",
+        "azimuth_direction_count",
+        "landing_sigma_range_scale",
+        "landing_sigma_offset_m",
+        "max_landing_slope_deg",
+        "landing_probability_threshold",
+        "midcourse_correction_enabled",
+        "inflight_observation_enabled",
+        "body_envelope_radius_m",
+        "launch_reference_height_m",
+        "arc_clearance_margin_m",
+        "landing_footprint_radius_m",
+        "stop_condition",
+        "energy_model",
+    )
+    assert HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2 == (
+        "simulation_proxy_lunar_ballistic/v1"
+    )
+    assert HOPPER_PROXY_PROFILE_INCOMPLETE_REASON_V2 == (
+        "hopper_proxy_profile_incomplete"
+    )
+    assert hopper.profile.platform_kind is PlatformKindV2.HOPPER
+    assert hopper.profile.simulation_proxy is True
+    assert hopper.profile.max_traversable_slope_deg == 30.0
+    assert hopper.profile.goal_position_tolerance_m == 0.0
+    assert hopper.profile.goal_heading_tolerance_rad == 0.0
+    assert hopper.gravity_mps2 == 1.62
+    assert hopper.launch_speeds_mps == (1.5, 2.0, 2.5, 3.0)
+    assert hopper.launch_elevations_rad == (pi / 6.0, pi / 4.0, pi / 3.0)
+    assert hopper.azimuth_direction_count == 16
+    assert hopper.landing_sigma_range_scale == 0.05
+    assert hopper.landing_sigma_offset_m == 0.05
+    assert hopper.max_landing_slope_deg == 15.0
+    assert hopper.landing_probability_threshold == 0.99
+    assert hopper.midcourse_correction_enabled is False
+    assert hopper.inflight_observation_enabled is False
+    assert not hasattr(hopper, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        hopper.gravity_mps2 = 1.0
+
+
+def test_hopper_profile_keeps_formal_capability_fields_explicitly_nullable() -> None:
+    hopper = HopperProfileV2(profile=_hopper_platform())
+    assert (
+        hopper.body_envelope_radius_m,
+        hopper.launch_reference_height_m,
+        hopper.arc_clearance_margin_m,
+        hopper.landing_footprint_radius_m,
+        hopper.stop_condition,
+        hopper.energy_model,
+    ) == (None, None, None, None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"platform_kind": PlatformKindV2.LEGGED}, "HOPPER"),
+        ({"simulation_proxy": False}, "simulation_proxy"),
+        ({"capability_revision": "simulation_proxy_lunar_ballistic/v2"}, "capability_revision"),
+        ({"max_traversable_slope_deg": nextafter(30.0, float("inf"))}, "30.0"),
+        ({"goal_position_tolerance_m": nextafter(0.0, 1.0)}, "goal_position_tolerance_m"),
+        ({"goal_heading_tolerance_rad": nextafter(0.0, 1.0)}, "goal_heading_tolerance_rad"),
+    ],
+)
+def test_hopper_profile_rejects_incompatible_base_profile(overrides, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        HopperProfileV2(profile=_hopper_platform(**overrides))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("gravity_mps2", nextafter(1.62, float("inf"))),
+        ("launch_speeds_mps", (1.5, 2.0, 2.5, nextafter(3.0, float("inf")))),
+        ("launch_elevations_rad", (pi / 6.0, pi / 4.0, nextafter(pi / 3.0, float("inf")))),
+        ("azimuth_direction_count", 15),
+        ("landing_sigma_range_scale", nextafter(0.05, float("inf"))),
+        ("landing_sigma_offset_m", nextafter(0.05, float("inf"))),
+        ("max_landing_slope_deg", nextafter(15.0, float("inf"))),
+        ("landing_probability_threshold", nextafter(0.99, float("inf"))),
+        ("midcourse_correction_enabled", True),
+        ("inflight_observation_enabled", True),
+    ],
+)
+def test_hopper_profile_rejects_every_frozen_proxy_field_deviation(field, value) -> None:
+    with pytest.raises((TypeError, ValueError), match=field):
+        HopperProfileV2(profile=_hopper_platform(), **{field: value})
+
+
+def test_hopper_profile_rejects_inexact_containers_elements_and_switches() -> None:
+    class DerivedFloat(float):
+        pass
+
+    with pytest.raises(TypeError, match="gravity_mps2.*exact.*float"):
+        HopperProfileV2(profile=_hopper_platform(), gravity_mps2=DerivedFloat(1.62))
+    with pytest.raises(TypeError, match="launch_speeds_mps.*exact tuple"):
+        HopperProfileV2(profile=_hopper_platform(), launch_speeds_mps=[1.5, 2.0, 2.5, 3.0])
+    with pytest.raises(TypeError, match="launch_speeds_mps.*exact float"):
+        HopperProfileV2(profile=_hopper_platform(), launch_speeds_mps=(1.5, 2.0, 2.5, 3))
+    with pytest.raises(TypeError, match="azimuth_direction_count.*exact int"):
+        HopperProfileV2(profile=_hopper_platform(), azimuth_direction_count=True)
+    with pytest.raises(TypeError, match="midcourse_correction_enabled.*exact bool"):
+        HopperProfileV2(profile=_hopper_platform(), midcourse_correction_enabled=0)
+
+
+def test_hopper_profile_validates_explicit_formal_capability_fields() -> None:
+    hopper = HopperProfileV2(
+        profile=_hopper_platform(),
+        body_envelope_radius_m=0.25,
+        launch_reference_height_m=0.50,
+        arc_clearance_margin_m=0.10,
+        landing_footprint_radius_m=0.30,
+        stop_condition="fixture_stop_proxy/v1",
+        energy_model="fixture_energy_proxy/v1",
+    )
+    assert hopper.body_envelope_radius_m == 0.25
+    assert hopper.stop_condition == "fixture_stop_proxy/v1"
+
+    invalid = (
+        ("body_envelope_radius_m", 0.0),
+        ("launch_reference_height_m", 1),
+        ("arc_clearance_margin_m", True),
+        ("landing_footprint_radius_m", float("nan")),
+        ("stop_condition", "unversioned"),
+        ("energy_model", "fixture/v0"),
+    )
+    for field, value in invalid:
+        with pytest.raises((TypeError, ValueError), match=field):
+            HopperProfileV2(profile=_hopper_platform(), **{field: value})
+
+
+def test_hopper_profile_reaudits_forged_exact_base_profile() -> None:
+    class DerivedPlatformProfile(PlatformProfileV2):
+        pass
+
+    derived = DerivedPlatformProfile(
+        profile_id="hopper-derived/v1",
+        platform_kind=PlatformKindV2.HOPPER,
+        capability_revision=HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2,
+        simulation_proxy=True,
+        max_traversable_slope_deg=30.0,
+    )
+    with pytest.raises(TypeError, match="exact PlatformProfileV2"):
+        HopperProfileV2(profile=derived)
+
+    profile = _hopper_platform()
+    object.__setattr__(profile, "max_traversable_slope_deg", True)
+    with pytest.raises(TypeError, match="max_traversable_slope_deg.*exact.*float"):
+        HopperProfileV2(profile=profile)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "profile_id",
+        "platform_kind",
+        "capability_revision",
+        "simulation_proxy",
+        "max_traversable_slope_deg",
+        "goal_position_tolerance_m",
+        "goal_heading_tolerance_rad",
+        "schema_version",
+    ),
+)
+def test_hopper_profile_rejects_missing_required_base_profile_fields(field) -> None:
+    profile = _hopper_platform()
+    object.__delattr__(profile, field)
+
+    with pytest.raises((TypeError, ValueError), match=field):
+        HopperProfileV2(profile=profile)
