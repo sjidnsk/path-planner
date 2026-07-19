@@ -38,9 +38,13 @@ def _derived_finite(value: float, name: str) -> float:
 def _exact_cell(value: object) -> Cell:
     if type(value) is not Cell:
         raise TypeError("cell must be exact Cell")
-    if type(value.x) is not int or type(value.y) is not int:
+    try:
+        x, y = value.x, value.y
+    except AttributeError:
+        raise TypeError("cell must have exact fields") from None
+    if type(x) is not int or type(y) is not int:
         raise TypeError("cell coordinates must be exact int values")
-    return Cell(value.x, value.y)
+    return Cell(x, y)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +99,11 @@ def sample_ballistic_arc(
 ) -> tuple[BallisticSampleV2, ...]:
     if type(start) is not BallisticStartV2:
         raise TypeError("start must be exact BallisticStartV2")
-    audited_start = BallisticStartV2(start.x_m, start.y_m, start.z_m)
+    try:
+        start_x_m, start_y_m, start_z_m = start.x_m, start.y_m, start.z_m
+    except AttributeError:
+        raise TypeError("start must have exact fields") from None
+    audited_start = BallisticStartV2(start_x_m, start_y_m, start_z_m)
     speed = _positive_real(speed_mps, "speed_mps")
     elevation = _finite_real(elevation_rad, "elevation_rad")
     azimuth = _finite_real(azimuth_rad, "azimuth_rad")
@@ -143,6 +151,39 @@ def sample_ballistic_arc(
             f"sample_count must not exceed {MAX_BALLISTIC_SAMPLES_V2}"
         )
 
+    interior_times = tuple(
+        _derived_finite(float(index) * dt, "sample time_s")
+        for index in range(1, interval_count)
+    )
+    scheduled_times = (0.0, *interior_times, flight_time)
+    if any(
+        right - left > dt
+        for left, right in zip(scheduled_times, scheduled_times[1:])
+    ):
+        interval_count += 1
+        sample_count = interval_count + 1
+        if sample_count > MAX_BALLISTIC_SAMPLES_V2:
+            raise ValueError(
+                f"sample_count must not exceed {MAX_BALLISTIC_SAMPLES_V2}"
+            )
+        interior_times = tuple(
+            _derived_finite(
+                flight_time
+                * _derived_finite(
+                    float(index) / float(interval_count),
+                    "sample time fraction",
+                ),
+                "sample time_s",
+            )
+            for index in range(1, interval_count)
+        )
+        scheduled_times = (0.0, *interior_times, flight_time)
+        if any(
+            right - left > dt
+            for left, right in zip(scheduled_times, scheduled_times[1:])
+        ):
+            raise ValueError("sample intervals must not exceed dt_s")
+
     samples = [
         BallisticSampleV2(
             0.0,
@@ -151,8 +192,7 @@ def sample_ballistic_arc(
             audited_start.z_m,
         )
     ]
-    for index in range(1, interval_count):
-        time_s = _derived_finite(float(index) * dt, "sample time_s")
+    for time_s in interior_times:
         if not samples[-1].time_s < time_s < flight_time:
             raise ValueError("sample times must remain strictly interior")
         fraction = _derived_finite(time_s / flight_time, "sample time fraction")

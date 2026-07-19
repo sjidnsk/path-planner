@@ -65,6 +65,24 @@ def test_sample_ballistic_arc_shortens_only_final_interval() -> None:
     assert two_samples[-1].z_m == 0.0
 
 
+def test_sample_ballistic_arc_never_exceeds_dt_at_a_float_boundary() -> None:
+    dt_s = 0.1
+    speed_mps = 1.1 * 1.62 / (2.0 * sin(pi / 4.0))
+    samples = sample_ballistic_arc(
+        BallisticStartV2(0.0, 0.0, 0.0),
+        speed_mps,
+        pi / 4.0,
+        0.0,
+        1.62,
+        dt_s,
+    )
+    assert samples[-1].time_s == 1.1
+    assert all(
+        right.time_s - left.time_s <= dt_s
+        for left, right in zip(samples, samples[1:])
+    )
+
+
 @pytest.mark.parametrize(
     ("azimuth", "expected_signs"),
     [
@@ -133,3 +151,23 @@ def test_sample_ballistic_arc_reaudits_forged_exact_start() -> None:
     object.__setattr__(start, "z_m", float("nan"))
     with pytest.raises(ValueError, match="z_m.*finite"):
         sample_ballistic_arc(start, 3.0, pi / 4.0, 0.0, 1.62, 0.25)
+
+
+@pytest.mark.parametrize("field", ("x_m", "y_m", "z_m"))
+def test_sample_ballistic_arc_rejects_forged_start_with_deleted_field(
+    field: str,
+) -> None:
+    start = BallisticStartV2(0.0, 0.0, 0.0)
+    object.__delattr__(start, field)
+    with pytest.raises(TypeError, match="start.*field"):
+        sample_ballistic_arc(start, 3.0, pi / 4.0, 0.0, 1.62, 0.25)
+
+
+@pytest.mark.parametrize("field", ("x", "y"))
+def test_landing_cell_mass_rejects_forged_cell_with_deleted_field(
+    field: str,
+) -> None:
+    cell = Cell(0, 0)
+    object.__delattr__(cell, field)
+    with pytest.raises(TypeError, match="cell.*field"):
+        LandingCellMassV2(cell, 0.5, True)
