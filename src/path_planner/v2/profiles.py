@@ -11,6 +11,10 @@ from path_planner.v2.contracts import PlatformKindV2
 PLATFORM_PROFILE_SCHEMA_VERSION_V2 = "path-planner-v2-platform-profile/v1"
 WHEEL_RELATIVE_ENERGY_PROXY_ID_V2 = "wheel_relative_motion_energy/v1"
 LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2 = "simulation_proxy_static_crawl/v1"
+HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2 = (
+    "simulation_proxy_lunar_ballistic/v1"
+)
+HOPPER_PROXY_PROFILE_INCOMPLETE_REASON_V2 = "hopper_proxy_profile_incomplete"
 
 
 def _nonempty_string(value: object, name: str) -> None:
@@ -72,6 +76,106 @@ def _exact_profile_float(value: object, name: str) -> float:
     if not isfinite(value):
         raise ValueError(f"{name} must be finite")
     return value
+
+
+def _fixed_exact_float(value: object, name: str, expected: float) -> float:
+    normalized = _exact_profile_float(value, name)
+    if normalized != expected:
+        raise ValueError(f"{name} must be exactly {expected}")
+    return expected
+
+
+def _fixed_exact_float_tuple(
+    value: object,
+    name: str,
+    expected: tuple[float, ...],
+) -> tuple[float, ...]:
+    if type(value) is not tuple:
+        raise TypeError(f"{name} must be exact tuple")
+    if any(type(item) is not float for item in value):
+        raise TypeError(f"{name} elements must be exact float")
+    if value != expected:
+        raise ValueError(f"{name} must match the frozen proxy values")
+    return expected
+
+
+def _optional_positive_exact_float(value: object, name: str) -> float | None:
+    if value is None:
+        return None
+    normalized = _exact_profile_float(value, name)
+    if normalized <= 0.0:
+        raise ValueError(f"{name} must be positive when provided")
+    return normalized
+
+
+def _optional_versioned_proxy_id(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact str when provided")
+    if not value or value.strip() != value or not re.search(r"/v[1-9][0-9]*$", value):
+        raise ValueError(f"{name} must be a nonempty versioned proxy id")
+    return value
+
+
+def _required_hopper_profile_field(value: PlatformProfileV2, name: str) -> object:
+    try:
+        return getattr(value, name)
+    except AttributeError:
+        raise TypeError(f"profile is missing required field {name}") from None
+
+
+def _reaudit_hopper_platform_profile(value: object) -> PlatformProfileV2:
+    if type(value) is not PlatformProfileV2:
+        raise TypeError("profile must be exact PlatformProfileV2")
+    profile_id = _exact_profile_string(
+        _required_hopper_profile_field(value, "profile_id"), "profile_id"
+    )
+    capability_revision = _exact_profile_string(
+        _required_hopper_profile_field(value, "capability_revision"),
+        "capability_revision",
+    )
+    schema_version = _exact_profile_string(
+        _required_hopper_profile_field(value, "schema_version"), "schema_version"
+    )
+    platform_kind = _required_hopper_profile_field(value, "platform_kind")
+    if type(platform_kind) is not PlatformKindV2:
+        raise TypeError("platform_kind must be exact PlatformKindV2")
+    simulation_proxy = _required_hopper_profile_field(value, "simulation_proxy")
+    if type(simulation_proxy) is not bool:
+        raise TypeError("simulation_proxy must be exact bool")
+    audited = PlatformProfileV2(
+        profile_id=profile_id,
+        platform_kind=platform_kind,
+        capability_revision=capability_revision,
+        simulation_proxy=simulation_proxy,
+        max_traversable_slope_deg=_exact_profile_float(
+            _required_hopper_profile_field(value, "max_traversable_slope_deg"),
+            "max_traversable_slope_deg",
+        ),
+        goal_position_tolerance_m=_exact_profile_float(
+            _required_hopper_profile_field(value, "goal_position_tolerance_m"),
+            "goal_position_tolerance_m",
+        ),
+        goal_heading_tolerance_rad=_exact_profile_float(
+            _required_hopper_profile_field(value, "goal_heading_tolerance_rad"),
+            "goal_heading_tolerance_rad",
+        ),
+        schema_version=schema_version,
+    )
+    if audited.platform_kind is not PlatformKindV2.HOPPER:
+        raise ValueError("hopper profile requires PlatformKindV2.HOPPER")
+    if audited.simulation_proxy is not True:
+        raise ValueError("hopper profile requires simulation_proxy=True")
+    if audited.capability_revision != HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2:
+        raise ValueError("capability_revision must be the fixed lunar ballistic proxy")
+    if audited.max_traversable_slope_deg != 30.0:
+        raise ValueError("hopper profile slope boundary must be exactly 30.0")
+    if audited.goal_position_tolerance_m != 0.0:
+        raise ValueError("goal_position_tolerance_m must be exactly 0.0")
+    if audited.goal_heading_tolerance_rad != 0.0:
+        raise ValueError("goal_heading_tolerance_rad must be exactly 0.0")
+    return audited
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +406,91 @@ class LeggedProfileV2:
                 self,
                 name,
                 _fixed_float(getattr(self, name), name, expected),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class HopperProfileV2:
+    profile: PlatformProfileV2
+    gravity_mps2: float = 1.62
+    launch_speeds_mps: tuple[float, ...] = (1.5, 2.0, 2.5, 3.0)
+    launch_elevations_rad: tuple[float, ...] = (pi / 6.0, pi / 4.0, pi / 3.0)
+    azimuth_direction_count: int = 16
+    landing_sigma_range_scale: float = 0.05
+    landing_sigma_offset_m: float = 0.05
+    max_landing_slope_deg: float = 15.0
+    landing_probability_threshold: float = 0.99
+    midcourse_correction_enabled: bool = False
+    inflight_observation_enabled: bool = False
+    body_envelope_radius_m: float | None = None
+    launch_reference_height_m: float | None = None
+    arc_clearance_margin_m: float | None = None
+    landing_footprint_radius_m: float | None = None
+    stop_condition: str | None = None
+    energy_model: str | None = None
+
+    def __post_init__(self) -> None:
+        _reaudit_hopper_platform_profile(self.profile)
+        frozen_floats = (
+            ("gravity_mps2", 1.62),
+            ("landing_sigma_range_scale", 0.05),
+            ("landing_sigma_offset_m", 0.05),
+            ("max_landing_slope_deg", 15.0),
+            ("landing_probability_threshold", 0.99),
+        )
+        for name, expected in frozen_floats:
+            object.__setattr__(
+                self,
+                name,
+                _fixed_exact_float(getattr(self, name), name, expected),
+            )
+        object.__setattr__(
+            self,
+            "launch_speeds_mps",
+            _fixed_exact_float_tuple(
+                self.launch_speeds_mps,
+                "launch_speeds_mps",
+                (1.5, 2.0, 2.5, 3.0),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "launch_elevations_rad",
+            _fixed_exact_float_tuple(
+                self.launch_elevations_rad,
+                "launch_elevations_rad",
+                (pi / 6.0, pi / 4.0, pi / 3.0),
+            ),
+        )
+        if type(self.azimuth_direction_count) is not int:
+            raise TypeError("azimuth_direction_count must be exact int")
+        if self.azimuth_direction_count != 16:
+            raise ValueError("azimuth_direction_count must be exactly 16")
+        for name in (
+            "midcourse_correction_enabled",
+            "inflight_observation_enabled",
+        ):
+            value = getattr(self, name)
+            if type(value) is not bool:
+                raise TypeError(f"{name} must be exact bool")
+            if value is not False:
+                raise ValueError(f"{name} must be exactly False")
+        for name in (
+            "body_envelope_radius_m",
+            "launch_reference_height_m",
+            "arc_clearance_margin_m",
+            "landing_footprint_radius_m",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _optional_positive_exact_float(getattr(self, name), name),
+            )
+        for name in ("stop_condition", "energy_model"):
+            object.__setattr__(
+                self,
+                name,
+                _optional_versioned_proxy_id(getattr(self, name), name),
             )
 
 
