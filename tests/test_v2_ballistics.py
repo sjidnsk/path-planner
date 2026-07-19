@@ -150,6 +150,39 @@ def test_sample_ballistic_arc_inserts_bounded_repairs_for_valid_schedule() -> No
         )
 
 
+def test_sample_ballistic_arc_bridges_endpoint_anchor_collision() -> None:
+    dt_s = 0.1
+    flight_time = dt_s * 24
+    speed_mps = flight_time * 1.62 / (2.0 * sin(pi / 4.0))
+    exact_interval_lower_bound = ballistics_module._exact_positive_ratio_ceil(
+        flight_time, dt_s
+    )
+    assert flight_time == 2.4000000000000004
+    assert exact_interval_lower_bound == 25
+
+    samples = sample_ballistic_arc(
+        BallisticStartV2(0.0, 0.0, 0.0),
+        speed_mps,
+        pi / 4.0,
+        0.0,
+        1.62,
+        dt_s,
+    )
+
+    times = tuple(sample.time_s for sample in samples)
+    assert exact_interval_lower_bound + 1 <= len(times) <= MAX_BALLISTIC_SAMPLES_V2
+    assert times[0] == 0.0
+    assert times[-1] == flight_time
+    assert all(left < right for left, right in zip(times, times[1:]))
+    assert all(right - left <= dt_s for left, right in zip(times, times[1:]))
+    for index in range(1, exact_interval_lower_bound):
+        nominal_anchor = index * dt_s
+        assert any(
+            abs(time_s - nominal_anchor) <= 4.0 * ulp(nominal_anchor)
+            for time_s in times[1:]
+        )
+
+
 def test_sample_ballistic_arc_counts_repairs_against_sample_cap(monkeypatch) -> None:
     flight_time = 1.7
     speed_mps = flight_time * 1.62 / (2.0 * sin(pi / 4.0))
