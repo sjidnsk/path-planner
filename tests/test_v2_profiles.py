@@ -11,11 +11,13 @@ from path_planner.v2.profiles import (
     LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2,
     PLATFORM_PROFILE_SCHEMA_VERSION_V2,
     WHEEL_RELATIVE_ENERGY_PROXY_ID_V2,
+    HopperProfileAuditV2,
     HopperProfileV2,
     LeggedProfileV2,
     PlatformProfileRegistryV2,
     PlatformProfileV2,
     WheelProfileV2,
+    audit_hopper_profile_v2,
 )
 from path_planner.v2.providers import PrimitiveProviderV2
 
@@ -66,6 +68,20 @@ def _hopper_platform(**overrides) -> PlatformProfileV2:
     }
     values.update(overrides)
     return PlatformProfileV2(**values)
+
+
+def _complete_hopper(**overrides) -> HopperProfileV2:
+    values = {
+        "profile": _hopper_platform(),
+        "body_envelope_radius_m": 0.25,
+        "launch_reference_height_m": 0.50,
+        "arc_clearance_margin_m": 0.10,
+        "landing_footprint_radius_m": 0.30,
+        "stop_condition": "fixture_stop_proxy/v1",
+        "energy_model": "fixture_energy_proxy/v1",
+    }
+    values.update(overrides)
+    return HopperProfileV2(**values)
 
 
 def test_platform_profile_is_frozen_slotted_and_has_fixed_schema() -> None:
@@ -590,3 +606,88 @@ def test_hopper_profile_rejects_missing_required_base_profile_fields(field) -> N
 
     with pytest.raises((TypeError, ValueError), match=field):
         HopperProfileV2(profile=profile)
+
+
+HOPPER_MISSING_FIELDS = (
+    "body_envelope_radius_m",
+    "launch_reference_height_m",
+    "arc_clearance_margin_m",
+    "landing_footprint_radius_m",
+    "stop_condition",
+    "energy_model",
+)
+
+
+def test_hopper_profile_audit_reports_all_missing_fields_in_canonical_order() -> None:
+    audit = audit_hopper_profile_v2(HopperProfileV2(profile=_hopper_platform()))
+    assert tuple(field.name for field in fields(HopperProfileAuditV2)) == (
+        "complete", "reason_code", "missing_fields"
+    )
+    assert audit == HopperProfileAuditV2(
+        complete=False,
+        reason_code=HOPPER_PROXY_PROFILE_INCOMPLETE_REASON_V2,
+        missing_fields=HOPPER_MISSING_FIELDS,
+    )
+    assert not hasattr(audit, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        audit.complete = True
+
+
+@pytest.mark.parametrize("missing_field", HOPPER_MISSING_FIELDS)
+def test_hopper_profile_audit_reports_each_actual_missing_subset(missing_field) -> None:
+    audit = audit_hopper_profile_v2(_complete_hopper(**{missing_field: None}))
+    assert audit.complete is False
+    assert audit.reason_code == HOPPER_PROXY_PROFILE_INCOMPLETE_REASON_V2
+    assert audit.missing_fields == (missing_field,)
+
+
+def test_hopper_profile_audit_reports_structural_completion_only() -> None:
+    profile = _complete_hopper(
+        stop_condition="unsupported_but_structurally_versioned/v7",
+        energy_model="unsupported_but_structurally_versioned/v9",
+    )
+    assert audit_hopper_profile_v2(profile) == HopperProfileAuditV2(True, None, ())
+
+
+def test_hopper_profile_audit_reaudits_forged_exact_profile() -> None:
+    profile = _complete_hopper()
+    object.__setattr__(profile, "gravity_mps2", nextafter(1.62, float("inf")))
+    with pytest.raises(ValueError, match="gravity_mps2"):
+        audit_hopper_profile_v2(profile)
+
+
+def test_hopper_profile_audit_stabilizes_deleted_required_profile_field() -> None:
+    profile = _complete_hopper()
+    object.__delattr__(profile, "stop_condition")
+
+    with pytest.raises((TypeError, ValueError), match="stop_condition"):
+        audit_hopper_profile_v2(profile)
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        ((1, None, ()), TypeError),
+        ((True, "hopper_proxy_profile_incomplete", ()), ValueError),
+        ((False, None, ("energy_model",)), ValueError),
+        ((False, "hopper_proxy_profile_incomplete", ()), ValueError),
+        ((False, "hopper_proxy_profile_incomplete", ["energy_model"]), TypeError),
+        ((False, "hopper_proxy_profile_incomplete", ("unknown",)), ValueError),
+        (
+            (
+                False,
+                "hopper_proxy_profile_incomplete",
+                ("energy_model", "body_envelope_radius_m"),
+            ),
+            ValueError,
+        ),
+    ],
+)
+def test_hopper_profile_audit_rejects_inconsistent_contracts(values, error) -> None:
+    with pytest.raises(error):
+        HopperProfileAuditV2(*values)
+
+
+def test_hopper_profile_audit_requires_exact_hopper_profile() -> None:
+    with pytest.raises(TypeError, match="exact HopperProfileV2"):
+        audit_hopper_profile_v2(object())
