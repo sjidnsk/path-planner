@@ -15,6 +15,14 @@ HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2 = (
     "simulation_proxy_lunar_ballistic/v1"
 )
 HOPPER_PROXY_PROFILE_INCOMPLETE_REASON_V2 = "hopper_proxy_profile_incomplete"
+_HOPPER_FORMAL_CAPABILITY_FIELDS_V2 = (
+    "body_envelope_radius_m",
+    "launch_reference_height_m",
+    "arc_clearance_margin_m",
+    "landing_footprint_radius_m",
+    "stop_condition",
+    "energy_model",
+)
 
 
 def _nonempty_string(value: object, name: str) -> None:
@@ -123,6 +131,13 @@ def _required_hopper_profile_field(value: PlatformProfileV2, name: str) -> objec
         return getattr(value, name)
     except AttributeError:
         raise TypeError(f"profile is missing required field {name}") from None
+
+
+def _required_hopper_attribute(value: HopperProfileV2, name: str) -> object:
+    try:
+        return getattr(value, name)
+    except AttributeError:
+        raise TypeError(f"hopper profile is missing required field {name}") from None
 
 
 def _reaudit_hopper_platform_profile(value: object) -> PlatformProfileV2:
@@ -492,6 +507,115 @@ class HopperProfileV2:
                 name,
                 _optional_versioned_proxy_id(getattr(self, name), name),
             )
+
+
+@dataclass(frozen=True, slots=True)
+class HopperProfileAuditV2:
+    complete: bool
+    reason_code: str | None
+    missing_fields: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.complete) is not bool:
+            raise TypeError("complete must be exact bool")
+        if self.reason_code is not None and type(self.reason_code) is not str:
+            raise TypeError("reason_code must be exact str or None")
+        if type(self.missing_fields) is not tuple:
+            raise TypeError("missing_fields must be exact tuple")
+        if any(type(name) is not str for name in self.missing_fields):
+            raise TypeError("missing_fields values must be exact str")
+        if len(self.missing_fields) != len(set(self.missing_fields)):
+            raise ValueError("missing_fields must not contain duplicates")
+        try:
+            canonical = tuple(
+                name
+                for name in _HOPPER_FORMAL_CAPABILITY_FIELDS_V2
+                if name in self.missing_fields
+            )
+        except TypeError:
+            raise TypeError("missing_fields must contain hashable exact str") from None
+        if canonical != self.missing_fields:
+            raise ValueError("missing_fields must use canonical fields and order")
+        if self.complete:
+            if self.reason_code is not None or self.missing_fields:
+                raise ValueError("complete audit must have no reason or missing fields")
+        elif (
+            self.reason_code != HOPPER_PROXY_PROFILE_INCOMPLETE_REASON_V2
+            or not self.missing_fields
+        ):
+            raise ValueError("incomplete audit must have fixed reason and missing fields")
+
+
+def audit_hopper_profile_v2(profile: HopperProfileV2) -> HopperProfileAuditV2:
+    if type(profile) is not HopperProfileV2:
+        raise TypeError("profile must be exact HopperProfileV2")
+    audited = HopperProfileV2(
+        profile=_required_hopper_attribute(profile, "profile"),
+        gravity_mps2=_required_hopper_attribute(profile, "gravity_mps2"),
+        launch_speeds_mps=_required_hopper_attribute(profile, "launch_speeds_mps"),
+        launch_elevations_rad=_required_hopper_attribute(
+            profile,
+            "launch_elevations_rad",
+        ),
+        azimuth_direction_count=_required_hopper_attribute(
+            profile,
+            "azimuth_direction_count",
+        ),
+        landing_sigma_range_scale=_required_hopper_attribute(
+            profile,
+            "landing_sigma_range_scale",
+        ),
+        landing_sigma_offset_m=_required_hopper_attribute(
+            profile,
+            "landing_sigma_offset_m",
+        ),
+        max_landing_slope_deg=_required_hopper_attribute(
+            profile,
+            "max_landing_slope_deg",
+        ),
+        landing_probability_threshold=_required_hopper_attribute(
+            profile,
+            "landing_probability_threshold",
+        ),
+        midcourse_correction_enabled=_required_hopper_attribute(
+            profile,
+            "midcourse_correction_enabled",
+        ),
+        inflight_observation_enabled=_required_hopper_attribute(
+            profile,
+            "inflight_observation_enabled",
+        ),
+        body_envelope_radius_m=_required_hopper_attribute(
+            profile,
+            "body_envelope_radius_m",
+        ),
+        launch_reference_height_m=_required_hopper_attribute(
+            profile,
+            "launch_reference_height_m",
+        ),
+        arc_clearance_margin_m=_required_hopper_attribute(
+            profile,
+            "arc_clearance_margin_m",
+        ),
+        landing_footprint_radius_m=_required_hopper_attribute(
+            profile,
+            "landing_footprint_radius_m",
+        ),
+        stop_condition=_required_hopper_attribute(profile, "stop_condition"),
+        energy_model=_required_hopper_attribute(profile, "energy_model"),
+    )
+    missing = tuple(
+        name
+        for name in _HOPPER_FORMAL_CAPABILITY_FIELDS_V2
+        if getattr(audited, name) is None
+    )
+    if missing:
+        return HopperProfileAuditV2(
+            complete=False,
+            reason_code=HOPPER_PROXY_PROFILE_INCOMPLETE_REASON_V2,
+            missing_fields=missing,
+        )
+    return HopperProfileAuditV2(complete=True, reason_code=None, missing_fields=())
 
 
 @dataclass(frozen=True, slots=True)
