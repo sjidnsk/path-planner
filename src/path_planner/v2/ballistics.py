@@ -23,6 +23,7 @@ from path_planner.v2.terrain import FineGridGeometryV2
 
 MAX_BALLISTIC_SAMPLES_V2 = 100_000
 MAX_LANDING_ZONE_CANDIDATES_V2 = 1_000_000
+_MAX_SAMPLE_TIME_ULP_CORRECTIONS = 4
 _SQRT_TWO = sqrt(2.0)
 
 
@@ -81,31 +82,80 @@ def _interior_sample_times(
     flight_time: float,
     dt_s: float,
     interval_count: int,
+    max_sample_count: int,
 ) -> tuple[float, ...]:
+    repair_budget = max_sample_count - (interval_count + 1)
     times: list[float] = []
     previous = 0.0
     for index in range(1, interval_count):
         nominal = _derived_finite(float(index) * dt_s, "sample time_s")
         candidate = nominal
-        if candidate >= flight_time:
-            candidate = nextafter(flight_time, float("-inf"))
-
-        interval_upper = _derived_finite(previous + dt_s, "sample time_s")
-        while interval_upper - previous > dt_s:
-            interval_upper = nextafter(interval_upper, float("-inf"))
-        candidate = min(candidate, interval_upper)
-        if candidate <= previous:
-            candidate = nextafter(previous, float("inf"))
-        if (
-            not previous < candidate < flight_time
-            or candidate - previous > dt_s
-        ):
-            raise ValueError("sample time_s failed representability")
+        for correction_count in range(_MAX_SAMPLE_TIME_ULP_CORRECTIONS + 1):
+            if (
+                previous < candidate < flight_time
+                and candidate - previous <= dt_s
+            ):
+                break
+            if correction_count < _MAX_SAMPLE_TIME_ULP_CORRECTIONS:
+                candidate = nextafter(candidate, float("-inf"))
+        else:
+            if not nominal < flight_time:
+                raise ValueError("sample time_s failed representability")
+            repair = _bounded_local_repair(previous, nominal, dt_s)
+            if repair is None:
+                raise ValueError("sample time_s failed representability")
+            if repair_budget <= 0:
+                raise ValueError(
+                    f"sample_count must not exceed {max_sample_count}"
+                )
+            times.append(repair)
+            repair_budget -= 1
+            previous = repair
+            candidate = nominal
+            if not (
+                previous < candidate < flight_time
+                and candidate - previous <= dt_s
+            ):
+                raise ValueError("sample time_s failed representability")
         times.append(candidate)
         previous = candidate
+
     if flight_time - previous > dt_s:
-        raise ValueError("sample intervals must not exceed dt_s")
+        repair = _bounded_local_repair(previous, flight_time, dt_s)
+        if repair is None:
+            raise ValueError("sample time_s failed representability")
+        if repair_budget <= 0:
+            raise ValueError(f"sample_count must not exceed {max_sample_count}")
+        times.append(repair)
+        repair_budget -= 1
+        previous = repair
+    if not previous < flight_time or flight_time - previous > dt_s:
+        raise ValueError("sample time_s failed representability")
     return tuple(times)
+
+
+def _bounded_local_repair(
+    previous: float,
+    target: float,
+    dt_s: float,
+) -> float | None:
+    """Find one bridge point using a fixed four-ULP local search."""
+    center = _derived_finite(target - dt_s, "sample repair time_s")
+    candidates = [center]
+    lower = center
+    upper = center
+    for _ in range(_MAX_SAMPLE_TIME_ULP_CORRECTIONS):
+        upper = nextafter(upper, float("inf"))
+        lower = nextafter(lower, float("-inf"))
+        candidates.extend((upper, lower))
+    for candidate in candidates:
+        if (
+            previous < candidate < target
+            and candidate - previous <= dt_s
+            and target - candidate <= dt_s
+        ):
+            return candidate
+    return None
 
 
 def _exact_cell(value: object) -> Cell:
@@ -187,8 +237,14 @@ def sample_ballistic_arc(
 
     horizontal_speed = _derived_positive(speed * cos(elevation), "horizontal speed")
     vertical_speed = _derived_positive(speed * sin(elevation), "vertical speed")
-    vx = _derived_finite(horizontal_speed * cos(azimuth), "x velocity")
-    vy = _derived_finite(horizontal_speed * sin(azimuth), "y velocity")
+    x_direction = _derived_finite(cos(azimuth), "cos(azimuth_rad)")
+    y_direction = _derived_finite(sin(azimuth), "sin(azimuth_rad)")
+    vx = _derived_finite(horizontal_speed * x_direction, "x velocity")
+    vy = _derived_finite(horizontal_speed * y_direction, "y velocity")
+    if x_direction != 0.0 and vx == 0.0:
+        raise ValueError("x velocity failed representability")
+    if y_direction != 0.0 and vy == 0.0:
+        raise ValueError("y velocity failed representability")
     vertical_time_scale = _derived_positive(
         vertical_speed / gravity,
         "vertical speed / gravity",
@@ -197,6 +253,10 @@ def sample_ballistic_arc(
 
     horizontal_dx = _derived_finite(vx * flight_time, "landing x displacement")
     horizontal_dy = _derived_finite(vy * flight_time, "landing y displacement")
+    if vx != 0.0 and horizontal_dx == 0.0:
+        raise ValueError("landing x displacement failed representability")
+    if vy != 0.0 and horizontal_dy == 0.0:
+        raise ValueError("landing y displacement failed representability")
     _derived_positive(horizontal_speed * flight_time, "horizontal range")
     landing_x = _add_representable_offset(
         audited_start.x_m, horizontal_dx, "landing x_m"
@@ -217,7 +277,12 @@ def sample_ballistic_arc(
             f"sample_count must not exceed {MAX_BALLISTIC_SAMPLES_V2}"
         )
 
-    interior_times = _interior_sample_times(flight_time, dt, interval_count)
+    interior_times = _interior_sample_times(
+        flight_time,
+        dt,
+        interval_count,
+        MAX_BALLISTIC_SAMPLES_V2,
+    )
 
     samples = [
         BallisticSampleV2(
