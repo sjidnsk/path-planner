@@ -1,7 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from math import ceil, cos, erfc, erf, floor, fsum, isfinite, isqrt, pi, sin, sqrt
+from math import (
+    cos,
+    erfc,
+    erf,
+    floor,
+    fsum,
+    isfinite,
+    isqrt,
+    nextafter,
+    pi,
+    sin,
+    sqrt,
+)
 from numbers import Real
 
 from path_planner.core.models import Cell, WorldPoint
@@ -36,6 +49,63 @@ def _derived_finite(value: float, name: str) -> float:
     if type(value) is not float or not isfinite(value):
         raise ValueError(f"{name} must be finite")
     return 0.0 if value == 0.0 else value
+
+
+def _derived_positive(value: float, name: str) -> float:
+    normalized = _derived_finite(value, name)
+    if normalized <= 0.0:
+        raise ValueError(f"{name} underflowed and is not representable")
+    return normalized
+
+
+def _add_representable_offset(origin: float, offset: float, name: str) -> float:
+    result = _derived_finite(origin + offset, name)
+    if offset != 0.0 and result == origin:
+        raise ValueError(
+            f"{name} failed representability because a nonzero offset was absorbed"
+        )
+    return result
+
+
+def _exact_positive_ratio_ceil(numerator: float, denominator: float) -> int:
+    numerator_integer, numerator_denominator = numerator.as_integer_ratio()
+    denominator_integer, denominator_denominator = denominator.as_integer_ratio()
+    quotient, remainder = divmod(
+        numerator_integer * denominator_denominator,
+        numerator_denominator * denominator_integer,
+    )
+    return quotient + int(remainder != 0)
+
+
+def _interior_sample_times(
+    flight_time: float,
+    dt_s: float,
+    interval_count: int,
+) -> tuple[float, ...]:
+    times: list[float] = []
+    previous = 0.0
+    for index in range(1, interval_count):
+        nominal = _derived_finite(float(index) * dt_s, "sample time_s")
+        candidate = nominal
+        if candidate >= flight_time:
+            candidate = nextafter(flight_time, float("-inf"))
+
+        interval_upper = _derived_finite(previous + dt_s, "sample time_s")
+        while interval_upper - previous > dt_s:
+            interval_upper = nextafter(interval_upper, float("-inf"))
+        candidate = min(candidate, interval_upper)
+        if candidate <= previous:
+            candidate = nextafter(previous, float("inf"))
+        if (
+            not previous < candidate < flight_time
+            or candidate - previous > dt_s
+        ):
+            raise ValueError("sample time_s failed representability")
+        times.append(candidate)
+        previous = candidate
+    if flight_time - previous > dt_s:
+        raise ValueError("sample intervals must not exceed dt_s")
+    return tuple(times)
 
 
 def _exact_cell(value: object) -> Cell:
@@ -115,77 +185,39 @@ def sample_ballistic_arc(
     if not 0.0 < elevation < pi / 2.0:
         raise ValueError("elevation_rad must be in (0, pi/2)")
 
-    horizontal_speed = _derived_finite(speed * cos(elevation), "horizontal speed")
-    vertical_speed = _derived_finite(speed * sin(elevation), "vertical speed")
+    horizontal_speed = _derived_positive(speed * cos(elevation), "horizontal speed")
+    vertical_speed = _derived_positive(speed * sin(elevation), "vertical speed")
     vx = _derived_finite(horizontal_speed * cos(azimuth), "x velocity")
     vy = _derived_finite(horizontal_speed * sin(azimuth), "y velocity")
-    vertical_time_scale = _derived_finite(
+    vertical_time_scale = _derived_positive(
         vertical_speed / gravity,
         "vertical speed / gravity",
     )
-    flight_time = _derived_finite(2.0 * vertical_time_scale, "flight time")
-    if flight_time <= 0.0:
-        raise ValueError("flight time must be positive")
-    interval_ratio = _derived_finite(flight_time / dt, "flight time / dt_s")
-    if interval_ratio <= 0.0:
-        raise ValueError("flight time / dt_s must be positive")
-    if interval_ratio > float(MAX_BALLISTIC_SAMPLES_V2 - 1):
-        raise ValueError(
-            f"sample_count must not exceed {MAX_BALLISTIC_SAMPLES_V2}"
-        )
+    flight_time = _derived_positive(2.0 * vertical_time_scale, "flight time")
 
     horizontal_dx = _derived_finite(vx * flight_time, "landing x displacement")
     horizontal_dy = _derived_finite(vy * flight_time, "landing y displacement")
-    landing_x = _derived_finite(audited_start.x_m + horizontal_dx, "landing x_m")
-    landing_y = _derived_finite(audited_start.y_m + horizontal_dy, "landing y_m")
-    apex_height = _derived_finite(
+    _derived_positive(horizontal_speed * flight_time, "horizontal range")
+    landing_x = _add_representable_offset(
+        audited_start.x_m, horizontal_dx, "landing x_m"
+    )
+    landing_y = _add_representable_offset(
+        audited_start.y_m, horizontal_dy, "landing y_m"
+    )
+    apex_height = _derived_positive(
         vertical_time_scale * (0.5 * vertical_speed),
         "apex height",
     )
-    _derived_finite(audited_start.z_m + apex_height, "apex z_m")
+    _add_representable_offset(audited_start.z_m, apex_height, "apex z_m")
 
-    try:
-        interval_count = ceil(interval_ratio)
-    except (OverflowError, ValueError):
-        raise ValueError("sample_count must be finite") from None
+    interval_count = _exact_positive_ratio_ceil(flight_time, dt)
     sample_count = interval_count + 1
     if sample_count > MAX_BALLISTIC_SAMPLES_V2:
         raise ValueError(
             f"sample_count must not exceed {MAX_BALLISTIC_SAMPLES_V2}"
         )
 
-    interior_times = tuple(
-        _derived_finite(float(index) * dt, "sample time_s")
-        for index in range(1, interval_count)
-    )
-    scheduled_times = (0.0, *interior_times, flight_time)
-    if any(
-        right - left > dt
-        for left, right in zip(scheduled_times, scheduled_times[1:])
-    ):
-        interval_count += 1
-        sample_count = interval_count + 1
-        if sample_count > MAX_BALLISTIC_SAMPLES_V2:
-            raise ValueError(
-                f"sample_count must not exceed {MAX_BALLISTIC_SAMPLES_V2}"
-            )
-        interior_times = tuple(
-            _derived_finite(
-                flight_time
-                * _derived_finite(
-                    float(index) / float(interval_count),
-                    "sample time fraction",
-                ),
-                "sample time_s",
-            )
-            for index in range(1, interval_count)
-        )
-        scheduled_times = (0.0, *interior_times, flight_time)
-        if any(
-            right - left > dt
-            for left, right in zip(scheduled_times, scheduled_times[1:])
-        ):
-            raise ValueError("sample intervals must not exceed dt_s")
+    interior_times = _interior_sample_times(flight_time, dt, interval_count)
 
     samples = [
         BallisticSampleV2(
@@ -196,21 +228,31 @@ def sample_ballistic_arc(
         )
     ]
     for time_s in interior_times:
-        if not samples[-1].time_s < time_s < flight_time:
-            raise ValueError("sample times must remain strictly interior")
-        fraction = _derived_finite(time_s / flight_time, "sample time fraction")
-        x_m = _derived_finite(
-            audited_start.x_m + horizontal_dx * fraction,
-            "sample x_m",
+        fraction = _derived_positive(time_s / flight_time, "sample time fraction")
+        if fraction >= 1.0:
+            raise ValueError("sample time fraction failed representability")
+        x_offset = _derived_finite(
+            horizontal_dx * fraction, "sample x displacement"
         )
-        y_m = _derived_finite(
-            audited_start.y_m + horizontal_dy * fraction,
-            "sample y_m",
+        y_offset = _derived_finite(
+            horizontal_dy * fraction, "sample y displacement"
         )
-        z_m = _derived_finite(
-            audited_start.z_m
-            + 4.0 * apex_height * fraction * (1.0 - fraction),
-            "sample z_m",
+        z_offset = _derived_positive(
+            4.0 * apex_height * fraction * (1.0 - fraction),
+            "sample z displacement",
+        )
+        if horizontal_dx != 0.0 and x_offset == 0.0:
+            raise ValueError("sample x_m failed representability")
+        if horizontal_dy != 0.0 and y_offset == 0.0:
+            raise ValueError("sample y_m failed representability")
+        x_m = _add_representable_offset(
+            audited_start.x_m, x_offset, "sample x_m"
+        )
+        y_m = _add_representable_offset(
+            audited_start.y_m, y_offset, "sample y_m"
+        )
+        z_m = _add_representable_offset(
+            audited_start.z_m, z_offset, "sample z_m"
         )
         samples.append(BallisticSampleV2(time_s, x_m, y_m, z_m))
 
@@ -349,6 +391,29 @@ def _shortest_prefix_length(masses: tuple[float, ...], threshold: float) -> int 
     return lower
 
 
+def _iter_square_perimeter_cells(
+    center_x: int,
+    center_y: int,
+    radius: int,
+) -> Iterator[tuple[int, int]]:
+    if radius == 0:
+        yield center_x, center_y
+        return
+
+    left = center_x - radius
+    right = center_x + radius
+    top = center_y - radius
+    bottom = center_y + radius
+    for x_index in range(left, right + 1):
+        yield x_index, top
+    for y_index in range(top + 1, bottom + 1):
+        yield right, y_index
+    for x_index in range(right - 1, left - 1, -1):
+        yield x_index, bottom
+    for y_index in range(bottom - 1, top, -1):
+        yield left, y_index
+
+
 def landing_zone_cells(
     mean_xy: WorldPoint,
     sigma_m: float,
@@ -395,55 +460,52 @@ def landing_zone_cells(
         if evaluated_count > cap:
             raise ValueError(f"landing-zone candidate count exceeds candidate cap {cap}")
 
-        for y_index in range(center_y - radius, center_y + radius + 1):
-            for x_index in range(center_x - radius, center_x + radius + 1):
-                if radius > 0 and max(
-                    abs(x_index - center_x), abs(y_index - center_y)
-                ) != radius:
-                    continue
-                x_mass = _axis_interval_mass(
-                    x_index,
-                    audited_geometry.origin[0],
-                    resolution,
-                    mean.x,
-                    sigma,
-                    "x",
+        for x_index, y_index in _iter_square_perimeter_cells(
+            center_x, center_y, radius
+        ):
+            x_mass = _axis_interval_mass(
+                x_index,
+                audited_geometry.origin[0],
+                resolution,
+                mean.x,
+                sigma,
+                "x",
+            )
+            y_mass = _axis_interval_mass(
+                y_index,
+                audited_geometry.origin[1],
+                resolution,
+                mean.y,
+                sigma,
+                "y",
+            )
+            mass = _derived_finite(x_mass * y_mass, "cell probability mass")
+            x_lower = _axis_boundary(
+                audited_geometry.origin[0], x_index, resolution, "x lower boundary"
+            )
+            y_lower = _axis_boundary(
+                audited_geometry.origin[1], y_index, resolution, "y lower boundary"
+            )
+            center_world_x = _derived_finite(
+                x_lower + 0.5 * resolution, "cell center x"
+            )
+            center_world_y = _derived_finite(
+                y_lower + 0.5 * resolution, "cell center y"
+            )
+            dx = _derived_finite(center_world_x - mean.x, "cell center dx")
+            dy = _derived_finite(center_world_y - mean.y, "cell center dy")
+            distance_sq = _derived_finite(dx * dx + dy * dy, "cell distance squared")
+            if mass > 0.0:
+                cell = Cell(x_index, y_index)
+                item = LandingCellMassV2(
+                    cell=cell,
+                    probability_mass=mass,
+                    in_bounds=(
+                        0 <= x_index < audited_geometry.width
+                        and 0 <= y_index < audited_geometry.height
+                    ),
                 )
-                y_mass = _axis_interval_mass(
-                    y_index,
-                    audited_geometry.origin[1],
-                    resolution,
-                    mean.y,
-                    sigma,
-                    "y",
-                )
-                mass = _derived_finite(x_mass * y_mass, "cell probability mass")
-                x_lower = _axis_boundary(
-                    audited_geometry.origin[0], x_index, resolution, "x lower boundary"
-                )
-                y_lower = _axis_boundary(
-                    audited_geometry.origin[1], y_index, resolution, "y lower boundary"
-                )
-                center_world_x = _derived_finite(
-                    x_lower + 0.5 * resolution, "cell center x"
-                )
-                center_world_y = _derived_finite(
-                    y_lower + 0.5 * resolution, "cell center y"
-                )
-                dx = _derived_finite(center_world_x - mean.x, "cell center dx")
-                dy = _derived_finite(center_world_y - mean.y, "cell center dy")
-                distance_sq = _derived_finite(dx * dx + dy * dy, "cell distance squared")
-                if mass > 0.0:
-                    cell = Cell(x_index, y_index)
-                    item = LandingCellMassV2(
-                        cell=cell,
-                        probability_mass=mass,
-                        in_bounds=(
-                            0 <= x_index < audited_geometry.width
-                            and 0 <= y_index < audited_geometry.height
-                        ),
-                    )
-                    evaluated.append((mass, distance_sq, y_index, x_index, item))
+                evaluated.append((mass, distance_sq, y_index, x_index, item))
 
         if radius != prefix_evaluation_radius and radius != final_radius:
             radius += 1
