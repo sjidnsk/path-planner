@@ -1,16 +1,22 @@
 from dataclasses import FrozenInstanceError, fields
-from math import nextafter, pi, sin
+from math import fsum, nextafter, pi, sin
 
 import pytest
 
-from path_planner.core.models import Cell
+import path_planner.v2.ballistics as ballistics_module
+from path_planner.core.models import Cell, WorldPoint
 from path_planner.v2.ballistics import (
     MAX_BALLISTIC_SAMPLES_V2,
+    MAX_LANDING_ZONE_CANDIDATES_V2,
     BallisticSampleV2,
     BallisticStartV2,
     LandingCellMassV2,
+    landing_zone_cells,
+    normal_interval_mass,
     sample_ballistic_arc,
 )
+from path_planner.v2.serialization import canonical_json_bytes
+from path_planner.v2.terrain import FineGridGeometryV2
 
 
 def test_ballistic_dataclasses_freeze_exact_public_fields() -> None:
@@ -171,3 +177,162 @@ def test_landing_cell_mass_rejects_forged_cell_with_deleted_field(
     object.__delattr__(cell, field)
     with pytest.raises(TypeError, match="cell.*field"):
         LandingCellMassV2(cell, 0.5, True)
+
+
+@pytest.mark.parametrize(
+    ("lo", "hi", "expected"),
+    [
+        (-1.0, 1.0, 0.6826894921370859),
+        (8.0, 9.0, 6.219831985865866e-16),
+        (9.0, 10.0, 1.1285122074236006e-19),
+    ],
+)
+def test_normal_interval_mass_is_stable_in_center_and_far_tail(
+    lo: float,
+    hi: float,
+    expected: float,
+) -> None:
+    assert normal_interval_mass(lo, hi, 0.0, 1.0) == pytest.approx(
+        expected, rel=1.0e-14, abs=0.0
+    )
+
+
+def test_normal_interval_mass_zero_width_symmetry_and_translation() -> None:
+    assert normal_interval_mass(2.0, 2.0, 1.0, 0.5) == 0.0
+    left = normal_interval_mass(-1.5, -0.5, -1.0, 0.25)
+    right = normal_interval_mass(0.5, 1.5, 1.0, 0.25)
+    translated = normal_interval_mass(8.5, 9.5, 9.0, 0.25)
+    assert left == right == translated
+
+
+@pytest.mark.parametrize(
+    ("values", "error", "message"),
+    [
+        ((1.0, 0.0, 0.0, 1.0), ValueError, "lo.*hi"),
+        ((0.0, 1.0, 0.0, 0.0), ValueError, "sigma"),
+        ((0.0, 1.0, 0.0, True), TypeError, "sigma"),
+        ((0.0, float("inf"), 0.0, 1.0), ValueError, "hi.*finite"),
+    ],
+)
+def test_normal_interval_mass_rejects_invalid_contracts(values, error, message) -> None:
+    with pytest.raises(error, match=message):
+        normal_interval_mass(*values)
+
+
+def _landing_key(item: LandingCellMassV2, geometry: FineGridGeometryV2, mean: WorldPoint):
+    center_x = geometry.origin[0] + (item.cell.x + 0.5) * geometry.resolution_m
+    center_y = geometry.origin[1] + (item.cell.y + 0.5) * geometry.resolution_m
+    distance_sq = (center_x - mean.x) ** 2 + (center_y - mean.y) ** 2
+    return (-item.probability_mass, distance_sq, item.cell.y, item.cell.x)
+
+
+def test_landing_zone_is_shortest_global_raw_mass_prefix() -> None:
+    geometry = FineGridGeometryV2(5, 5, origin=(-1.25, -1.25))
+    mean = WorldPoint(0.0, 0.0)
+    threshold = 0.99
+    zone = landing_zone_cells(mean, 0.2, threshold, geometry)
+
+    assert type(zone) is tuple
+    assert zone == tuple(sorted(zone, key=lambda item: _landing_key(item, geometry, mean)))
+    masses = tuple(item.probability_mass for item in zone)
+    assert fsum(masses) >= threshold
+    assert fsum(masses[:-1]) < threshold
+    for item in zone:
+        x_lo = geometry.origin[0] + item.cell.x * geometry.resolution_m
+        y_lo = geometry.origin[1] + item.cell.y * geometry.resolution_m
+        expected = normal_interval_mass(x_lo, x_lo + 0.5, mean.x, 0.2) * normal_interval_mass(
+            y_lo, y_lo + 0.5, mean.y, 0.2
+        )
+        assert item.probability_mass == expected
+        assert item.in_bounds is geometry.in_bounds(item.cell)
+
+
+def test_landing_zone_boundary_ties_use_distance_y_x_order() -> None:
+    geometry = FineGridGeometryV2(4, 4)
+    zone = landing_zone_cells(WorldPoint(1.0, 1.0), 0.05, 0.99, geometry)
+    assert tuple(item.cell for item in zone) == (
+        Cell(1, 1),
+        Cell(2, 1),
+        Cell(1, 2),
+        Cell(2, 2),
+    )
+
+
+def test_landing_zone_retains_oob_mass_without_renormalizing() -> None:
+    geometry = FineGridGeometryV2(1, 1)
+    zone = landing_zone_cells(WorldPoint(0.5, 0.5), 0.4, 0.99, geometry)
+    in_bounds_mass = fsum(item.probability_mass for item in zone if item.in_bounds)
+    assert any(item.in_bounds is False for item in zone)
+    assert in_bounds_mass < 0.99
+    assert fsum(item.probability_mass for item in zone) >= 0.99
+
+
+def test_landing_zone_is_byte_stable_and_recomputes_disclosure_flags() -> None:
+    geometry = FineGridGeometryV2(3, 3, origin=(-0.5, -0.5))
+    first = landing_zone_cells(WorldPoint(0.25, 0.25), 0.17, 0.99, geometry)
+    second = landing_zone_cells(WorldPoint(0.25, 0.25), 0.17, 0.99, geometry)
+    assert canonical_json_bytes(first) == canonical_json_bytes(second)
+    assert tuple(item.in_bounds for item in first) == tuple(
+        geometry.in_bounds(item.cell) for item in first
+    )
+
+
+def test_landing_zone_handles_legal_extremes_or_hits_public_cap(monkeypatch) -> None:
+    geometry = FineGridGeometryV2(2, 2)
+    one = landing_zone_cells(
+        WorldPoint(0.25, 0.25),
+        1.0e-6,
+        nextafter(1.0, 0.0),
+        geometry,
+    )
+    assert one == (LandingCellMassV2(Cell(0, 0), 1.0, True),)
+
+    assert MAX_LANDING_ZONE_CANDIDATES_V2 == 1_000_000
+    monkeypatch.setattr(ballistics_module, "MAX_LANDING_ZONE_CANDIDATES_V2", 9)
+    with pytest.raises(ValueError, match="candidate.*9"):
+        landing_zone_cells(WorldPoint(0.25, 0.25), 5.0, 0.99, geometry)
+
+
+def test_landing_zone_reaudits_forged_exact_outer_objects() -> None:
+    mean = WorldPoint(0.25, 0.25)
+    object.__setattr__(mean, "x", float("nan"))
+    with pytest.raises(ValueError, match="mean_xy.x.*finite"):
+        landing_zone_cells(mean, 0.1, 0.99, FineGridGeometryV2(2, 2))
+
+    geometry = FineGridGeometryV2(2, 2)
+    object.__setattr__(geometry, "width", True)
+    with pytest.raises(TypeError, match="geometry.width.*exact int"):
+        landing_zone_cells(WorldPoint(0.25, 0.25), 0.1, 0.99, geometry)
+
+
+@pytest.mark.parametrize("field", ("x", "y"))
+def test_landing_zone_rejects_forged_mean_with_deleted_field(field: str) -> None:
+    mean = WorldPoint(0.25, 0.25)
+    object.__delattr__(mean, field)
+    with pytest.raises(TypeError, match="mean_xy.*field"):
+        landing_zone_cells(mean, 0.1, 0.99, FineGridGeometryV2(2, 2))
+
+
+@pytest.mark.parametrize(
+    "field", ("width", "height", "origin", "frame_id", "resolution_m")
+)
+def test_landing_zone_rejects_forged_geometry_with_deleted_field(field: str) -> None:
+    geometry = FineGridGeometryV2(2, 2)
+    object.__delattr__(geometry, field)
+    with pytest.raises(TypeError, match="geometry.*field"):
+        landing_zone_cells(WorldPoint(0.25, 0.25), 0.1, 0.99, geometry)
+
+
+@pytest.mark.parametrize(
+    ("sigma", "threshold", "error"),
+    [
+        (0.0, 0.99, ValueError),
+        (True, 0.99, TypeError),
+        (0.1, 0.0, ValueError),
+        (0.1, 1.0, ValueError),
+        (0.1, float("nan"), ValueError),
+    ],
+)
+def test_landing_zone_rejects_invalid_probability_inputs(sigma, threshold, error) -> None:
+    with pytest.raises(error):
+        landing_zone_cells(WorldPoint(0.25, 0.25), sigma, threshold, FineGridGeometryV2(2, 2))
