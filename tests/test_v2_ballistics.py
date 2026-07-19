@@ -1,5 +1,5 @@
 from dataclasses import FrozenInstanceError, fields
-from math import fsum, nextafter, pi, sin
+from math import fsum, nextafter, pi, sin, ulp
 
 import pytest
 
@@ -83,10 +83,70 @@ def test_sample_ballistic_arc_never_exceeds_dt_at_a_float_boundary() -> None:
         dt_s,
     )
     assert samples[-1].time_s == 1.1
-    assert all(
-        right.time_s - left.time_s <= dt_s
-        for left, right in zip(samples, samples[1:])
-    )
+    assert len(samples) == 13
+
+    times = tuple(sample.time_s for sample in samples)
+    assert times[:3] == (0.0, dt_s, 2.0 * dt_s)
+    for index, time_s in enumerate(times[1:-1], start=1):
+        nominal_time = index * dt_s
+        # Four local ULPs permit only representational correction, not a
+        # global repartition of the cadence across all intervals.
+        assert abs(time_s - nominal_time) <= 4.0 * ulp(nominal_time)
+
+    gaps = tuple(right - left for left, right in zip(times, times[1:]))
+    assert all(gap <= dt_s for gap in gaps)
+    assert all(abs(gap - dt_s) <= 16.0 * ulp(dt_s) for gap in gaps[:-1])
+    assert gaps[-1] < 0.5 * dt_s
+
+
+@pytest.mark.parametrize(
+    ("speed_mps", "elevation_rad", "g_mps2", "reason"),
+    [
+        (nextafter(0.0, 1.0), pi / 6.0, 1.62, "vertical speed"),
+        (1.0e-200, pi / 4.0, 1.0e200, "vertical speed / gravity"),
+    ],
+)
+def test_sample_ballistic_arc_rejects_positive_derived_underflow(
+    speed_mps: float,
+    elevation_rad: float,
+    g_mps2: float,
+    reason: str,
+) -> None:
+    with pytest.raises(ValueError, match=rf"{reason}.*representable"):
+        sample_ballistic_arc(
+            BallisticStartV2(0.0, 0.0, 0.0),
+            speed_mps,
+            elevation_rad,
+            0.0,
+            g_mps2,
+            1.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "start",
+    [
+        BallisticStartV2(1.0e308, 0.0, 0.0),
+        BallisticStartV2(0.0, 0.0, 1.0e308),
+    ],
+)
+def test_sample_ballistic_arc_rejects_absorbed_nonzero_endpoint_offset(
+    start: BallisticStartV2,
+) -> None:
+    with pytest.raises(ValueError, match="representability"):
+        sample_ballistic_arc(start, 3.0, pi / 4.0, 0.0, 1.62, 0.25)
+
+
+def test_sample_ballistic_arc_rejects_absorbed_nonzero_interior_offset() -> None:
+    with pytest.raises(ValueError, match="sample x_m.*representability"):
+        sample_ballistic_arc(
+            BallisticStartV2(1.0e16, 0.0, 0.0),
+            3.0,
+            pi / 4.0,
+            0.0,
+            1.62,
+            0.1,
+        )
 
 
 @pytest.mark.parametrize(
@@ -318,6 +378,40 @@ def test_landing_zone_delays_global_prefix_work_until_sparse_checkpoints(
         )
 
     assert prefix_scan_sizes == [1, 9, 49, 225]
+
+
+def test_landing_zone_visits_each_generated_perimeter_cell_once(
+    monkeypatch,
+) -> None:
+    generated_cells: list[tuple[int, int]] = []
+    original = ballistics_module._iter_square_perimeter_cells
+
+    def tracking_perimeter(
+        center_x: int, center_y: int, radius: int
+    ):
+        for coordinates in original(center_x, center_y, radius):
+            generated_cells.append(coordinates)
+            yield coordinates
+
+    monkeypatch.setattr(ballistics_module, "MAX_LANDING_ZONE_CANDIDATES_V2", 49)
+    monkeypatch.setattr(
+        ballistics_module, "_iter_square_perimeter_cells", tracking_perimeter
+    )
+    with pytest.raises(ValueError, match="candidate.*49"):
+        landing_zone_cells(
+            WorldPoint(0.25, 0.25),
+            50.0,
+            0.99,
+            FineGridGeometryV2(2, 2),
+        )
+
+    assert len(generated_cells) == 49
+    assert len(set(generated_cells)) == 49
+    assert set(generated_cells) == {
+        (x_index, y_index)
+        for y_index in range(-3, 4)
+        for x_index in range(-3, 4)
+    }
 
 
 def test_landing_zone_reaudits_forged_exact_outer_objects() -> None:
