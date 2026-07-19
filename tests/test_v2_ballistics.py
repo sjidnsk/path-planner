@@ -1,5 +1,5 @@
 from dataclasses import FrozenInstanceError, fields
-from math import fsum, nextafter, pi, sin, ulp
+from math import acos, asin, cos, fsum, nextafter, pi, sin, ulp
 
 import pytest
 
@@ -97,6 +97,141 @@ def test_sample_ballistic_arc_never_exceeds_dt_at_a_float_boundary() -> None:
     assert all(gap <= dt_s for gap in gaps)
     assert all(abs(gap - dt_s) <= 16.0 * ulp(dt_s) for gap in gaps[:-1])
     assert gaps[-1] < 0.5 * dt_s
+
+
+def test_sample_ballistic_arc_keeps_independent_anchors_within_four_ulps() -> None:
+    flight_time = 1.675
+    dt_s = 0.1
+    speed_mps = flight_time * 1.62 / (2.0 * sin(pi / 4.0))
+    samples = sample_ballistic_arc(
+        BallisticStartV2(0.0, 0.0, 0.0),
+        speed_mps,
+        pi / 4.0,
+        0.0,
+        1.62,
+        dt_s,
+    )
+
+    times = tuple(sample.time_s for sample in samples)
+    assert times[-1] == flight_time
+    assert all(left < right for left, right in zip(times, times[1:]))
+    assert all(right - left <= dt_s for left, right in zip(times, times[1:]))
+    for index in range(1, 17):
+        nominal_anchor = index * dt_s
+        assert any(
+            abs(time_s - nominal_anchor) <= 4.0 * ulp(nominal_anchor)
+            for time_s in times[1:-1]
+        )
+
+
+def test_sample_ballistic_arc_inserts_bounded_repairs_for_valid_schedule() -> None:
+    flight_time = 1.7
+    dt_s = 0.1
+    speed_mps = flight_time * 1.62 / (2.0 * sin(pi / 4.0))
+    samples = sample_ballistic_arc(
+        BallisticStartV2(0.0, 0.0, 0.0),
+        speed_mps,
+        pi / 4.0,
+        0.0,
+        1.62,
+        dt_s,
+    )
+
+    times = tuple(sample.time_s for sample in samples)
+    assert times[-1] == flight_time
+    assert len(times) > 18
+    assert all(left < right for left, right in zip(times, times[1:]))
+    assert all(right - left <= dt_s for left, right in zip(times, times[1:]))
+    for index in range(1, 17):
+        nominal_anchor = index * dt_s
+        assert any(
+            abs(time_s - nominal_anchor) <= 4.0 * ulp(nominal_anchor)
+            for time_s in times[1:-1]
+        )
+
+
+def test_sample_ballistic_arc_counts_repairs_against_sample_cap(monkeypatch) -> None:
+    flight_time = 1.7
+    speed_mps = flight_time * 1.62 / (2.0 * sin(pi / 4.0))
+    monkeypatch.setattr(ballistics_module, "MAX_BALLISTIC_SAMPLES_V2", 18)
+
+    with pytest.raises(ValueError, match="sample_count.*18"):
+        sample_ballistic_arc(
+            BallisticStartV2(0.0, 0.0, 0.0),
+            speed_mps,
+            pi / 4.0,
+            0.0,
+            1.62,
+            0.1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("axis", "azimuth_rad"),
+    [
+        ("x", acos(0.25)),
+        ("y", asin(0.25)),
+    ],
+)
+def test_sample_ballistic_arc_rejects_direction_product_underflow(
+    axis: str,
+    azimuth_rad: float,
+) -> None:
+    minimum_subnormal = nextafter(0.0, 1.0)
+    speed_mps = 2.0 * minimum_subnormal
+    horizontal_speed = speed_mps * cos(pi / 3.0)
+    direction_factor = cos(azimuth_rad) if axis == "x" else sin(azimuth_rad)
+    assert horizontal_speed == minimum_subnormal
+    assert direction_factor == 0.25
+    assert horizontal_speed * direction_factor == 0.0
+
+    with pytest.raises(ValueError, match=rf"{axis} velocity.*representability"):
+        sample_ballistic_arc(
+            BallisticStartV2(0.0, 0.0, 0.0),
+            speed_mps,
+            pi / 3.0,
+            azimuth_rad,
+            2.0 * minimum_subnormal,
+            2.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("axis", "azimuth_rad"),
+    [
+        ("x", pi / 3.0),
+        ("y", pi / 6.0),
+    ],
+)
+def test_sample_ballistic_arc_rejects_displacement_product_underflow(
+    axis: str,
+    azimuth_rad: float,
+) -> None:
+    minimum_subnormal = nextafter(0.0, 1.0)
+    speed_mps = 6.0 * minimum_subnormal
+    elevation_rad = acos(0.25)
+    horizontal_speed = speed_mps * cos(elevation_rad)
+    velocity_component = horizontal_speed * (
+        cos(azimuth_rad) if axis == "x" else sin(azimuth_rad)
+    )
+    vertical_speed = speed_mps * sin(elevation_rad)
+    gravity = 24.0 * minimum_subnormal
+    flight_time = 2.0 * (vertical_speed / gravity)
+    assert velocity_component == minimum_subnormal
+    assert flight_time == 0.5
+    assert velocity_component * flight_time == 0.0
+
+    with pytest.raises(
+        ValueError, match=rf"landing {axis} displacement.*representability"
+    ):
+        sample_ballistic_arc(
+            BallisticStartV2(0.0, 0.0, 0.0),
+            speed_mps,
+            elevation_rad,
+            azimuth_rad,
+            gravity,
+            0.5,
+        )
 
 
 @pytest.mark.parametrize(
