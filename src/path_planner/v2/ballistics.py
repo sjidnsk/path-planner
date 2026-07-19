@@ -14,6 +14,7 @@ from math import (
     pi,
     sin,
     sqrt,
+    ulp,
 )
 from numbers import Real
 
@@ -84,11 +85,30 @@ def _interior_sample_times(
     interval_count: int,
     max_sample_count: int,
 ) -> tuple[float, ...]:
-    repair_budget = max_sample_count - (interval_count + 1)
+    exact_sample_lower_bound = interval_count + 1
+    omits_endpoint_collision = False
+    if interval_count > 1:
+        last_nominal = _derived_finite(
+            float(interval_count - 1) * dt_s,
+            "sample time_s",
+        )
+        omits_endpoint_collision = (
+            abs(last_nominal - flight_time)
+            <= _MAX_SAMPLE_TIME_ULP_CORRECTIONS * ulp(last_nominal)
+        )
+    # The exact endpoint owns a colliding final anchor, so that omitted
+    # interior slot remains available to one bounded repair.
+    repair_budget = (
+        max_sample_count
+        - exact_sample_lower_bound
+        + int(omits_endpoint_collision)
+    )
     times: list[float] = []
     previous = 0.0
     for index in range(1, interval_count):
         nominal = _derived_finite(float(index) * dt_s, "sample time_s")
+        if omits_endpoint_collision and index == interval_count - 1:
+            continue
         candidate = nominal
         for correction_count in range(_MAX_SAMPLE_TIME_ULP_CORRECTIONS + 1):
             if (
@@ -120,7 +140,10 @@ def _interior_sample_times(
         times.append(candidate)
         previous = candidate
 
-    if flight_time - previous > dt_s:
+    if (
+        flight_time - previous > dt_s
+        or len(times) + 2 < exact_sample_lower_bound
+    ):
         repair = _bounded_local_repair(previous, flight_time, dt_s)
         if repair is None:
             raise ValueError("sample time_s failed representability")
@@ -131,6 +154,11 @@ def _interior_sample_times(
         previous = repair
     if not previous < flight_time or flight_time - previous > dt_s:
         raise ValueError("sample time_s failed representability")
+    actual_sample_count = len(times) + 2
+    if actual_sample_count < exact_sample_lower_bound:
+        raise ValueError("sample_count must satisfy exact interval lower bound")
+    if actual_sample_count > max_sample_count:
+        raise ValueError(f"sample_count must not exceed {max_sample_count}")
     return tuple(times)
 
 
@@ -139,22 +167,31 @@ def _bounded_local_repair(
     target: float,
     dt_s: float,
 ) -> float | None:
-    """Find one bridge point using a fixed four-ULP local search."""
-    center = _derived_finite(target - dt_s, "sample repair time_s")
-    candidates = [center]
-    lower = center
-    upper = center
-    for _ in range(_MAX_SAMPLE_TIME_ULP_CORRECTIONS):
-        upper = nextafter(upper, float("inf"))
-        lower = nextafter(lower, float("-inf"))
-        candidates.extend((upper, lower))
-    for candidate in candidates:
-        if (
-            previous < candidate < target
-            and candidate - previous <= dt_s
-            and target - candidate <= dt_s
-        ):
-            return candidate
+    """Find one bridge around step/endpoint bounds with fixed four-ULP searches."""
+    centers = (
+        previous + dt_s,
+        target - dt_s,
+        nextafter(previous, float("inf")),
+        nextafter(target, float("-inf")),
+    )
+    for raw_center in centers:
+        if not isfinite(raw_center):
+            continue
+        center = _derived_finite(raw_center, "sample repair time_s")
+        candidates = [center]
+        lower = center
+        upper = center
+        for _ in range(_MAX_SAMPLE_TIME_ULP_CORRECTIONS):
+            lower = nextafter(lower, float("-inf"))
+            upper = nextafter(upper, float("inf"))
+            candidates.extend((lower, upper))
+        for candidate in candidates:
+            if (
+                previous < candidate < target
+                and candidate - previous <= dt_s
+                and target - candidate <= dt_s
+            ):
+                return candidate
     return None
 
 
