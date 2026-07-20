@@ -396,3 +396,64 @@ class _HopperExactIntegerArenaV2:
             self._live_integer_slots -= 1
         _require_canonical_resource_authority_v2(self._authority)
         return result
+
+    def consume_admitted_integers(
+        self,
+        *,
+        result_bit_bounds: tuple[int, ...],
+        operation: Callable[[], tuple[int, ...]],
+        consumer: Callable[[tuple[int, ...]], _T],
+    ) -> _T:
+        _require_canonical_resource_authority_v2(self._authority)
+        if type(result_bit_bounds) is not tuple or not result_bit_bounds:
+            raise ValueError("hopper_numeric_contract_mismatch")
+        if any(
+            type(bit_bound) is not int
+            or bit_bound <= 0
+            or bit_bound > self._authority.max_exact_integer_bits
+            for bit_bound in result_bit_bounds
+        ):
+            raise ValueError("hopper_numeric_contract_mismatch")
+        if not callable(operation) or not callable(consumer):
+            raise ValueError("hopper_numeric_contract_mismatch")
+
+        required_slots = len(result_bit_bounds)
+        available_slots = (
+            self._authority.max_exact_live_integer_slots
+            - self._live_integer_slots
+        )
+        if required_slots > available_slots:
+            raise ValueError("hopper_numeric_contract_mismatch")
+
+        self._live_integer_slots += required_slots
+        if self._live_integer_slots > self._peak_live_integer_slots:
+            self._peak_live_integer_slots = self._live_integer_slots
+        try:
+            try:
+                values = operation()
+            except (KeyboardInterrupt, MemoryError, SystemExit):
+                raise
+            except Exception:
+                _require_canonical_resource_authority_v2(self._authority)
+                raise
+
+            _require_canonical_resource_authority_v2(self._authority)
+            if type(values) is not tuple or len(values) != required_slots:
+                raise ValueError("hopper_numeric_contract_mismatch")
+            if any(
+                type(value) is not int or value.bit_length() > bit_bound
+                for value, bit_bound in zip(values, result_bit_bounds, strict=True)
+            ):
+                raise ValueError("hopper_numeric_contract_mismatch")
+
+            try:
+                result = consumer(values)
+            except (KeyboardInterrupt, MemoryError, SystemExit):
+                raise
+            except Exception:
+                _require_canonical_resource_authority_v2(self._authority)
+                raise
+            _require_canonical_resource_authority_v2(self._authority)
+            return result
+        finally:
+            self._live_integer_slots -= required_slots
