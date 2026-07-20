@@ -455,6 +455,23 @@ def _axis_boundary(origin: float, index: int, resolution: float, name: str) -> f
     return _derived_finite(origin + offset, name)
 
 
+def _axis_cell_center(
+    origin: float,
+    index: int,
+    resolution: float,
+    axis: str,
+) -> float:
+    lower = _axis_boundary(origin, index, resolution, f"{axis} lower boundary")
+    upper = _axis_boundary(origin, index + 1, resolution, f"{axis} upper boundary")
+    try:
+        center = origin + (index + 0.5) * resolution
+    except OverflowError:
+        raise ValueError(f"{axis} cell center must be representable") from None
+    if not isfinite(center) or not lower < center < upper:
+        raise ValueError(f"{axis} cell center must be representable")
+    return 0.0 if center == 0.0 else center
+
+
 def _axis_interval_mass(
     index: int,
     origin: float,
@@ -582,17 +599,11 @@ def landing_zone_cells(
                 "y",
             )
             mass = _derived_finite(x_mass * y_mass, "cell probability mass")
-            x_lower = _axis_boundary(
-                audited_geometry.origin[0], x_index, resolution, "x lower boundary"
+            center_world_x = _axis_cell_center(
+                audited_geometry.origin[0], x_index, resolution, "x"
             )
-            y_lower = _axis_boundary(
-                audited_geometry.origin[1], y_index, resolution, "y lower boundary"
-            )
-            center_world_x = _derived_finite(
-                x_lower + 0.5 * resolution, "cell center x"
-            )
-            center_world_y = _derived_finite(
-                y_lower + 0.5 * resolution, "cell center y"
+            center_world_y = _axis_cell_center(
+                audited_geometry.origin[1], y_index, resolution, "y"
             )
             dx = _derived_finite(center_world_x - mean.x, "cell center dx")
             dy = _derived_finite(center_world_y - mean.y, "cell center dy")
