@@ -257,6 +257,27 @@ def sample_ballistic_arc(
     g_mps2: float,
     dt_s: float,
 ) -> tuple[BallisticSampleV2, ...]:
+    return sample_ballistic_arc_capped_v2(
+        start,
+        speed_mps,
+        elevation_rad,
+        azimuth_rad,
+        g_mps2,
+        dt_s,
+        max_sample_count=MAX_BALLISTIC_SAMPLES_V2,
+    )
+
+
+def sample_ballistic_arc_capped_v2(
+    start: BallisticStartV2,
+    speed_mps: float,
+    elevation_rad: float,
+    azimuth_rad: float,
+    g_mps2: float,
+    dt_s: float,
+    *,
+    max_sample_count: int,
+) -> tuple[BallisticSampleV2, ...]:
     if type(start) is not BallisticStartV2:
         raise TypeError("start must be exact BallisticStartV2")
     try:
@@ -309,16 +330,18 @@ def sample_ballistic_arc(
 
     interval_count = _exact_positive_ratio_ceil(flight_time, dt)
     sample_count = interval_count + 1
-    if sample_count > MAX_BALLISTIC_SAMPLES_V2:
-        raise ValueError(
-            f"sample_count must not exceed {MAX_BALLISTIC_SAMPLES_V2}"
-        )
+    if type(max_sample_count) is not int:
+        raise TypeError("max_sample_count must be an exact int")
+    if max_sample_count <= 0:
+        raise ValueError("max_sample_count must be positive")
+    if sample_count > max_sample_count:
+        raise ValueError(f"sample_count must not exceed {max_sample_count}")
 
     interior_times = _interior_sample_times(
         flight_time,
         dt,
         interval_count,
-        MAX_BALLISTIC_SAMPLES_V2,
+        max_sample_count,
     )
 
     samples = [
@@ -539,15 +562,34 @@ def landing_zone_cells(
     probability_threshold: float,
     geometry: FineGridGeometryV2,
 ) -> tuple[LandingCellMassV2, ...]:
+    return landing_zone_cells_capped_v2(
+        mean_xy,
+        sigma_m,
+        probability_threshold,
+        geometry,
+        max_candidate_count=MAX_LANDING_ZONE_CANDIDATES_V2,
+    )
+
+
+def landing_zone_cells_capped_v2(
+    mean_xy: WorldPoint,
+    sigma_m: float,
+    probability_threshold: float,
+    geometry: FineGridGeometryV2,
+    *,
+    max_candidate_count: int,
+) -> tuple[LandingCellMassV2, ...]:
     mean = _audited_world_point(mean_xy)
     audited_geometry = _audited_geometry(geometry)
     sigma = _positive_real(sigma_m, "sigma_m")
     threshold = _finite_real(probability_threshold, "probability_threshold")
     if not 0.0 < threshold < 1.0:
         raise ValueError("probability_threshold must be in (0, 1)")
-    cap = MAX_LANDING_ZONE_CANDIDATES_V2
-    if type(cap) is not int or cap <= 0:
-        raise ValueError("candidate cap must be an exact positive int")
+    if type(max_candidate_count) is not int:
+        raise TypeError("max_candidate_count must be an exact int")
+    if max_candidate_count <= 0:
+        raise ValueError("max_candidate_count must be positive")
+    cap = max_candidate_count
     final_radius = (isqrt(cap) - 1) // 2
 
     resolution = audited_geometry.resolution_m
