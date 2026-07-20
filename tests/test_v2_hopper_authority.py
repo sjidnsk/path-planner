@@ -646,14 +646,21 @@ def test_exact_integer_cps_reserves_all_slots_through_consumer_and_releases() ->
     )
     assert parameters[0].kind is Parameter.POSITIONAL_OR_KEYWORD
     assert all(parameter.kind is Parameter.KEYWORD_ONLY for parameter in parameters[1:])
+    assert all(parameter.default is Parameter.empty for parameter in parameters)
 
-    observations: list[tuple[str, int, int, tuple[int, ...] | None]] = []
+    observations: list[tuple[str, int, int, bool | None, str | None]] = []
     produced = (0, -7, 255)
     semantic_result = {"opaque": [object()]}
 
     def operation() -> tuple[int, ...]:
         observations.append(
-            ("operation", arena.live_integer_slots, arena.peak_live_integer_slots, None)
+            (
+                "operation",
+                arena.live_integer_slots,
+                arena.peak_live_integer_slots,
+                None,
+                None,
+            )
         )
         return produced
 
@@ -663,7 +670,8 @@ def test_exact_integer_cps_reserves_all_slots_through_consumer_and_releases() ->
                 "consumer",
                 arena.live_integer_slots,
                 arena.peak_live_integer_slots,
-                values,
+                values is produced,
+                ",".join(str(value.bit_length()) for value in values),
             )
         )
         assert values is produced
@@ -675,8 +683,8 @@ def test_exact_integer_cps_reserves_all_slots_through_consumer_and_releases() ->
         consumer=consumer,
     ) is semantic_result
     assert observations == [
-        ("operation", 3, 3, None),
-        ("consumer", 3, 3, produced),
+        ("operation", 3, 3, None, None),
+        ("consumer", 3, 3, True, "0,3,8"),
     ]
     assert arena.live_integer_slots == 0
     assert arena.peak_live_integer_slots == 3
