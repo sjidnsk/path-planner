@@ -1,5 +1,6 @@
 from dataclasses import FrozenInstanceError, fields
 from importlib import import_module
+from inspect import Parameter, signature
 from math import ceil, pi
 
 import pytest
@@ -624,3 +625,494 @@ def test_neutral_resource_authority_adds_no_fixture_registry_or_package_export()
         assert "HOPPER_RESOURCE_AUTHORITY_V2" not in exports
         assert not hasattr(package, "HopperResourceAuthorityV2")
         assert not hasattr(package, "HOPPER_RESOURCE_AUTHORITY_V2")
+
+
+# This CPS entry point is only the atomic N-slot reservation, exact result-tuple
+# bit audit, and consumer-lifetime substrate for 11B2's operation-specific exact
+# kernel.  It does not authorize arbitrary callback arithmetic or itself prove
+# nonescape.  11B2 must use bound-deriving wrappers plus an AST gate for direct
+# generic/legacy/Fraction/escape paths; the sole Cell promotion is separately
+# frozen and transferred into the distinct-cell ledger.
+def test_exact_integer_cps_reserves_all_slots_through_consumer_and_releases() -> None:
+    module = _authority_module()
+    arena = module._HopperExactIntegerArenaV2(module.HOPPER_RESOURCE_AUTHORITY_V2)
+    method = module._HopperExactIntegerArenaV2.consume_admitted_integers
+    parameters = tuple(signature(method).parameters.values())
+    assert tuple(parameter.name for parameter in parameters) == (
+        "self",
+        "result_bit_bounds",
+        "operation",
+        "consumer",
+    )
+    assert parameters[0].kind is Parameter.POSITIONAL_OR_KEYWORD
+    assert all(parameter.kind is Parameter.KEYWORD_ONLY for parameter in parameters[1:])
+
+    observations: list[tuple[str, int, int, tuple[int, ...] | None]] = []
+    produced = (0, -7, 255)
+    semantic_result = {"opaque": [object()]}
+
+    def operation() -> tuple[int, ...]:
+        observations.append(
+            ("operation", arena.live_integer_slots, arena.peak_live_integer_slots, None)
+        )
+        return produced
+
+    def consumer(values: tuple[int, ...]):
+        observations.append(
+            (
+                "consumer",
+                arena.live_integer_slots,
+                arena.peak_live_integer_slots,
+                values,
+            )
+        )
+        assert values is produced
+        return semantic_result
+
+    assert arena.consume_admitted_integers(
+        result_bit_bounds=(1, 3, 262_144),
+        operation=operation,
+        consumer=consumer,
+    ) is semantic_result
+    assert observations == [
+        ("operation", 3, 3, None),
+        ("consumer", 3, 3, produced),
+    ]
+    assert arena.live_integer_slots == 0
+    assert arena.peak_live_integer_slots == 3
+
+    max_result_holder: list[tuple[int, ...]] = []
+
+    def max_bit_operation() -> tuple[int, ...]:
+        assert arena.live_integer_slots == 1
+        result = (1 << 262_143,)
+        assert result[0].bit_length() == 262_144
+        max_result_holder.append(result)
+        return result
+
+    def max_bit_consumer(values: tuple[int, ...]) -> str:
+        assert arena.live_integer_slots == 1
+        assert values is max_result_holder[0]
+        assert values[0].bit_length() == 262_144
+        max_result_holder.clear()
+        return "max-bit-result-consumed"
+
+    assert arena.consume_admitted_integers(
+        result_bit_bounds=(262_144,),
+        operation=max_bit_operation,
+        consumer=max_bit_consumer,
+    ) == "max-bit-result-consumed"
+    assert max_result_holder == []
+    assert arena.live_integer_slots == 0
+    assert arena.peak_live_integer_slots == 3
+
+
+def test_exact_integer_cps_rejects_invalid_bounds_count_and_callables_preoperation() -> None:
+    module = _authority_module()
+    arena = module._HopperExactIntegerArenaV2(module.HOPPER_RESOURCE_AUTHORITY_V2)
+    operation_calls = 0
+    consumer_calls = 0
+
+    class _BoundsTupleSubclass(tuple):
+        pass
+
+    def operation() -> tuple[int, ...]:
+        nonlocal operation_calls
+        operation_calls += 1
+        return (1,)
+
+    def consumer(_values: tuple[int, ...]) -> object:
+        nonlocal consumer_calls
+        consumer_calls += 1
+        return object()
+
+    invalid_bounds = (
+        [],
+        _BoundsTupleSubclass((1,)),
+        (),
+        (True,),
+        (_AuthorityIntSubclass(1),),
+        (_AuthorityIntCoercible(),),
+        (0,),
+        (-1,),
+        (262_145,),
+        tuple(1 for _ in range(129)),
+    )
+    for bounds in invalid_bounds:
+        with pytest.raises(ValueError, match="^hopper_numeric_contract_mismatch$"):
+            arena.consume_admitted_integers(
+                result_bit_bounds=bounds,
+                operation=operation,
+                consumer=consumer,
+            )
+
+    with pytest.raises(ValueError, match="^hopper_numeric_contract_mismatch$"):
+        arena.consume_admitted_integers(
+            result_bit_bounds=(1,),
+            operation=object(),
+            consumer=consumer,
+        )
+    with pytest.raises(ValueError, match="^hopper_numeric_contract_mismatch$"):
+        arena.consume_admitted_integers(
+            result_bit_bounds=(1,),
+            operation=operation,
+            consumer=object(),
+        )
+
+    assert operation_calls == 0
+    assert consumer_calls == 0
+    assert arena.live_integer_slots == 0
+    assert arena.peak_live_integer_slots == 0
+
+
+def test_exact_integer_cps_rejects_malformed_or_overbound_results_before_consumer() -> None:
+    module = _authority_module()
+    arena = module._HopperExactIntegerArenaV2(module.HOPPER_RESOURCE_AUTHORITY_V2)
+    consumer_calls = 0
+
+    class _ResultTupleSubclass(tuple):
+        pass
+
+    def consumer(_values: tuple[int, ...]) -> object:
+        nonlocal consumer_calls
+        consumer_calls += 1
+        return object()
+
+    cases = (
+        ((2,), lambda: [1]),
+        ((2,), lambda: _ResultTupleSubclass((1,))),
+        ((2,), lambda: ()),
+        ((2,), lambda: (1, 1)),
+        ((2,), lambda: (True,)),
+        ((2,), lambda: (_AuthorityIntSubclass(1),)),
+        ((3,), lambda: (8,)),
+        ((3,), lambda: (-8,)),
+        ((1, 2), lambda: (1, 4)),
+    )
+    for bounds, operation in cases:
+        with pytest.raises(ValueError, match="^hopper_numeric_contract_mismatch$"):
+            arena.consume_admitted_integers(
+                result_bit_bounds=bounds,
+                operation=operation,
+                consumer=consumer,
+            )
+        assert arena.live_integer_slots == 0
+
+    assert consumer_calls == 0
+    assert arena.peak_live_integer_slots == 2
+
+
+def test_exact_integer_cps_nested_slot_128_succeeds_and_slot_129_is_preoperation_rejected() -> None:
+    module = _authority_module()
+    arena = module._HopperExactIntegerArenaV2(module.HOPPER_RESOURCE_AUTHORITY_V2)
+    admitted_operations = 0
+    forbidden_operations = 0
+
+    def forbidden_operation() -> tuple[int, ...]:
+        nonlocal forbidden_operations
+        forbidden_operations += 1
+        return (0,)
+
+    def descend(remaining: int) -> object:
+        nonlocal admitted_operations
+        if remaining == 0:
+            assert arena.live_integer_slots == 128
+            with pytest.raises(ValueError, match="^hopper_numeric_contract_mismatch$"):
+                arena.consume_admitted_integers(
+                    result_bit_bounds=(1,),
+                    operation=forbidden_operation,
+                    consumer=lambda _values: object(),
+                )
+            assert arena.live_integer_slots == 128
+            return "slot-128-held"
+
+        def operation() -> tuple[int, ...]:
+            nonlocal admitted_operations
+            admitted_operations += 1
+            assert arena.live_integer_slots == 129 - remaining
+            return (0,)
+
+        return arena.consume_admitted_integers(
+            result_bit_bounds=(1,),
+            operation=operation,
+            consumer=lambda _values: descend(remaining - 1),
+        )
+
+    assert descend(128) == "slot-128-held"
+    assert admitted_operations == 128
+    assert forbidden_operations == 0
+    assert arena.live_integer_slots == 0
+    assert arena.peak_live_integer_slots == 128
+
+    outer_126 = tuple(0 for _ in range(126))
+    inner_2 = (0, 0)
+    multi_slot_observations: list[tuple[str, int]] = []
+
+    def consume_inner_at_128(_outer_values: tuple[int, ...]) -> str:
+        multi_slot_observations.append(("outer-126-consumer", arena.live_integer_slots))
+
+        def inner_operation() -> tuple[int, ...]:
+            multi_slot_observations.append(("inner-2-operation", arena.live_integer_slots))
+            return inner_2
+
+        def inner_consumer(_inner_values: tuple[int, ...]) -> str:
+            multi_slot_observations.append(("inner-2-consumer", arena.live_integer_slots))
+            return "inner-2-admitted"
+
+        result = arena.consume_admitted_integers(
+            result_bit_bounds=tuple(1 for _ in range(2)),
+            operation=inner_operation,
+            consumer=inner_consumer,
+        )
+        multi_slot_observations.append(("outer-126-resumed", arena.live_integer_slots))
+        return result
+
+    assert arena.consume_admitted_integers(
+        result_bit_bounds=tuple(1 for _ in range(126)),
+        operation=lambda: outer_126,
+        consumer=consume_inner_at_128,
+    ) == "inner-2-admitted"
+    assert multi_slot_observations == [
+        ("outer-126-consumer", 126),
+        ("inner-2-operation", 128),
+        ("inner-2-consumer", 128),
+        ("outer-126-resumed", 126),
+    ]
+    assert arena.live_integer_slots == 0
+
+    outer_127 = tuple(0 for _ in range(127))
+    rejected_inner_operations = 0
+
+    def reject_inner_at_129(_outer_values: tuple[int, ...]) -> str:
+        nonlocal rejected_inner_operations
+        assert arena.live_integer_slots == 127
+
+        def inner_operation() -> tuple[int, ...]:
+            nonlocal rejected_inner_operations
+            rejected_inner_operations += 1
+            return inner_2
+
+        with pytest.raises(ValueError, match="^hopper_numeric_contract_mismatch$"):
+            arena.consume_admitted_integers(
+                result_bit_bounds=(1, 1),
+                operation=inner_operation,
+                consumer=lambda _values: object(),
+            )
+        assert arena.live_integer_slots == 127
+        return "inner-2-rejected"
+
+    assert arena.consume_admitted_integers(
+        result_bit_bounds=tuple(1 for _ in range(127)),
+        operation=lambda: outer_127,
+        consumer=reject_inner_at_129,
+    ) == "inner-2-rejected"
+    assert rejected_inner_operations == 0
+    assert arena.live_integer_slots == 0
+    assert arena.peak_live_integer_slots == 128
+
+
+def test_exact_integer_cps_ordinary_exceptions_postseal_propagate_and_unwind() -> None:
+    module = _authority_module()
+    arena = module._HopperExactIntegerArenaV2(module.HOPPER_RESOURCE_AUTHORITY_V2)
+
+    class _OperationFailure(RuntimeError):
+        pass
+
+    class _ConsumerFailure(RuntimeError):
+        pass
+
+    operation_failure_consumer_calls = 0
+
+    def failed_operation() -> tuple[int, ...]:
+        assert arena.live_integer_slots == 2
+        raise _OperationFailure("operation failed")
+
+    def forbidden_operation_failure_consumer(_values: tuple[int, ...]) -> object:
+        nonlocal operation_failure_consumer_calls
+        operation_failure_consumer_calls += 1
+        return object()
+
+    with pytest.raises(_OperationFailure, match="operation failed"):
+        arena.consume_admitted_integers(
+            result_bit_bounds=(1, 1),
+            operation=failed_operation,
+            consumer=forbidden_operation_failure_consumer,
+        )
+    assert operation_failure_consumer_calls == 0
+    assert arena.live_integer_slots == 0
+
+    def failed_consumer(_values: tuple[int, ...]) -> object:
+        assert arena.live_integer_slots == 2
+        raise _ConsumerFailure("consumer failed")
+
+    with pytest.raises(_ConsumerFailure, match="consumer failed"):
+        arena.consume_admitted_integers(
+            result_bit_bounds=(1, 1),
+            operation=lambda: (0, 1),
+            consumer=failed_consumer,
+        )
+    assert arena.live_integer_slots == 0
+    assert arena.peak_live_integer_slots == 2
+
+
+@pytest.mark.parametrize(
+    "critical_type",
+    (KeyboardInterrupt, SystemExit, MemoryError),
+    ids=("keyboard-interrupt", "system-exit", "memory-error"),
+)
+def test_exact_integer_cps_critical_exceptions_propagate_and_unwind(
+    critical_type,
+) -> None:
+    module = _authority_module()
+    arena = module._HopperExactIntegerArenaV2(module.HOPPER_RESOURCE_AUTHORITY_V2)
+    operation_failure_consumer_calls = 0
+
+    def failed_operation() -> tuple[int, ...]:
+        assert arena.live_integer_slots == 3
+        raise critical_type()
+
+    def forbidden_operation_failure_consumer(_values: tuple[int, ...]) -> object:
+        nonlocal operation_failure_consumer_calls
+        operation_failure_consumer_calls += 1
+        return object()
+
+    with pytest.raises(critical_type):
+        arena.consume_admitted_integers(
+            result_bit_bounds=(1, 1, 1),
+            operation=failed_operation,
+            consumer=forbidden_operation_failure_consumer,
+        )
+    assert operation_failure_consumer_calls == 0
+    assert arena.live_integer_slots == 0
+
+    def failed_consumer(_values: tuple[int, ...]) -> object:
+        assert arena.live_integer_slots == 3
+        raise critical_type()
+
+    with pytest.raises(critical_type):
+        arena.consume_admitted_integers(
+            result_bit_bounds=(1, 1, 1),
+            operation=lambda: (0, 0, 0),
+            consumer=failed_consumer,
+        )
+    assert arena.live_integer_slots == 0
+    assert arena.peak_live_integer_slots == 3
+
+
+def test_exact_integer_cps_authority_drift_overrides_operation_and_consumer_semantics() -> None:
+    module = _authority_module()
+    authority = module.HOPPER_RESOURCE_AUTHORITY_V2
+    arena = module._HopperExactIntegerArenaV2(authority)
+    canonical_bits = authority.max_exact_integer_bits
+    consumer_calls = 0
+
+    def drifting_operation() -> tuple[int, ...]:
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits + 1)
+        return (1,)
+
+    def forbidden_consumer(_values: tuple[int, ...]) -> object:
+        nonlocal consumer_calls
+        consumer_calls += 1
+        return object()
+
+    try:
+        with pytest.raises(ValueError, match="^hopper_authority_contract_mismatch$"):
+            arena.consume_admitted_integers(
+                result_bit_bounds=(1,),
+                operation=drifting_operation,
+                consumer=forbidden_consumer,
+            )
+    finally:
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits)
+    assert consumer_calls == 0
+    assert arena.live_integer_slots == 0
+
+    class _LosingOperationFailure(RuntimeError):
+        pass
+
+    def drifting_failed_operation() -> tuple[int, ...]:
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits + 1)
+        raise _LosingOperationFailure("authority drift must win")
+
+    try:
+        with pytest.raises(ValueError, match="^hopper_authority_contract_mismatch$"):
+            arena.consume_admitted_integers(
+                result_bit_bounds=(1,),
+                operation=drifting_failed_operation,
+                consumer=forbidden_consumer,
+            )
+    finally:
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits)
+    assert consumer_calls == 0
+    assert arena.live_integer_slots == 0
+
+    def drifting_malformed_operation():
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits + 1)
+        return [1]
+
+    try:
+        with pytest.raises(ValueError, match="^hopper_authority_contract_mismatch$"):
+            arena.consume_admitted_integers(
+                result_bit_bounds=(1,),
+                operation=drifting_malformed_operation,
+                consumer=forbidden_consumer,
+            )
+    finally:
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits)
+    assert consumer_calls == 0
+    assert arena.live_integer_slots == 0
+
+    class _LosingConsumerFailure(RuntimeError):
+        pass
+
+    def drifting_consumer(_values: tuple[int, ...]) -> object:
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits + 1)
+        raise _LosingConsumerFailure("authority drift must win")
+
+    try:
+        with pytest.raises(ValueError, match="^hopper_authority_contract_mismatch$"):
+            arena.consume_admitted_integers(
+                result_bit_bounds=(1,),
+                operation=lambda: (1,),
+                consumer=drifting_consumer,
+            )
+    finally:
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits)
+    assert arena.live_integer_slots == 0
+
+    def drifting_returning_consumer(_values: tuple[int, ...]) -> object:
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits + 1)
+        return object()
+
+    try:
+        with pytest.raises(ValueError, match="^hopper_authority_contract_mismatch$"):
+            arena.consume_admitted_integers(
+                result_bit_bounds=(1,),
+                operation=lambda: (1,),
+                consumer=drifting_returning_consumer,
+            )
+    finally:
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits)
+    assert arena.live_integer_slots == 0
+
+    entry_operation_calls = 0
+
+    def forbidden_entry_operation() -> tuple[int, ...]:
+        nonlocal entry_operation_calls
+        entry_operation_calls += 1
+        return ()
+
+    object.__setattr__(authority, "max_exact_integer_bits", canonical_bits + 1)
+    try:
+        with pytest.raises(ValueError, match="^hopper_authority_contract_mismatch$"):
+            arena.consume_admitted_integers(
+                result_bit_bounds=(),
+                operation=forbidden_entry_operation,
+                consumer=forbidden_consumer,
+            )
+    finally:
+        object.__setattr__(authority, "max_exact_integer_bits", canonical_bits)
+    assert entry_operation_calls == 0
+    assert consumer_calls == 0
+    assert arena.live_integer_slots == 0
+    assert arena.peak_live_integer_slots == 1
