@@ -486,6 +486,75 @@ def test_landing_zone_boundary_ties_use_distance_y_x_order() -> None:
     )
 
 
+def test_landing_zone_uses_frozen_cell_center_order_for_equal_mass_ties() -> None:
+    geometry = FineGridGeometryV2(2, 2, origin=(-0.2, 0.0))
+    mean = WorldPoint(-0.95, 0.25)
+
+    result = landing_zone_cells(mean, 0.3, 0.4, geometry)
+
+    assert tuple(item.cell for item in result) == (Cell(-2, 0), Cell(-1, 0))
+    public_keys = tuple(
+        (
+            -item.probability_mass,
+            (
+                geometry.origin[0]
+                + (item.cell.x + 0.5) * geometry.resolution_m
+                - mean.x
+            )
+            ** 2
+            + (
+                geometry.origin[1]
+                + (item.cell.y + 0.5) * geometry.resolution_m
+                - mean.y
+            )
+            ** 2,
+            item.cell.y,
+            item.cell.x,
+        )
+        for item in result
+    )
+    assert public_keys == tuple(sorted(public_keys))
+
+
+def test_landing_zone_rejects_absorbed_cell_center_offset() -> None:
+    origin = float(2**51)
+    geometry = FineGridGeometryV2(2, 2, origin=(origin, origin))
+
+    with pytest.raises(ValueError, match="cell center.*representable"):
+        landing_zone_cells(WorldPoint(origin, origin), 0.1, 0.4, geometry)
+
+
+@pytest.mark.parametrize(
+    ("origin", "mean"),
+    [
+        ((0.5, -0.5), WorldPoint(0.75, -0.25)),
+        ((-1.0, 1.5), WorldPoint(-0.25, 2.25)),
+        ((1.5, 2.0), WorldPoint(2.75, 3.25)),
+    ],
+)
+def test_landing_zone_public_keys_are_reconstructable_for_nonzero_origins(
+    origin: tuple[float, float],
+    mean: WorldPoint,
+) -> None:
+    geometry = FineGridGeometryV2(3, 3, origin=origin)
+
+    result = landing_zone_cells(mean, 0.3, 0.9, geometry)
+
+    public_keys = []
+    for item in result:
+        center_x = origin[0] + (item.cell.x + 0.5) * geometry.resolution_m
+        center_y = origin[1] + (item.cell.y + 0.5) * geometry.resolution_m
+        public_keys.append(
+            (
+                -item.probability_mass,
+                (center_x - mean.x) ** 2 + (center_y - mean.y) ** 2,
+                item.cell.y,
+                item.cell.x,
+            )
+        )
+    assert tuple(public_keys) == tuple(sorted(public_keys))
+
+
 def test_landing_zone_retains_oob_mass_without_renormalizing() -> None:
     geometry = FineGridGeometryV2(1, 1)
     zone = landing_zone_cells(WorldPoint(0.5, 0.5), 0.4, 0.99, geometry)
