@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError, fields
+from inspect import Parameter, signature
 from math import acos, asin, cos, fsum, nextafter, pi, sin, ulp
 
 import pytest
@@ -694,3 +695,284 @@ def test_landing_zone_rejects_forged_geometry_with_deleted_field(field: str) -> 
 def test_landing_zone_rejects_invalid_probability_inputs(sigma, threshold, error) -> None:
     with pytest.raises(error):
         landing_zone_cells(WorldPoint(0.25, 0.25), sigma, threshold, FineGridGeometryV2(2, 2))
+
+
+class _CapIntSubclass(int):
+    pass
+
+
+class _CapCoercible:
+    def __int__(self) -> int:
+        return 8
+
+
+def _ballistic_call_args() -> tuple[object, ...]:
+    return (
+        BallisticStartV2(0.0, 0.0, 0.5),
+        3.0,
+        pi / 4.0,
+        0.0,
+        1.62,
+        0.25,
+    )
+
+
+def _landing_call_args() -> tuple[object, ...]:
+    return (
+        WorldPoint(0.25, 0.25),
+        0.05,
+        0.99,
+        FineGridGeometryV2(4, 4),
+    )
+
+
+def test_capped_ballistic_helper_freezes_signature_output_and_legacy_delegation(
+    monkeypatch,
+) -> None:
+    capped = getattr(ballistics_module, "sample_ballistic_arc_capped_v2")
+    legacy_parameters = tuple(signature(sample_ballistic_arc).parameters.values())
+    capped_parameters = tuple(signature(capped).parameters.values())
+    assert tuple(parameter.name for parameter in legacy_parameters) == (
+        "start",
+        "speed_mps",
+        "elevation_rad",
+        "azimuth_rad",
+        "g_mps2",
+        "dt_s",
+    )
+    assert all(
+        parameter.kind is Parameter.POSITIONAL_OR_KEYWORD
+        and parameter.default is Parameter.empty
+        for parameter in legacy_parameters
+    )
+    assert tuple(parameter.name for parameter in capped_parameters) == (
+        "start",
+        "speed_mps",
+        "elevation_rad",
+        "azimuth_rad",
+        "g_mps2",
+        "dt_s",
+        "max_sample_count",
+    )
+    assert capped_parameters[:-1] == legacy_parameters
+    assert capped_parameters[-1].kind is Parameter.KEYWORD_ONLY
+    assert capped_parameters[-1].default is Parameter.empty
+    assert signature(capped).return_annotation == signature(
+        sample_ballistic_arc
+    ).return_annotation
+
+    args = _ballistic_call_args()
+    explicit = capped(*args, max_sample_count=MAX_BALLISTIC_SAMPLES_V2)
+    assert canonical_json_bytes(sample_ballistic_arc(*args)) == canonical_json_bytes(
+        explicit
+    )
+
+    sentinel = (BallisticSampleV2(0.0, 1.0, 2.0, 3.0),)
+    observed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_capped(*call_args, **call_kwargs):
+        observed.append((call_args, call_kwargs))
+        return sentinel
+
+    monkeypatch.setattr(
+        ballistics_module, "sample_ballistic_arc_capped_v2", fake_capped
+    )
+    assert sample_ballistic_arc(*args) is sentinel
+    assert observed == [(args, {"max_sample_count": MAX_BALLISTIC_SAMPLES_V2})]
+
+
+def test_capped_landing_helper_freezes_signature_output_and_legacy_delegation(
+    monkeypatch,
+) -> None:
+    capped = getattr(ballistics_module, "landing_zone_cells_capped_v2")
+    legacy_parameters = tuple(signature(landing_zone_cells).parameters.values())
+    capped_parameters = tuple(signature(capped).parameters.values())
+    assert tuple(parameter.name for parameter in legacy_parameters) == (
+        "mean_xy",
+        "sigma_m",
+        "probability_threshold",
+        "geometry",
+    )
+    assert all(
+        parameter.kind is Parameter.POSITIONAL_OR_KEYWORD
+        and parameter.default is Parameter.empty
+        for parameter in legacy_parameters
+    )
+    assert tuple(parameter.name for parameter in capped_parameters) == (
+        "mean_xy",
+        "sigma_m",
+        "probability_threshold",
+        "geometry",
+        "max_candidate_count",
+    )
+    assert capped_parameters[:-1] == legacy_parameters
+    assert capped_parameters[-1].kind is Parameter.KEYWORD_ONLY
+    assert capped_parameters[-1].default is Parameter.empty
+    assert signature(capped).return_annotation == signature(
+        landing_zone_cells
+    ).return_annotation
+
+    args = _landing_call_args()
+    explicit = capped(*args, max_candidate_count=MAX_LANDING_ZONE_CANDIDATES_V2)
+    assert canonical_json_bytes(landing_zone_cells(*args)) == canonical_json_bytes(
+        explicit
+    )
+
+    sentinel = (LandingCellMassV2(Cell(7, 8), 1.0, False),)
+    observed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_capped(*call_args, **call_kwargs):
+        observed.append((call_args, call_kwargs))
+        return sentinel
+
+    monkeypatch.setattr(ballistics_module, "landing_zone_cells_capped_v2", fake_capped)
+    assert landing_zone_cells(*args) is sentinel
+    assert observed == [
+        (args, {"max_candidate_count": MAX_LANDING_ZONE_CANDIDATES_V2})
+    ]
+
+
+def test_capped_ballistic_helper_rejects_non_exact_caps_before_materialization(
+    monkeypatch,
+) -> None:
+    capped = getattr(ballistics_module, "sample_ballistic_arc_capped_v2")
+    materialization_calls = 0
+
+    def forbidden_materialization(*_args, **_kwargs):
+        nonlocal materialization_calls
+        materialization_calls += 1
+        raise AssertionError("interior sample materialization must not run")
+
+    monkeypatch.setattr(
+        ballistics_module, "_interior_sample_times", forbidden_materialization
+    )
+    for value in (True, _CapIntSubclass(8), _CapCoercible()):
+        with pytest.raises(TypeError, match="max_sample_count.*exact int"):
+            capped(*_ballistic_call_args(), max_sample_count=value)
+    for value in (0, -1):
+        with pytest.raises(ValueError, match="max_sample_count.*positive"):
+            capped(*_ballistic_call_args(), max_sample_count=value)
+    assert materialization_calls == 0
+
+
+def test_capped_landing_helper_rejects_non_exact_caps_before_materialization(
+    monkeypatch,
+) -> None:
+    capped = getattr(ballistics_module, "landing_zone_cells_capped_v2")
+    materialization_calls = 0
+
+    def forbidden_materialization(*_args, **_kwargs):
+        nonlocal materialization_calls
+        materialization_calls += 1
+        raise AssertionError("landing candidate materialization must not run")
+
+    monkeypatch.setattr(
+        ballistics_module,
+        "_iter_square_perimeter_cells",
+        forbidden_materialization,
+    )
+    for value in (True, _CapIntSubclass(8), _CapCoercible()):
+        with pytest.raises(TypeError, match="max_candidate_count.*exact int"):
+            capped(*_landing_call_args(), max_candidate_count=value)
+    for value in (0, -1):
+        with pytest.raises(ValueError, match="max_candidate_count.*positive"):
+            capped(*_landing_call_args(), max_candidate_count=value)
+    assert materialization_calls == 0
+
+
+def test_capped_helpers_use_only_explicit_caps_not_mutable_legacy_globals(
+    monkeypatch,
+) -> None:
+    ballistic_capped = getattr(ballistics_module, "sample_ballistic_arc_capped_v2")
+    landing_capped = getattr(ballistics_module, "landing_zone_cells_capped_v2")
+    ballistic_args = _ballistic_call_args()
+    landing_args = _landing_call_args()
+    expected_ballistic = ballistic_capped(
+        *ballistic_args, max_sample_count=MAX_BALLISTIC_SAMPLES_V2
+    )
+    expected_landing = landing_capped(
+        *landing_args, max_candidate_count=MAX_LANDING_ZONE_CANDIDATES_V2
+    )
+
+    monkeypatch.setattr(ballistics_module, "MAX_BALLISTIC_SAMPLES_V2", True)
+    monkeypatch.setattr(ballistics_module, "MAX_LANDING_ZONE_CANDIDATES_V2", True)
+    assert canonical_json_bytes(
+        ballistic_capped(
+            *ballistic_args, max_sample_count=MAX_BALLISTIC_SAMPLES_V2
+        )
+    ) == canonical_json_bytes(expected_ballistic)
+    assert canonical_json_bytes(
+        landing_capped(
+            *landing_args, max_candidate_count=MAX_LANDING_ZONE_CANDIDATES_V2
+        )
+    ) == canonical_json_bytes(expected_landing)
+
+    monkeypatch.setattr(ballistics_module, "MAX_BALLISTIC_SAMPLES_V2", 10**9)
+    monkeypatch.setattr(
+        ballistics_module, "MAX_LANDING_ZONE_CANDIDATES_V2", 10**9
+    )
+    with pytest.raises(ValueError, match="sample_count.*2"):
+        ballistic_capped(*ballistic_args, max_sample_count=2)
+    with pytest.raises(ValueError, match="candidate.*1"):
+        landing_capped(
+            WorldPoint(0.25, 0.25),
+            5.0,
+            0.99,
+            FineGridGeometryV2(2, 2),
+            max_candidate_count=1,
+        )
+
+
+def test_capped_ballistic_helper_checks_valid_small_cap_before_materialization(
+    monkeypatch,
+) -> None:
+    capped = getattr(ballistics_module, "sample_ballistic_arc_capped_v2")
+    materialization_calls = 0
+
+    def forbidden_materialization(*_args, **_kwargs):
+        nonlocal materialization_calls
+        materialization_calls += 1
+        raise AssertionError("interior sample materialization must not run")
+
+    monkeypatch.setattr(
+        ballistics_module, "_interior_sample_times", forbidden_materialization
+    )
+    with pytest.raises(ValueError, match="sample_count.*2"):
+        capped(*_ballistic_call_args(), max_sample_count=2)
+    assert materialization_calls == 0
+
+
+def test_capped_ballistic_helper_uses_explicit_cap_for_inner_repair_budget(
+    monkeypatch,
+) -> None:
+    capped = getattr(ballistics_module, "sample_ballistic_arc_capped_v2")
+    flight_time = 1.7
+    speed_mps = flight_time * 1.62 / (2.0 * sin(pi / 4.0))
+    args = (
+        BallisticStartV2(0.0, 0.0, 0.0),
+        speed_mps,
+        pi / 4.0,
+        0.0,
+        1.62,
+        0.1,
+    )
+    monkeypatch.setattr(ballistics_module, "MAX_BALLISTIC_SAMPLES_V2", 10**9)
+
+    with pytest.raises(ValueError, match="sample_count.*18"):
+        capped(*args, max_sample_count=18)
+    samples = capped(*args, max_sample_count=19)
+    assert len(samples) == 19
+    assert samples[0].time_s == 0.0
+    assert samples[-1].time_s == flight_time
+
+
+def test_legacy_wrappers_keep_input_audit_precedence_over_invalid_global_caps(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(ballistics_module, "MAX_BALLISTIC_SAMPLES_V2", True)
+    with pytest.raises(TypeError, match="start.*exact BallisticStartV2"):
+        sample_ballistic_arc(object(), 3.0, pi / 4.0, 0.0, 1.62, 0.25)
+
+    monkeypatch.setattr(ballistics_module, "MAX_LANDING_ZONE_CANDIDATES_V2", True)
+    with pytest.raises(TypeError, match="mean_xy.*exact WorldPoint"):
+        landing_zone_cells(object(), 0.05, 0.99, FineGridGeometryV2(4, 4))
