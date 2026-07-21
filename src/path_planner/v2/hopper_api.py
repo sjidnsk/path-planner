@@ -23,6 +23,7 @@ from path_planner.v2.contracts import (
     PlanningRequestV2,
     PlanningSuccessV2,
     PlatformKindV2,
+    PoseStateV2,
     SearchTelemetryV2,
     TypedRouteV2,
 )
@@ -191,6 +192,70 @@ _PROVIDER_STAGES = frozenset(
     }
 )
 
+_TERRAIN_QUERY_STAGES = frozenset(
+    {"launch_validation", "arc_validation", "landing_validation", "route_validation"}
+)
+_NUMERIC_STAGES = frozenset(
+    {
+        "search_setup",
+        "arc_candidate_enumeration",
+        "arc_validation",
+        "landing_probability",
+        "landing_validation",
+        "stop_validation",
+        "replay_work",
+        "route_validation",
+    }
+)
+_PRIMITIVE_CONTRACT_STAGES = frozenset({"search_expansion", "route_validation"})
+_ROUTE_CONTRACT_REASONS = frozenset(
+    {
+        "route_hash_contract_mismatch",
+        "hopper_route_structure_mismatch",
+        "hopper_route_start_mismatch",
+        "hopper_route_connectivity_mismatch",
+        "hopper_route_goal_mismatch",
+        "hopper_route_cost_contract_mismatch",
+        "hopper_route_probability_contract_mismatch",
+        "hopper_route_oracle_contract_mismatch",
+    }
+)
+_REPLAY_PHASES = (
+    "hopper_arc_interval_count/v1",
+    "hopper_arc_candidate_width/v1",
+    "hopper_arc_candidate_height/v1",
+    "hopper_arc_interval_cartesian_product/v1",
+    "hopper_arc_distinct_cell_count/v1",
+    "hopper_arc_interval_cell_visit_count/v1",
+)
+_MEMORY_PHASES = frozenset(
+    {
+        "root_admission",
+        "ballistic_build",
+        "arc_oracle",
+        "landing_build",
+        "child_admission",
+        "route_materialization",
+        "route_l2",
+    }
+)
+_SEMANTIC_REASON_RANK = {
+    "hopper_launch_unknown": 10,
+    "hopper_launch_unsafe": 11,
+    "hopper_arc_boundary_violation": 20,
+    "hopper_arc_unknown": 21,
+    "hopper_arc_clearance_violation": 22,
+    "hopper_landing_probability_below_threshold": 30,
+    "hopper_landing_zone_unknown": 40,
+    "hopper_landing_zone_unsafe": 41,
+    "hopper_landing_slope_exceeded": 42,
+    "hopper_landing_height_unreachable": 43,
+    "hopper_landing_theta_unreachable": 50,
+    "hopper_stop_condition_failed": 60,
+}
+_HARD_ACCOUNTED_MEMORY_BYTES = 536_870_912
+_MAX_REPLAY_STEPS = 100_000
+
 _DETAIL_KEYS = {
     "capability": ("actual", "expected", "parameter_set_id", "profile_id"),
     "goal": ("actual", "expected"),
@@ -230,6 +295,7 @@ _DETAIL_KEYS = {
 @dataclass(frozen=True, slots=True)
 class _ApiSeal:
     provider: object
+    bound_plan: object
     plan_func: object
     request_token: bytes
     deadline_token: tuple[str, str, object]
@@ -346,6 +412,7 @@ def _capture_seal(
     geometry = anchor.snapshot.geometry
     return _ApiSeal(
         provider=provider,
+        bound_plan=plan,
         plan_func=plan_func,
         request_token=_request_token(request),
         deadline_token=(
@@ -379,20 +446,32 @@ def _drift_reason(
         return "planning_deadline_contract_mismatch"
     if current.request_token != initial.request_token:
         return "planning_request_contract_mismatch"
+    initial_section2 = initial.composite_token[1]
+    current_section2 = current.composite_token[1]
+    initial_authority = (
+        initial.composite_token[0],
+        initial_section2[1:],
+        *initial.composite_token[2:],
+    )
+    current_authority = (
+        current.composite_token[0],
+        current_section2[1:],
+        *current.composite_token[2:],
+    )
+    if (
+        current.provider is not initial.provider
+        or current.plan_func is not initial.plan_func
+        or current_authority != initial_authority
+    ):
+        return "hopper_authority_contract_mismatch"
+    if current.profile_token != initial.profile_token:
+        return "hopper_profile_contract_mismatch"
     if current.snapshot is not initial.snapshot:
         return "terrain_snapshot_identity_mismatch"
     if current.snapshot_digest != initial.snapshot_digest:
         return "terrain_snapshot_hash_mismatch"
     if current.geometry_token != initial.geometry_token:
         return "hopper_terrain_geometry_contract_mismatch"
-    if current.profile_token != initial.profile_token:
-        return "hopper_profile_contract_mismatch"
-    if (
-        current.provider is not initial.provider
-        or current.plan_func is not initial.plan_func
-        or current.composite_token != initial.composite_token
-    ):
-        return "hopper_authority_contract_mismatch"
     return None
 
 
@@ -507,11 +586,197 @@ def _detail_shape(reason: str) -> tuple[str, ...] | None:
     return None
 
 
-def _failure_policy_matches(failure: PlanningFailureV2) -> bool:
+def _exact_json_scalar(value: object) -> bool:
+    if value is None or type(value) in (str, bool, int):
+        return True
+    return (
+        type(value) is float
+        and isfinite(value)
+        and not (value == 0.0 and copysign(1.0, value) < 0.0)
+    )
+
+
+def _exact_optional_string(value: object) -> bool:
+    return value is None or (type(value) is str and bool(value))
+
+
+def _exact_optional_int(value: object, *, signed: bool = False) -> bool:
+    return value is None or (type(value) is int and (signed or value >= 0))
+
+
+def _contract_stage_matches(reason: str, stage: str) -> bool:
+    if reason == "terrain_query_contract_mismatch":
+        return stage in _TERRAIN_QUERY_STAGES
+    if reason == "hopper_numeric_contract_mismatch":
+        return stage in _NUMERIC_STAGES
+    if reason in {
+        "hopper_primitive_structure_mismatch",
+        "hopper_primitive_contract_mismatch",
+        "hopper_jump_oracle_contract_mismatch",
+    }:
+        return stage in _PRIMITIVE_CONTRACT_STAGES
+    if reason in _ROUTE_CONTRACT_REASONS:
+        return stage == "route_validation"
+    if reason == "hopper_search_cost_contract_mismatch":
+        return stage == "search_expansion"
+    return True
+
+
+def _failure_detail_values_match(
+    failure: PlanningFailureV2,
+    request: PlanningRequestV2,
+) -> bool:
+    details = failure.evidence.details
+    if type(details) is not tuple or any(
+        type(pair) is not tuple
+        or len(pair) != 2
+        or type(pair[0]) is not str
+        or not pair[0]
+        for pair in details
+    ):
+        return False
+    values = dict(details)
+    reason = failure.reason_code
+    if reason in _CAPABILITY_REASONS:
+        return (
+            _exact_json_scalar(values["actual"])
+            and _exact_json_scalar(values["expected"])
+            and _exact_optional_string(values["parameter_set_id"])
+            and _exact_optional_string(values["profile_id"])
+        )
+    if reason == "hopper_goal_heading_unreachable":
+        return _exact_json_scalar(values["actual"]) and _exact_json_scalar(
+            values["expected"]
+        )
+    if reason in _SEMANTIC_STAGES or reason == "hopper_no_complete_route":
+        actual = values["actual"]
+        if reason == "hopper_no_complete_route":
+            semantic_ok = (
+                actual is None
+                and values["reason_rank"] is None
+                or type(actual) is str
+                and actual in _SEMANTIC_REASON_RANK
+                and values["reason_rank"] == _SEMANTIC_REASON_RANK[actual]
+                and type(values["reason_rank"]) is int
+            )
+            phase_ok = (
+                type(values["phase"]) is str
+                and values["phase"] == "search_exhaustion"
+            )
+        else:
+            semantic_ok = (
+                type(actual) is str
+                and actual == reason
+                and type(values["reason_rank"]) is int
+                and values["reason_rank"] == _SEMANTIC_REASON_RANK[reason]
+            )
+            phase_ok = (
+                type(values["phase"]) is str
+                and values["phase"] in {"initial_launch", "route_replay"}
+            )
+        return (
+            semantic_ok
+            and phase_ok
+            and _exact_optional_string(values["action_key"])
+            and _exact_optional_string(values["candidate_id"])
+            and _exact_optional_string(values["parameter_set_id"])
+            and _exact_optional_int(values["cell_x"], signed=True)
+            and _exact_optional_int(values["cell_y"], signed=True)
+            and _exact_optional_int(values["hop_index"])
+            and _exact_optional_int(values["segment_index"])
+        )
+    if reason in _CONTRACT_REASONS:
+        return (
+            _exact_json_scalar(values["actual"])
+            and _exact_json_scalar(values["expected"])
+            and type(values["phase"]) is str
+            and values["phase"] == failure.evidence.stage
+        )
+    if reason == "hopper_expansion_budget_exhausted":
+        attempted = values["attempted_expanded_states"]
+        maximum = values["max_expanded_states"]
+        return (
+            type(attempted) is int
+            and type(maximum) is int
+            and maximum == request.resource_budget.max_expanded_states
+            and attempted > maximum
+        )
+    if reason == "hopper_route_state_budget_exceeded":
+        attempted = values["attempted_route_states"]
+        effective = values["effective_max_route_states"]
+        requested = values["requested_max_route_states"]
+        return (
+            type(attempted) is int
+            and type(effective) is int
+            and type(requested) is int
+            and requested == request.resource_budget.max_route_states
+            and effective == min(requested, _MAX_REPLAY_STEPS + 1)
+            and attempted > effective
+        )
+    if reason == "hopper_replay_work_budget_exceeded":
+        attempted = values["attempted_work_units"]
+        maximum = values["max_work_units"]
+        return (
+            type(attempted) is int
+            and type(maximum) is int
+            and maximum == _MAX_REPLAY_STEPS
+            and attempted > maximum
+            and type(values["phase"]) is str
+            and values["phase"] in _REPLAY_PHASES
+        )
+    if reason == "hopper_memory_budget_exceeded":
+        integer_keys = (
+            "admitted_record_count",
+            "attempted_accounted_bytes",
+            "effective_max_memory_bytes",
+            "max_memory_bytes",
+            "persistent_accounted_bytes",
+            "transient_reserved_bytes",
+        )
+        if any(
+            type(values[key]) is not int or values[key] < 0
+            for key in integer_keys
+        ):
+            return False
+        requested = request.resource_budget.max_memory_bytes
+        effective = _HARD_ACCOUNTED_MEMORY_BYTES if requested == 0 else min(
+            requested, _HARD_ACCOUNTED_MEMORY_BYTES
+        )
+        phase = values["phase"]
+        arithmetic_ok = (
+            values["transient_reserved_bytes"] == 0
+            and values["attempted_accounted_bytes"]
+            > values["persistent_accounted_bytes"]
+            if phase in {"root_admission", "child_admission"}
+            else values["attempted_accounted_bytes"]
+            == values["persistent_accounted_bytes"]
+            + values["transient_reserved_bytes"]
+        )
+        return (
+            values["accounting_id"] == "hopper_deterministic_admission_bytes/v1"
+            and type(values["accounting_id"]) is str
+            and values["max_memory_bytes"] == requested
+            and values["effective_max_memory_bytes"] == effective
+            and arithmetic_ok
+            and values["attempted_accounted_bytes"] > effective
+            and type(phase) is str
+            and phase in _MEMORY_PHASES
+        )
+    return reason == "planning_deadline_expired" and details == ()
+
+
+def _failure_policy_matches(
+    failure: PlanningFailureV2,
+    request: PlanningRequestV2,
+) -> bool:
     reason = failure.reason_code
     category = failure.category
     stage = failure.evidence.stage
-    if stage not in _PROVIDER_STAGES:
+    if (
+        type(reason) is not str
+        or type(stage) is not str
+        or stage not in _PROVIDER_STAGES
+    ):
         return False
     if reason in _CAPABILITY_REASONS:
         policy_ok = (
@@ -524,9 +789,13 @@ def _failure_policy_matches(failure: PlanningFailureV2) -> bool:
             and stage == "goal_preflight"
         )
     elif reason in _SEMANTIC_STAGES:
-        policy_ok = (
-            category is FailureCategoryV2.VALIDATION_FAILED
-            and stage == _SEMANTIC_STAGES[reason]
+        phase = dict(failure.evidence.details).get("phase")
+        policy_ok = stage == _SEMANTIC_STAGES[reason] and (
+            category is FailureCategoryV2.UNSAFE_START
+            and reason in {"hopper_launch_unknown", "hopper_launch_unsafe"}
+            and phase == "initial_launch"
+            or category is FailureCategoryV2.VALIDATION_FAILED
+            and phase == "route_replay"
         )
     elif reason in _RESOURCE_POLICY:
         policy_ok = (
@@ -543,7 +812,10 @@ def _failure_policy_matches(failure: PlanningFailureV2) -> bool:
             category is FailureCategoryV2.TIMEOUT and stage in _DEADLINE_STAGES
         )
     elif reason in _CONTRACT_REASONS:
-        policy_ok = category is FailureCategoryV2.INTERNAL_ERROR
+        policy_ok = (
+            category is FailureCategoryV2.INTERNAL_ERROR
+            and _contract_stage_matches(reason, stage)
+        )
     else:
         return False
     if not policy_ok:
@@ -554,7 +826,7 @@ def _failure_policy_matches(failure: PlanningFailureV2) -> bool:
         return False
     if failure.evidence.checks != (reason,):
         return False
-    return True
+    return _failure_detail_values_match(failure, request)
 
 
 def _telemetry_matches(failure: PlanningFailureV2) -> bool:
@@ -604,9 +876,14 @@ def _provider_failure_is_valid(
         type(outcome) is PlanningFailureV2
         and outcome.request_id == request.request_id
         and outcome.platform_kind is PlatformKindV2.HOPPER
+        and type(outcome.reason_code) is str
+        and outcome.schema_version == "path-planner-v2-planning/v1"
+        and type(outcome.schema_version) is str
         and type(outcome.evidence) is FailureEvidenceV2
-        and _failure_policy_matches(outcome)
+        and _failure_policy_matches(outcome, request)
         and _telemetry_matches(outcome)
+        and outcome.search_telemetry.expanded_states
+        <= request.resource_budget.max_expanded_states
     )
 
 
@@ -614,42 +891,84 @@ def _success_envelope_is_valid(
     outcome: object,
     request: PlanningRequestV2,
 ) -> bool:
-    if (
-        type(outcome) is not PlanningSuccessV2
-        or outcome.request_id != request.request_id
-        or outcome.platform_kind is not PlatformKindV2.HOPPER
-        or type(outcome.route) is not TypedRouteV2
-        or outcome.route.platform_kind is not PlatformKindV2.HOPPER
-        or outcome.route.is_complete is not True
-        or not outcome.route.primitives
-        or type(outcome.observation_projection) is not ObservationProjectionV2
-        or type(outcome.cache_evidence) is not CacheEvidenceV2
-        or type(outcome.search_telemetry) is not SearchTelemetryV2
-    ):
+    try:
+        if (
+            type(outcome) is not PlanningSuccessV2
+            or type(outcome.request_id) is not str
+            or outcome.request_id != request.request_id
+            or outcome.platform_kind is not PlatformKindV2.HOPPER
+            or type(outcome.schema_version) is not str
+            or outcome.schema_version != "path-planner-v2-planning/v1"
+            or type(outcome.route) is not TypedRouteV2
+            or outcome.route.platform_kind is not PlatformKindV2.HOPPER
+            or outcome.route.is_complete is not True
+            or type(outcome.route.primitives) is not tuple
+            or not outcome.route.primitives
+            or type(outcome.observation_projection) is not ObservationProjectionV2
+            or type(outcome.cache_evidence) is not CacheEvidenceV2
+            or type(outcome.search_telemetry) is not SearchTelemetryV2
+        ):
+            return False
+        observation = outcome.observation_projection
+        cache = outcome.cache_evidence
+        telemetry = outcome.search_telemetry
+        expected_states = (
+            outcome.route.primitives[0].start_state,
+            *(primitive.end_state for primitive in outcome.route.primitives),
+        )
+        counts = (
+            telemetry.expanded_states,
+            telemetry.generated_primitives,
+            telemetry.rejected_l0,
+            telemetry.rejected_l1,
+            telemetry.rejected_l2,
+        )
+        return (
+            type(observation.source) is str
+            and observation.source
+            == "path-planner-v2-hopper-inflight-observation-disabled/v1"
+            and _exact_float_word(
+                observation.expected_new_observed_cells,
+                nonnegative=True,
+            )
+            == 0.0.hex()
+            and _exact_float_word(
+                observation.expected_information_gain,
+                nonnegative=True,
+            )
+            == 0.0.hex()
+            and type(observation.sample_states) is tuple
+            and all(type(state) is PoseStateV2 for state in observation.sample_states)
+            and observation.sample_states == expected_states
+            and type(cache.cache_namespace) is str
+            and cache.cache_namespace == "path-planner-v2-hopper-cache-disabled/v1"
+            and type(cache.cache_key) is str
+            and cache.cache_key == "hopper-cache-disabled/v1"
+            and type(cache.hit) is bool
+            and cache.hit is False
+            and all(type(value) is int and value >= 0 for value in counts)
+            and telemetry.expanded_states >= 1
+            and telemetry.expanded_states
+            <= request.resource_budget.max_expanded_states
+            and telemetry.generated_primitives == 192 * telemetry.expanded_states
+            and telemetry.rejected_l0 == 0
+            and telemetry.rejected_l1 == 0
+            and telemetry.rejected_l2 <= telemetry.generated_primitives
+            and _exact_float_word(telemetry.elapsed_s, nonnegative=True)
+            == telemetry.elapsed_s.hex()
+            and type(telemetry.timed_out) is bool
+            and telemetry.timed_out is False
+            and type(telemetry.accelerator_used) is bool
+            and telemetry.accelerator_used is False
+            and type(telemetry.ackermann_feasible_claimed) is bool
+            and telemetry.ackermann_feasible_claimed is False
+            and type(telemetry.termination_reason) is str
+            and telemetry.termination_reason == "hopper_route_l2_valid"
+        )
+    except (KeyboardInterrupt, MemoryError, SystemExit):
+        raise
+    except Exception:
         return False
-    observation = outcome.observation_projection
-    cache = outcome.cache_evidence
-    telemetry = outcome.search_telemetry
-    return (
-        observation.source
-        == "path-planner-v2-hopper-inflight-observation-disabled/v1"
-        and observation.expected_new_observed_cells == 0.0
-        and observation.expected_information_gain == 0.0
-        and type(observation.sample_states) is tuple
-        and len(observation.sample_states) == len(outcome.route.primitives) + 1
-        and cache.cache_namespace == "path-planner-v2-hopper-cache-disabled/v1"
-        and cache.cache_key == "hopper-cache-disabled/v1"
-        and cache.hit is False
-        and telemetry.expanded_states >= 1
-        and telemetry.generated_primitives == 192 * telemetry.expanded_states
-        and telemetry.rejected_l0 == 0
-        and telemetry.rejected_l1 == 0
-        and telemetry.rejected_l2 <= telemetry.generated_primitives
-        and telemetry.timed_out is False
-        and telemetry.accelerator_used is False
-        and telemetry.ackermann_feasible_claimed is False
-        and telemetry.termination_reason == "hopper_route_l2_valid"
-    )
 
 
 def _l2_remap(
@@ -724,7 +1043,7 @@ def dispatch_hopper_provider_v2(
         return _timeout(request, deadline, "provider_dispatch")
 
     try:
-        outcome = provider.plan(request, anchor, deadline)
+        outcome = initial.bound_plan(request, anchor, deadline)
     except (KeyboardInterrupt, MemoryError, SystemExit):
         raise
     except Exception as exc:
