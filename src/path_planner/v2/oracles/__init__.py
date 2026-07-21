@@ -8,6 +8,11 @@ from path_planner.v2.oracles.legged import (
     LegIdV2,
     validate_legged_step_l2,
 )
+from path_planner.v2.oracles.hopper import (
+    HopperJumpCandidateV2,
+    HopperValidationResultV2,
+    validate_hopper_jump_l2,
+)
 
 __all__ = [
     "LEGGED_CRAWL_SEQUENCE_V2",
@@ -17,5 +22,8 @@ __all__ = [
     "LeggedStepCandidateV2",
     "LeggedValidationResultV2",
     "LegIdV2",
+    "HopperJumpCandidateV2",
+    "HopperValidationResultV2",
+    "validate_hopper_jump_l2",
     "validate_legged_step_l2",
 ]

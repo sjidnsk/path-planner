@@ -13,6 +13,13 @@ from path_planner.v2.providers.legged import (
     legged_state_key_v2,
     nominal_legged_search_state_v2,
 )
+from path_planner.v2.providers.hopper import (
+    HopperJumpPrimitiveV2,
+    HopperPrimitiveProviderV2,
+    HopperSearchStateV2,
+    hopper_state_key_v2,
+    nominal_hopper_search_state_v2,
+)
 from path_planner.v2.providers.wheel import (
     WheelMotionPrimitiveV2,
     WheelPrimitiveProviderV2,
@@ -30,9 +37,14 @@ __all__ = [
     "LeggedSearchStateV2",
     "LeggedStepPrimitiveV2",
     "LeggedPrimitiveProviderV2",
+    "HopperSearchStateV2",
+    "HopperJumpPrimitiveV2",
+    "HopperPrimitiveProviderV2",
     "PrimitiveProviderV2",
     "WheelMotionPrimitiveV2",
     "WheelPrimitiveProviderV2",
     "legged_state_key_v2",
     "nominal_legged_search_state_v2",
+    "hopper_state_key_v2",
+    "nominal_hopper_search_state_v2",
 ]

@@ -36,6 +36,11 @@ from path_planner.v2.geometry import (
     conservative_wheel_pose_cells,
     conservative_wheel_sweep_cells,
 )
+from path_planner.v2.hopper_route_validation import (
+    HOPPER_ROUTE_VALIDATOR_ID_V2,
+    HopperRouteProbabilityDiagnosticV2,
+    validate_hopper_route_l2,
+)
 from path_planner.v2.oracles.legged import (
     LEGGED_CRAWL_SEQUENCE_V2,
     LEGGED_FOOT_STORAGE_ORDER_V2,
