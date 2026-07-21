@@ -147,7 +147,7 @@ def test_gate6_metric_aggregate_covers_all_required_statistics() -> None:
             primitive_true_positive_count=0,
             primitive_false_negative_count=0,
             resource_cost=None,
-            coverage_efficiency=None,
+            coverage_efficiency=0.0,
             expanded_states=10,
             rejected_l0=0,
             rejected_l1=0,
@@ -161,19 +161,47 @@ def test_gate6_metric_aggregate_covers_all_required_statistics() -> None:
 
     summary = gate6.aggregate_gate6_metrics_v2(reversed(rows))
 
+    assert summary["metrics_status"] == "evaluated"
     assert summary["row_count"] == 3
     assert summary["unsafe_success_count"] == 1
     assert summary["primitive_false_positive_count"] == 1
     assert summary["primitive_recall"] == pytest.approx(17 / 20)
     assert summary["reachable_success_ratio"] == 1.0
     assert summary["mean_resource_cost"] == 11.0
-    assert summary["mean_coverage_efficiency"] == 3.0
+    assert summary["mean_coverage_efficiency"] == 2.0
     assert summary["expanded_states"] == 60
     assert (summary["rejected_l0"], summary["rejected_l1"], summary["rejected_l2"]) == (3, 5, 8)
     assert summary["cache_hit_ratio"] == 0.5
     assert (summary["runtime_p50_ms"], summary["runtime_p95_ms"], summary["runtime_p99_ms"]) == (30.0, 2000.001, 2000.001)
     assert summary["timeout_count"] == 1
     assert summary["hard_timeout_violation_count"] == 1
+
+
+def test_gate6_failed_episode_requires_coverage_but_forbids_resource_cost() -> None:
+    failed = _row(
+        provider_success=False,
+        provider_complete_l2=False,
+        resource_cost=None,
+        coverage_efficiency=0.0,
+    )
+    assert failed.coverage_efficiency == 0.0
+
+    with pytest.raises(ValueError, match="coverage_efficiency"):
+        replace(failed, coverage_efficiency=None)
+    with pytest.raises(ValueError, match="resource_cost"):
+        replace(failed, resource_cost=1.0)
+
+
+def test_gate6_empty_metric_and_semantics_audits_are_not_evaluated() -> None:
+    summary = gate6.aggregate_gate6_metrics_v2(())
+    assert summary["metrics_status"] == "not_evaluated"
+    assert summary["row_count"] == 0
+    assert summary["safety_passed"] is None
+
+    audit = gate6.audit_gate6_worker_cache_semantics_v2(())
+    assert audit["status"] == "not_evaluated"
+    assert audit["semantic_equivalent"] is False
+    assert audit["group_count"] == 0
 
 
 def test_gate6_paired_bootstrap_and_worker_cache_audit_are_deterministic() -> None:
@@ -210,7 +238,7 @@ def test_gate6_paired_bootstrap_and_worker_cache_audit_are_deterministic() -> No
         resamples=128,
     )
     assert forward == reverse
-    assert forward["pair_count"] == 4
+    assert forward["pair_count"] == 1
     assert forward["mean_delta"] == 2.0
     assert (forward["ci95_lower"], forward["ci95_upper"]) == (2.0, 2.0)
     assert gate6.audit_gate6_worker_cache_semantics_v2(rows)["status"] == "passed"
