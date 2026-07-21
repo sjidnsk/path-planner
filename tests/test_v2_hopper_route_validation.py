@@ -238,4 +238,3 @@ def test_hopper_route_l2_enforces_operational_h_plus_one_route_state_bound() -> 
     assert result.reason_code == "hopper_route_state_budget_exceeded"
     assert result.category.value == "resource_limit"
     assert result.route_state_count == 2
-
