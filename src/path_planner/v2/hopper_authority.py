@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import isfinite
 from typing import TypeVar
 
 import path_planner.v2.ballistics as _ballistics
+from path_planner.v2.contracts import PlatformKindV2
+from path_planner.v2.profiles import (
+    HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2,
+    HopperProfileV2,
+    PlatformProfileV2,
+)
 
 
 HOPPER_MAX_BALLISTIC_SAMPLES_V2 = 100_000
@@ -455,3 +462,275 @@ class _HopperExactIntegerArenaV2:
             return result
         finally:
             self._live_integer_slots -= required_slots
+
+
+_HOPPER_PROVIDER_AUTHORITY_SCHEMA_VERSION_V2 = "hopper-provider-authority/v1"
+_HOPPER_PARAMETER_SET_SCHEMA_VERSION_V2 = "hopper-parameter-set-record/v1"
+_HOPPER_PARAMETER_SET_ABSENT_SCHEMA_VERSION_V2 = (
+    "hopper-parameter-set-absent/v1"
+)
+_HOPPER_GATE5B_PARAMETER_SET_ID_V1 = "hopper_gate5b_algorithm_fixture/v1"
+_HOPPER_GATE5B_BASE_PROFILE_ID_V1 = (
+    "hopper-lunar-ballistic-gate5b-fixture/v1"
+)
+_HOPPER_GATE5B_STOP_CONDITION_ID_V1 = (
+    "hopper_same_height_nominal_recenter_capture_le_3mps_"
+    "stop_simulation_proxy/v1"
+)
+_HOPPER_GATE5B_ENERGY_MODEL_ID_V1 = (
+    "hopper_launch_speed_squared_relative_energy/v1"
+)
+_HOPPER_GATE5B_BODY_ENVELOPE_RADIUS_M = 0.25
+_HOPPER_GATE5B_LAUNCH_REFERENCE_HEIGHT_M = 0.50
+_HOPPER_GATE5B_ARC_CLEARANCE_MARGIN_M = 0.10
+_HOPPER_GATE5B_LANDING_FOOTPRINT_RADIUS_M = 0.30
+
+
+def _fixture_speed_v2(speed_mps: float) -> float:
+    if type(speed_mps) is not float:
+        raise TypeError("speed_mps must be exact float")
+    if not isfinite(speed_mps) or speed_mps <= 0.0:
+        raise ValueError("speed_mps must be finite and positive")
+    return speed_mps
+
+
+def _hopper_gate5b_stop_evaluator_v1(speed_mps: float) -> bool:
+    return _fixture_speed_v2(speed_mps) <= 3.0
+
+
+def _hopper_gate5b_energy_evaluator_v1(speed_mps: float) -> float:
+    ratio = _fixture_speed_v2(speed_mps) / 3.0
+    return ratio * ratio
+
+
+_TRUSTED_HOPPER_GATE5B_STOP_EVALUATOR_V1 = _hopper_gate5b_stop_evaluator_v1
+_TRUSTED_HOPPER_GATE5B_ENERGY_EVALUATOR_V1 = _hopper_gate5b_energy_evaluator_v1
+
+
+@dataclass(frozen=True, slots=True)
+class HopperProviderAuthorityV2:
+    hopper_profile: HopperProfileV2
+    parameter_set_id: str | None
+    authority_schema_version: str
+
+    def __post_init__(self) -> None:
+        if type(self.hopper_profile) is not HopperProfileV2:
+            raise TypeError("hopper_profile must be exact HopperProfileV2")
+        if self.parameter_set_id is not None:
+            if type(self.parameter_set_id) is not str:
+                raise TypeError("parameter_set_id must be exact str or None")
+            if not self.parameter_set_id:
+                raise ValueError("parameter_set_id must be nonempty when provided")
+        if type(self.authority_schema_version) is not str:
+            raise TypeError("authority_schema_version must be exact str")
+        if (
+            self.authority_schema_version
+            != _HOPPER_PROVIDER_AUTHORITY_SCHEMA_VERSION_V2
+        ):
+            raise ValueError(
+                "authority_schema_version must be "
+                f"{_HOPPER_PROVIDER_AUTHORITY_SCHEMA_VERSION_V2}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class HopperParameterSetRecordV2:
+    parameter_set_id: str
+    base_profile_id: str
+    body_envelope_radius_m: float
+    launch_reference_height_m: float
+    arc_clearance_margin_m: float
+    landing_footprint_radius_m: float
+    stop_condition: str
+    energy_model: str
+    stop_evaluator: Callable[[float], bool]
+    energy_evaluator: Callable[[float], float]
+    evidence_class: str
+    simulation_proxy: bool
+    formal_evidence_eligible: bool
+    schema_version: str
+
+    def __post_init__(self) -> None:
+        expected_strings = (
+            ("parameter_set_id", _HOPPER_GATE5B_PARAMETER_SET_ID_V1),
+            ("base_profile_id", _HOPPER_GATE5B_BASE_PROFILE_ID_V1),
+            ("stop_condition", _HOPPER_GATE5B_STOP_CONDITION_ID_V1),
+            ("energy_model", _HOPPER_GATE5B_ENERGY_MODEL_ID_V1),
+            ("evidence_class", "test_fixture"),
+            ("schema_version", _HOPPER_PARAMETER_SET_SCHEMA_VERSION_V2),
+        )
+        for name, expected in expected_strings:
+            value = getattr(self, name)
+            if type(value) is not str:
+                raise TypeError(f"{name} must be exact str")
+            if not value:
+                raise ValueError(f"{name} must be nonempty")
+            if value != expected:
+                raise ValueError(f"{name} must be exactly {expected}")
+
+        expected_floats = (
+            ("body_envelope_radius_m", _HOPPER_GATE5B_BODY_ENVELOPE_RADIUS_M),
+            (
+                "launch_reference_height_m",
+                _HOPPER_GATE5B_LAUNCH_REFERENCE_HEIGHT_M,
+            ),
+            ("arc_clearance_margin_m", _HOPPER_GATE5B_ARC_CLEARANCE_MARGIN_M),
+            (
+                "landing_footprint_radius_m",
+                _HOPPER_GATE5B_LANDING_FOOTPRINT_RADIUS_M,
+            ),
+        )
+        for name, expected in expected_floats:
+            value = getattr(self, name)
+            if type(value) is not float:
+                raise TypeError(f"{name} must be exact float")
+            if not isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
+            if value.hex() != expected.hex():
+                raise ValueError(f"{name} must be the frozen fixture value")
+
+        if self.stop_evaluator is not _TRUSTED_HOPPER_GATE5B_STOP_EVALUATOR_V1:
+            raise ValueError("stop_evaluator must be the trusted fixture evaluator")
+        if self.energy_evaluator is not _TRUSTED_HOPPER_GATE5B_ENERGY_EVALUATOR_V1:
+            raise ValueError("energy_evaluator must be the trusted fixture evaluator")
+        if type(self.simulation_proxy) is not bool:
+            raise TypeError("simulation_proxy must be exact bool")
+        if self.simulation_proxy is not True:
+            raise ValueError("simulation_proxy must be exactly True")
+        if type(self.formal_evidence_eligible) is not bool:
+            raise TypeError("formal_evidence_eligible must be exact bool")
+        if self.formal_evidence_eligible is not False:
+            raise ValueError("formal_evidence_eligible must be exactly False")
+
+
+def hopper_gate5b_algorithm_fixture_v1() -> HopperProfileV2:
+    return HopperProfileV2(
+        profile=PlatformProfileV2(
+            profile_id=_HOPPER_GATE5B_BASE_PROFILE_ID_V1,
+            platform_kind=PlatformKindV2.HOPPER,
+            capability_revision=HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2,
+            simulation_proxy=True,
+            max_traversable_slope_deg=30.0,
+            goal_position_tolerance_m=0.0,
+            goal_heading_tolerance_rad=0.0,
+        ),
+        body_envelope_radius_m=_HOPPER_GATE5B_BODY_ENVELOPE_RADIUS_M,
+        launch_reference_height_m=_HOPPER_GATE5B_LAUNCH_REFERENCE_HEIGHT_M,
+        arc_clearance_margin_m=_HOPPER_GATE5B_ARC_CLEARANCE_MARGIN_M,
+        landing_footprint_radius_m=_HOPPER_GATE5B_LANDING_FOOTPRINT_RADIUS_M,
+        stop_condition=_HOPPER_GATE5B_STOP_CONDITION_ID_V1,
+        energy_model=_HOPPER_GATE5B_ENERGY_MODEL_ID_V1,
+    )
+
+
+HOPPER_GATE5B_ALGORITHM_FIXTURE_V1 = HopperParameterSetRecordV2(
+    parameter_set_id=_HOPPER_GATE5B_PARAMETER_SET_ID_V1,
+    base_profile_id=_HOPPER_GATE5B_BASE_PROFILE_ID_V1,
+    body_envelope_radius_m=_HOPPER_GATE5B_BODY_ENVELOPE_RADIUS_M,
+    launch_reference_height_m=_HOPPER_GATE5B_LAUNCH_REFERENCE_HEIGHT_M,
+    arc_clearance_margin_m=_HOPPER_GATE5B_ARC_CLEARANCE_MARGIN_M,
+    landing_footprint_radius_m=_HOPPER_GATE5B_LANDING_FOOTPRINT_RADIUS_M,
+    stop_condition=_HOPPER_GATE5B_STOP_CONDITION_ID_V1,
+    energy_model=_HOPPER_GATE5B_ENERGY_MODEL_ID_V1,
+    stop_evaluator=_TRUSTED_HOPPER_GATE5B_STOP_EVALUATOR_V1,
+    energy_evaluator=_TRUSTED_HOPPER_GATE5B_ENERGY_EVALUATOR_V1,
+    evidence_class="test_fixture",
+    simulation_proxy=True,
+    formal_evidence_eligible=False,
+    schema_version=_HOPPER_PARAMETER_SET_SCHEMA_VERSION_V2,
+)
+
+HOPPER_PARAMETER_SET_REGISTRY_V2 = (HOPPER_GATE5B_ALGORITHM_FIXTURE_V1,)
+
+
+def _parameter_set_record_is_exact_v2(record: object) -> bool:
+    if type(record) is not HopperParameterSetRecordV2:
+        return False
+    try:
+        return (
+            record.parameter_set_id == _HOPPER_GATE5B_PARAMETER_SET_ID_V1
+            and type(record.parameter_set_id) is str
+            and record.base_profile_id == _HOPPER_GATE5B_BASE_PROFILE_ID_V1
+            and type(record.base_profile_id) is str
+            and record.body_envelope_radius_m.hex()
+            == _HOPPER_GATE5B_BODY_ENVELOPE_RADIUS_M.hex()
+            and type(record.body_envelope_radius_m) is float
+            and record.launch_reference_height_m.hex()
+            == _HOPPER_GATE5B_LAUNCH_REFERENCE_HEIGHT_M.hex()
+            and type(record.launch_reference_height_m) is float
+            and record.arc_clearance_margin_m.hex()
+            == _HOPPER_GATE5B_ARC_CLEARANCE_MARGIN_M.hex()
+            and type(record.arc_clearance_margin_m) is float
+            and record.landing_footprint_radius_m.hex()
+            == _HOPPER_GATE5B_LANDING_FOOTPRINT_RADIUS_M.hex()
+            and type(record.landing_footprint_radius_m) is float
+            and record.stop_condition == _HOPPER_GATE5B_STOP_CONDITION_ID_V1
+            and type(record.stop_condition) is str
+            and record.energy_model == _HOPPER_GATE5B_ENERGY_MODEL_ID_V1
+            and type(record.energy_model) is str
+            and record.stop_evaluator
+            is _TRUSTED_HOPPER_GATE5B_STOP_EVALUATOR_V1
+            and record.energy_evaluator
+            is _TRUSTED_HOPPER_GATE5B_ENERGY_EVALUATOR_V1
+            and record.evidence_class == "test_fixture"
+            and type(record.evidence_class) is str
+            and record.simulation_proxy is True
+            and type(record.simulation_proxy) is bool
+            and record.formal_evidence_eligible is False
+            and type(record.formal_evidence_eligible) is bool
+            and record.schema_version == _HOPPER_PARAMETER_SET_SCHEMA_VERSION_V2
+            and type(record.schema_version) is str
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _lookup_hopper_parameter_set_v2(
+    parameter_set_id: str | None,
+) -> HopperParameterSetRecordV2 | tuple[str, str | None]:
+    if parameter_set_id is not None and type(parameter_set_id) is not str:
+        raise TypeError("parameter_set_id must be exact str or None")
+    for record in HOPPER_PARAMETER_SET_REGISTRY_V2:
+        if record.parameter_set_id == parameter_set_id:
+            return record
+    return (_HOPPER_PARAMETER_SET_ABSENT_SCHEMA_VERSION_V2, parameter_set_id)
+
+
+def _hopper_parameter_set_in_memory_token_v2(
+    record: HopperParameterSetRecordV2,
+) -> tuple[object, ...]:
+    if not _parameter_set_record_is_exact_v2(record):
+        raise ValueError("hopper_authority_contract_mismatch")
+    return (
+        record.parameter_set_id,
+        record.base_profile_id,
+        record.body_envelope_radius_m.hex(),
+        record.launch_reference_height_m.hex(),
+        record.arc_clearance_margin_m.hex(),
+        record.landing_footprint_radius_m.hex(),
+        record.stop_condition,
+        record.energy_model,
+        record.stop_evaluator,
+        record.energy_evaluator,
+        record.evidence_class,
+        record.simulation_proxy,
+        record.formal_evidence_eligible,
+        record.schema_version,
+    )
+
+
+def _hopper_parameter_set_lineage_token_v2(
+    record: HopperParameterSetRecordV2,
+) -> tuple[object, ...]:
+    in_memory = _hopper_parameter_set_in_memory_token_v2(record)
+    return (*in_memory[:8], *in_memory[10:])
+
+
+HOPPER_PARAMETER_SET_REGISTRY_IN_MEMORY_TOKEN_V2 = tuple(
+    _hopper_parameter_set_in_memory_token_v2(record)
+    for record in HOPPER_PARAMETER_SET_REGISTRY_V2
+)
+HOPPER_PARAMETER_SET_REGISTRY_LINEAGE_TOKEN_V2 = tuple(
+    _hopper_parameter_set_lineage_token_v2(record)
+    for record in HOPPER_PARAMETER_SET_REGISTRY_V2
+)
