@@ -152,6 +152,46 @@ def test_public_replay_preserves_large_absolute_heading_change(omega: float) -> 
     assert transition.absolute_heading_change_rad == pytest.approx(abs(omega))
 
 
+def test_hybrid_cost_preserves_v1_wrap_safe_rotation_for_large_primitive_without_validators() -> None:
+    grid = CostGrid(
+        GridSpec(width=5, height=5, resolution=1.0),
+        np.ones((5, 5)),
+        np.ones((5, 5), dtype=bool),
+    )
+    primitive = MotionPrimitive(
+        "large_turn",
+        0.0,
+        3.0 * math.pi,
+        1.0,
+        turn_in_place=True,
+    )
+    request = PosePlanRequest(
+        start=Pose2D(2.0, 2.0, 0.0),
+        goal=Pose2D(2.0, 2.0, math.pi),
+        integration_dt_s=1.0,
+        position_tolerance_m=1.0e-9,
+        theta_tolerance_rad=1.0e-9,
+    )
+
+    transition = replay_motion_primitive(request.start, primitive, request.integration_dt_s)
+    result = HybridAStarPlanner((primitive,)).plan(grid, request)
+    expected_search_heading_change = math.pi
+    expected_total = expected_search_heading_change * (
+        request.rotation_cost_weight + request.turn_penalty_weight
+    )
+
+    assert transition.absolute_heading_change_rad == pytest.approx(3.0 * math.pi)
+    assert result.success
+    assert result.cost_breakdown.rotation_cost == pytest.approx(
+        expected_search_heading_change * request.rotation_cost_weight
+    )
+    assert result.cost_breakdown.turn_penalty == pytest.approx(
+        expected_search_heading_change * request.turn_penalty_weight
+    )
+    assert result.total_cost == pytest.approx(expected_total)
+    assert result.to_route_dict(grid.spec)["path_cost"] == pytest.approx(expected_total)
+
+
 def test_non_bool_transition_validator_result_fails_closed() -> None:
     grid = CostGrid(
         GridSpec(width=5, height=5, resolution=1.0),
