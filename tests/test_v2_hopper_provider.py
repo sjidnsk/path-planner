@@ -385,7 +385,8 @@ def test_hopper_provider_enforces_expansion_and_h_plus_one_route_state_caps(
         ("requested_max_route_states", 2),
     )
     assert route_states.search_telemetry.expanded_states == 2
-    assert route_states.search_telemetry.generated_primitives == 193
+    # The admitted fixture action is index 64 in the second fixed 192-action pass.
+    assert route_states.search_telemetry.generated_primitives == 257
 
 
 def test_hopper_provider_enforces_accounted_memory_root_and_transient_phases(
