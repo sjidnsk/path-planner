@@ -642,29 +642,16 @@ def plan_v2(
             details=(("profile_id", profile.profile_id),),
         )
 
-    hopper_authority = None
     if profile.platform_kind is PlatformKindV2.HOPPER:
-        try:
-            from path_planner.v2.hopper_authority import HopperProviderAuthorityV2
+        from path_planner.v2.hopper_api import dispatch_hopper_provider_v2
 
-            hopper_authority = provider.hopper_authority
-            hopper_authority_valid = (
-                type(hopper_authority) is HopperProviderAuthorityV2
-                and hopper_authority.hopper_profile.profile == profile
-            )
-        except (KeyboardInterrupt, SystemExit, MemoryError):
-            raise
-        except Exception:
-            hopper_authority_valid = False
-        if not hopper_authority_valid:
-            return _failure(
-                request_id=request.request_id,
-                platform_kind=profile.platform_kind,
-                category=FailureCategoryV2.INTERNAL_ERROR,
-                reason_code="hopper_authority_contract_mismatch",
-                stage="provider_resolution",
-                details=(("profile_id", profile.profile_id),),
-            )
+        return dispatch_hopper_provider_v2(
+            request,
+            profile,
+            provider,
+            anchor,
+            deadline,
+        )
 
     if deadline.expired:
         return _timeout_failure(
@@ -717,39 +704,6 @@ def plan_v2(
         except Exception:
             legged_initial_seal_valid = False
 
-    hopper_success_valid = True
-    if (
-        type(outcome) is PlanningSuccessV2
-        and profile.platform_kind is PlatformKindV2.HOPPER
-    ):
-        try:
-            from hashlib import sha256
-
-            from path_planner.v2.hopper_route_validation import (
-                validate_hopper_route_l2,
-            )
-            from path_planner.v2.serialization import canonical_json_bytes
-
-            hopper_l2 = validate_hopper_route_l2(
-                outcome.route,
-                request,
-                anchor,
-                hopper_authority,
-                deadline,
-            )
-            expected_digest = sha256(canonical_json_bytes(outcome.route)).hexdigest()
-            hopper_success_valid = (
-                hopper_l2.passed is True
-                and hopper_l2.reason_code == "hopper_route_l2_valid"
-                and hopper_l2.route_digest == expected_digest
-                and hopper_l2.cost_breakdown == outcome.cost_breakdown
-                and hopper_l2.evidence == outcome.validation_evidence
-            )
-        except (KeyboardInterrupt, SystemExit, MemoryError):
-            raise
-        except Exception:
-            hopper_success_valid = False
-
     if deadline.expired:
         return _timeout_failure(
             request=request,
@@ -775,7 +729,6 @@ def plan_v2(
 
     outcome_is_valid = (
         legged_completion_seal_valid
-        and hopper_success_valid
         and _outcome_is_valid(outcome, request, profile)
     )
     if deadline.expired:
@@ -801,19 +754,6 @@ def plan_v2(
         except Exception:
             legged_postcondition_seal_valid = False
 
-    if (
-        profile.platform_kind is PlatformKindV2.HOPPER
-        and type(outcome) is PlanningSuccessV2
-        and (not outcome_is_valid or not hopper_success_valid)
-    ):
-        return _failure(
-            request_id=request.request_id,
-            platform_kind=profile.platform_kind,
-            category=FailureCategoryV2.INTERNAL_ERROR,
-            reason_code="hopper_provider_outcome_contract_mismatch",
-            stage="provider_postcondition",
-            details=(("outcome_type", type(outcome).__name__),),
-        )
     if not outcome_is_valid or not legged_postcondition_seal_valid:
         return _failure(
             request_id=request.request_id,
