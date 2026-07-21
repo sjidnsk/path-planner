@@ -1067,3 +1067,141 @@ def test_api_legged_zero_weight_still_pre_audits_every_resource(
     outcome = _plan_legged_outcome(request, expected)
     assert type(outcome) is PlanningFailureV2
     assert outcome.reason_code == "primitive_provider_outcome_invalid"
+
+
+def _api_hopper_fixture():
+    from math import cos, sin
+
+    from path_planner.v2.hopper_authority import (
+        HOPPER_GATE5B_ALGORITHM_FIXTURE_V1,
+        HopperProviderAuthorityV2,
+        hopper_gate5b_algorithm_fixture_v1,
+    )
+    from path_planner.v2.providers.hopper import HopperPrimitiveProviderV2
+
+    profile = hopper_gate5b_algorithm_fixture_v1()
+    authority = HopperProviderAuthorityV2(
+        profile,
+        HOPPER_GATE5B_ALGORITHM_FIXTURE_V1.parameter_set_id,
+        "hopper-provider-authority/v1",
+    )
+    provider = HopperPrimitiveProviderV2(authority)
+    shape = (64, 64)
+    snapshot = TerrainSnapshotV2(
+        geometry=FineGridGeometryV2(64, 64, (-8.0, -8.0), "moon"),
+        elevation_m=np.zeros(shape, dtype=np.float64),
+        slope_deg=np.zeros(shape, dtype=np.float64),
+        traversable_mask=np.ones(shape, dtype=bool),
+        hard_obstacle_mask=np.zeros(shape, dtype=bool),
+        observed_mask=np.ones(shape, dtype=bool),
+        confidence=np.ones(shape, dtype=np.float64),
+        provenance=TerrainProvenanceV2(
+            source_kind="synthetic_terrain_obstacle_proxy/v1",
+            source_id="gate5b-api-fixture",
+            source_hash="gate5b-api-fixture-hash",
+            physical_obstacle_cells_written=False,
+        ),
+    )
+    start = PoseStateV2(0.25, 0.25, 0.0)
+    speed = profile.launch_speeds_mps[1]
+    elevation = profile.launch_elevations_rad[1]
+    flight_time = 2.0 * ((speed * sin(elevation)) / profile.gravity_mps2)
+    distance = (speed * cos(elevation)) * flight_time
+    goal = PoseStateV2(start.x_m + distance, start.y_m, 0.0)
+    request = PlanningRequestV2(
+        request_id="gate5b-api",
+        platform_profile_id=profile.profile.profile_id,
+        start_state=start,
+        goal_state=goal,
+        terrain_snapshot=snapshot,
+        objective_profile=ObjectiveProfileV2(),
+        resource_budget=ResourceBudgetV2(10, 100, 0),
+        timeout_s=2.0,
+        accelerator_policy=AcceleratorPolicyV2.DISABLED,
+        determinism_seed=23,
+    )
+    registry = PlatformProfileRegistryV2((profile.profile,))
+    return request, registry, provider
+
+
+def test_api_hopper_public_export_delta_is_exact_and_identity_preserving() -> None:
+    import path_planner.v2.oracles as oracles
+    import path_planner.v2.providers as providers
+    import path_planner.v2.validation as validation
+    from path_planner.v2.hopper_authority import HopperProviderAuthorityV2
+
+    expected_oracles = (
+        "HopperJumpCandidateV2",
+        "HopperValidationResultV2",
+        "validate_hopper_jump_l2",
+    )
+    expected_providers = (
+        "HopperSearchStateV2",
+        "HopperJumpPrimitiveV2",
+        "HopperPrimitiveProviderV2",
+        "hopper_state_key_v2",
+        "nominal_hopper_search_state_v2",
+    )
+    expected_validation = (
+        "HOPPER_ROUTE_VALIDATOR_ID_V2",
+        "HopperRouteProbabilityDiagnosticV2",
+        "validate_hopper_route_l2",
+    )
+    for name in expected_oracles:
+        assert name in oracles.__all__
+        assert getattr(v2, name) is getattr(oracles, name)
+    for name in expected_providers:
+        assert name in providers.__all__
+        assert getattr(v2, name) is getattr(providers, name)
+    for name in expected_validation:
+        assert getattr(v2, name) is getattr(validation, name)
+    assert v2.HopperProviderAuthorityV2 is HopperProviderAuthorityV2
+    for private in (
+        "HopperParameterSetRecordV2",
+        "HopperResourceAuthorityV2",
+        "HOPPER_PARAMETER_SET_REGISTRY_V2",
+        "HOPPER_RESOURCE_AUTHORITY_V2",
+    ):
+        assert private not in v2.__all__
+        assert not hasattr(v2, private)
+
+
+def test_api_hopper_fixture_success_runs_through_public_plan_v2() -> None:
+    request, registry, provider = _api_hopper_fixture()
+    outcome = plan_v2(
+        request,
+        registry=registry,
+        providers={provider.profile.profile_id: provider},
+        monotonic_clock=lambda: 0.0,
+    )
+    assert type(outcome) is PlanningSuccessV2
+    assert outcome.platform_kind is PlatformKindV2.HOPPER
+    assert outcome.validation_evidence.checks == ("hopper_route_l2_valid",)
+    assert type(outcome.route.primitives[0]) is v2.HopperJumpPrimitiveV2
+
+
+def test_api_hopper_claimed_success_is_independently_replayed() -> None:
+    request, registry, provider = _api_hopper_fixture()
+
+    class ForgingProvider:
+        profile = provider.profile
+        hopper_authority = provider.hopper_authority
+
+        def plan(self, request, anchor, deadline):
+            outcome = provider.plan(request, anchor, deadline)
+            assert type(outcome) is PlanningSuccessV2
+            object.__setattr__(
+                outcome.route.primitives[0], "selected_landing_mass", 0.999
+            )
+            return outcome
+
+    outcome = plan_v2(
+        request,
+        registry=registry,
+        providers={provider.profile.profile_id: ForgingProvider()},
+        monotonic_clock=lambda: 0.0,
+    )
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.category is FailureCategoryV2.INTERNAL_ERROR
+    assert outcome.reason_code == "hopper_provider_outcome_contract_mismatch"
+    assert outcome.evidence.stage == "provider_postcondition"
