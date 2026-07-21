@@ -475,11 +475,17 @@ def _memory_failure_details_v2(
     persistent_bytes: int,
     transient_bytes: int,
     phase: str,
+    attempted_bytes: int | None = None,
 ) -> tuple[tuple[str, str | int | float | bool | None], ...]:
     return (
         ("accounting_id", ledger.accounting_id),
         ("admitted_record_count", ledger.admitted_record_count),
-        ("attempted_accounted_bytes", persistent_bytes + transient_bytes),
+        (
+            "attempted_accounted_bytes",
+            persistent_bytes + transient_bytes
+            if attempted_bytes is None
+            else attempted_bytes,
+        ),
         ("effective_max_memory_bytes", ledger.effective_max_memory_bytes),
         ("max_memory_bytes", ledger.requested_max_memory_bytes),
         ("persistent_accounted_bytes", persistent_bytes),
@@ -681,9 +687,10 @@ class HopperPrimitiveProviderV2:
                 "search_memory",
                 details=_memory_failure_details_v2(
                     memory_ledger,
-                    persistent_bytes=root_persistent,
+                    persistent_bytes=_search_persistent_bytes_v2(0),
                     transient_bytes=0,
                     phase="root_admission",
+                    attempted_bytes=root_persistent,
                 ),
             )
         memory_ledger = _updated_memory_ledger_v2(
@@ -1138,9 +1145,12 @@ class HopperPrimitiveProviderV2:
                                 rejected_l2=rejected_l2,
                                 details=_memory_failure_details_v2(
                                     memory_ledger,
-                                    persistent_bytes=prospective_persistent,
+                                    persistent_bytes=_search_persistent_bytes_v2(
+                                        memory_ledger.admitted_record_count
+                                    ),
                                     transient_bytes=0,
                                     phase="child_admission",
+                                    attempted_bytes=prospective_persistent,
                                 ),
                             )
                         memory_ledger = _updated_memory_ledger_v2(
