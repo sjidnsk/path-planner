@@ -28,13 +28,16 @@ from path_planner.v2.hopper_authority import (
     HopperProviderAuthorityV2,
     _lookup_hopper_parameter_set_v2,
     _parameter_set_record_is_exact_v2,
+    _require_canonical_resource_authority_v2,
 )
 from path_planner.v2.oracles.hopper import (
     HopperJumpCandidateV2,
+    HopperValidationResultV2,
     validate_hopper_jump_l2,
 )
 from path_planner.v2.profiles import audit_hopper_profile_v2, PlatformProfileV2
 from path_planner.v2.runtime import PlanningDeadlineV2
+from path_planner.v2.search import SearchQueueEntryV2, StableSearchQueueV2
 from path_planner.v2.terrain import FineSafetyAnchorV2
 
 
@@ -332,6 +335,160 @@ def _provider_direction_v2(index: int) -> tuple[float, float]:
 
 
 @dataclass(frozen=True, slots=True)
+class _HopperSearchMemoryLedgerV2:
+    accounting_id: str
+    requested_max_memory_bytes: int
+    effective_max_memory_bytes: int
+    admitted_record_count: int
+    persistent_peak_bytes: int
+    transient_reservation_peak_bytes: int
+    combined_accounted_peak_bytes: int
+    route_materialization_peak_bytes: int
+    schema_version: str = "hopper-search-memory-ledger/v1"
+
+    def __post_init__(self) -> None:
+        if type(self.accounting_id) is not str or not self.accounting_id:
+            raise TypeError("accounting_id must be exact nonempty str")
+        for name in (
+            "requested_max_memory_bytes",
+            "effective_max_memory_bytes",
+            "admitted_record_count",
+            "persistent_peak_bytes",
+            "transient_reservation_peak_bytes",
+            "combined_accounted_peak_bytes",
+            "route_materialization_peak_bytes",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise TypeError(f"{name} must be an exact nonnegative int")
+        if self.schema_version != "hopper-search-memory-ledger/v1":
+            raise ValueError("memory ledger schema mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class _HopperNodeRecordV2:
+    candidate_id: str
+    state: HopperSearchStateV2
+    state_key: tuple[int, ...]
+    depth: int
+    route_state_count: int
+    distance_cost: float
+    energy_cost: float
+    time_cost: float
+    total_cost: float
+    parent_candidate_id: str | None
+    incoming_action: tuple[int, int, int] | None
+    selected_landing_mass: float | None
+    duration_s: float
+    distance_m: float
+    energy_resource: float
+
+
+_HOPPER_SEMANTIC_REASON_RANK_V2 = {
+    "hopper_launch_unknown": 10,
+    "hopper_launch_unsafe": 11,
+    "hopper_arc_boundary_violation": 20,
+    "hopper_arc_unknown": 21,
+    "hopper_arc_clearance_violation": 22,
+    "hopper_landing_probability_below_threshold": 30,
+    "hopper_landing_zone_unknown": 40,
+    "hopper_landing_zone_unsafe": 41,
+    "hopper_landing_slope_exceeded": 42,
+    "hopper_landing_height_unreachable": 43,
+    "hopper_landing_theta_unreachable": 50,
+    "hopper_stop_condition_failed": 60,
+}
+
+
+def _search_persistent_bytes_v2(record_count: int) -> int:
+    authority = HOPPER_RESOURCE_AUTHORITY_V2
+    return authority.search_base_bytes + authority.search_record_bytes * record_count
+
+
+def _route_materialization_bytes_v2(hop_count: int) -> int:
+    authority = HOPPER_RESOURCE_AUTHORITY_V2
+    return authority.route_build_base_bytes + authority.route_primitive_bytes * hop_count
+
+
+def _action_transient_reservations_v2() -> tuple[tuple[str, int], ...]:
+    authority = HOPPER_RESOURCE_AUTHORITY_V2
+    ballistic = authority.ballistic_build_base_bytes + (
+        authority.ballistic_build_per_sample_bytes
+        * authority.max_ballistic_samples
+    )
+    exact_slot_bytes = authority.exact_integer_slot_overhead_bytes + (
+        authority.max_exact_integer_bits + 7
+    ) // 8
+    arc = authority.ballistic_retained_per_sample_bytes * 2 + (
+        authority.exact_base_bytes
+        + authority.max_exact_live_integer_slots * exact_slot_bytes
+        + authority.max_replay_steps * authority.exact_distinct_cell_bytes
+    )
+    landing = authority.landing_build_base_bytes + (
+        authority.landing_build_per_candidate_bytes
+        * authority.max_landing_candidates
+    )
+    return (
+        ("ballistic_build", ballistic),
+        ("arc_oracle", arc),
+        ("landing_build", landing),
+    )
+
+
+def _updated_memory_ledger_v2(
+    ledger: _HopperSearchMemoryLedgerV2,
+    *,
+    admitted_record_count: int | None = None,
+    persistent_bytes: int,
+    transient_bytes: int = 0,
+    route_materialization_bytes: int = 0,
+) -> _HopperSearchMemoryLedgerV2:
+    combined = persistent_bytes + transient_bytes
+    return _HopperSearchMemoryLedgerV2(
+        accounting_id=ledger.accounting_id,
+        requested_max_memory_bytes=ledger.requested_max_memory_bytes,
+        effective_max_memory_bytes=ledger.effective_max_memory_bytes,
+        admitted_record_count=(
+            ledger.admitted_record_count
+            if admitted_record_count is None
+            else admitted_record_count
+        ),
+        persistent_peak_bytes=max(ledger.persistent_peak_bytes, persistent_bytes),
+        transient_reservation_peak_bytes=max(
+            ledger.transient_reservation_peak_bytes,
+            transient_bytes,
+        ),
+        combined_accounted_peak_bytes=max(
+            ledger.combined_accounted_peak_bytes,
+            combined,
+        ),
+        route_materialization_peak_bytes=max(
+            ledger.route_materialization_peak_bytes,
+            route_materialization_bytes,
+        ),
+    )
+
+
+def _memory_failure_details_v2(
+    ledger: _HopperSearchMemoryLedgerV2,
+    *,
+    persistent_bytes: int,
+    transient_bytes: int,
+    phase: str,
+) -> tuple[tuple[str, str | int | float | bool | None], ...]:
+    return (
+        ("accounting_id", ledger.accounting_id),
+        ("admitted_record_count", ledger.admitted_record_count),
+        ("attempted_accounted_bytes", persistent_bytes + transient_bytes),
+        ("effective_max_memory_bytes", ledger.effective_max_memory_bytes),
+        ("max_memory_bytes", ledger.requested_max_memory_bytes),
+        ("persistent_accounted_bytes", persistent_bytes),
+        ("phase", phase),
+        ("transient_reserved_bytes", transient_bytes),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class HopperPrimitiveProviderV2:
     hopper_authority: HopperProviderAuthorityV2
 
@@ -366,6 +523,26 @@ class HopperPrimitiveProviderV2:
                 "terrain_snapshot_identity_mismatch",
                 FailureCategoryV2.INTERNAL_ERROR,
                 "provider_authority",
+            )
+
+        try:
+            _require_canonical_resource_authority_v2(
+                HOPPER_RESOURCE_AUTHORITY_V2
+            )
+        except (KeyboardInterrupt, MemoryError, SystemExit):
+            raise
+        except Exception:
+            return _provider_failure_v2(
+                request,
+                deadline,
+                "hopper_authority_contract_mismatch",
+                FailureCategoryV2.INTERNAL_ERROR,
+                "provider_authority",
+                details=(
+                    ("actual", "hopper_authority_contract_mismatch"),
+                    ("expected", "canonical_hopper_authority"),
+                    ("phase", "provider_authority"),
+                ),
             )
 
         profile = self.hopper_authority.hopper_profile
@@ -448,7 +625,11 @@ class HopperPrimitiveProviderV2:
                 deadline,
                 "hopper_expansion_budget_exhausted",
                 FailureCategoryV2.RESOURCE_LIMIT,
-                "search_setup",
+                "search_expansion",
+                details=(
+                    ("attempted_expanded_states", 1),
+                    ("max_expanded_states", 0),
+                ),
             )
         effective_route_states = min(
             request.resource_budget.max_route_states, 100_001
@@ -470,96 +651,593 @@ class HopperPrimitiveProviderV2:
                 ),
             )
 
-        expanded_states = 1
+        resource_authority = HOPPER_RESOURCE_AUTHORITY_V2
+        requested_memory = request.resource_budget.max_memory_bytes
+        effective_memory = (
+            resource_authority.hard_accounted_memory_bytes
+            if requested_memory == 0
+            else min(
+                requested_memory,
+                resource_authority.hard_accounted_memory_bytes,
+            )
+        )
+        memory_ledger = _HopperSearchMemoryLedgerV2(
+            resource_authority.memory_accounting_id,
+            requested_memory,
+            effective_memory,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        root_persistent = _search_persistent_bytes_v2(1)
+        if root_persistent > effective_memory:
+            return _provider_failure_v2(
+                request,
+                deadline,
+                "hopper_memory_budget_exceeded",
+                FailureCategoryV2.RESOURCE_LIMIT,
+                "search_memory",
+                details=_memory_failure_details_v2(
+                    memory_ledger,
+                    persistent_bytes=root_persistent,
+                    transient_bytes=0,
+                    phase="root_admission",
+                ),
+            )
+        memory_ledger = _updated_memory_ledger_v2(
+            memory_ledger,
+            admitted_record_count=1,
+            persistent_bytes=root_persistent,
+        )
+
+        expanded_states = 0
         generated_primitives = 0
         rejected_l2 = 0
         start_hopper = HopperSearchStateV2(request.start_state, 0.0)
-        best_match: tuple[float, tuple[int, int, int], HopperJumpPrimitiveV2] | None = None
         objective = request.objective_profile
-
-        for speed_index in range(4):
-            for elevation_index in range(3):
-                for azimuth_index in range(16):
-                    generated_primitives += 1
-                    if deadline.expired:
-                        return _provider_failure_v2(
-                            request,
-                            deadline,
-                            "planning_deadline_expired",
-                            FailureCategoryV2.TIMEOUT,
-                            "search_expansion",
-                            expanded_states=expanded_states,
-                            generated_primitives=generated_primitives,
-                            rejected_l2=rejected_l2,
-                        )
-                    candidate = HopperJumpCandidateV2(
-                        request.start_state,
+        start_key = hopper_state_key_v2(start_hopper)
+        root_id = "hopper-node-00000000000000000000"
+        root_node = _HopperNodeRecordV2(
+            root_id,
+            start_hopper,
+            start_key,
+            0,
+            1,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
+            None,
+            None,
+            0.0,
+            0.0,
+            0.0,
+        )
+        queue = StableSearchQueueV2()
+        try:
+            queue.extend(
+                (
+                    SearchQueueEntryV2(
+                        root_id,
+                        start_key,
+                        "hopper-root/v1",
                         0.0,
-                        profile,
-                        record.parameter_set_id,
-                        speed_index,
-                        elevation_index,
-                        azimuth_index,
-                        "hopper-jump-candidate/v1",
-                    )
-                    validation = validate_hopper_jump_l2(candidate, anchor, deadline)
-                    if validation.reason_code != "hopper_jump_l2_valid":
-                        if validation.category is FailureCategoryV2.VALIDATION_FAILED:
-                            rejected_l2 += 1
-                            continue
-                        return _provider_failure_v2(
-                            request,
-                            deadline,
-                            validation.reason_code,
-                            validation.category or FailureCategoryV2.INTERNAL_ERROR,
-                            validation.stage,
-                            expanded_states=expanded_states,
-                            generated_primitives=generated_primitives,
-                            rejected_l2=rejected_l2,
-                            details=validation.details,
-                        )
-                    speed = profile.launch_speeds_mps[speed_index]
-                    elevation = profile.launch_elevations_rad[elevation_index]
-                    vertical_speed = speed * sin(elevation)
-                    flight_time = 2.0 * (vertical_speed / profile.gravity_mps2)
-                    distance = (speed * cos(elevation)) * flight_time
-                    x_direction, y_direction = _provider_direction_v2(azimuth_index)
-                    end_pose = PoseStateV2(
-                        request.start_state.x_m + distance * x_direction,
-                        request.start_state.y_m + distance * y_direction,
-                        request.start_state.heading_rad,
-                    )
-                    end_hopper = HopperSearchStateV2(end_pose, 0.0)
-                    energy = record.energy_evaluator(speed)
-                    primitive = HopperJumpPrimitiveV2(
-                        kind=PrimitiveKindV2.BALLISTIC_JUMP,
-                        start_state=request.start_state,
-                        end_state=end_pose,
-                        duration_s=flight_time,
-                        distance_m=distance,
-                        energy_cost=energy,
-                        observation_contribution=0.0,
-                        validation_level=ValidationLevelV2.L2,
-                        start_hopper_state=start_hopper,
-                        end_hopper_state=end_hopper,
-                        speed_index=speed_index,
-                        elevation_index=elevation_index,
-                        azimuth_index=azimuth_index,
-                        parameter_set_id=record.parameter_set_id,
-                        selected_landing_mass=validation.selected_landing_mass,
-                    )
-                    if end_pose != request.goal_state:
-                        continue
-                    distance_cost = objective.distance_weight * distance
-                    energy_cost = objective.energy_weight * energy
-                    time_cost = objective.time_weight * flight_time
-                    total = sum((distance_cost, 0.0, energy_cost, time_cost))
-                    key = (speed_index, elevation_index, azimuth_index)
-                    candidate_match = (total, key, primitive)
-                    if best_match is None or candidate_match[:2] < best_match[:2]:
-                        best_match = candidate_match
+                        0.0,
+                        (),
+                    ),
+                )
+            )
+        except (KeyboardInterrupt, MemoryError, SystemExit):
+            raise
+        except Exception:
+            return _provider_failure_v2(
+                request,
+                deadline,
+                "hopper_search_cost_contract_mismatch",
+                FailureCategoryV2.INTERNAL_ERROR,
+                "search_setup",
+                details=(
+                    ("actual", "root_queue_rejected"),
+                    ("expected", "stable_search_queue_entry"),
+                    ("phase", "search_setup"),
+                ),
+            )
 
-        if best_match is None:
+        nodes: dict[str, _HopperNodeRecordV2] = {root_id: root_node}
+        best_by_state: dict[tuple[int, ...], tuple[float, str]] = {
+            start_key: (0.0, root_id)
+        }
+        closed: set[tuple[int, ...]] = set()
+        serial = 1
+        goal_node: _HopperNodeRecordV2 | None = None
+        semantic_representative: tuple[
+            tuple[int, tuple[int, int], tuple[int, int], tuple[int, int], str],
+            str,
+            str,
+            int,
+            int | None,
+            int | None,
+            int | None,
+        ] | None = None
+        action_reservations = _action_transient_reservations_v2()
+
+        while len(queue) > 0:
+            if deadline.expired:
+                return _provider_failure_v2(
+                    request,
+                    deadline,
+                    "planning_deadline_expired",
+                    FailureCategoryV2.TIMEOUT,
+                    "search_expansion",
+                    expanded_states=expanded_states,
+                    generated_primitives=generated_primitives,
+                    rejected_l2=rejected_l2,
+                )
+            try:
+                entry = queue.pop_anchor()
+                node = nodes[entry.candidate_id]
+            except (KeyboardInterrupt, MemoryError, SystemExit):
+                raise
+            except Exception:
+                return _provider_failure_v2(
+                    request,
+                    deadline,
+                    "hopper_search_cost_contract_mismatch",
+                    FailureCategoryV2.INTERNAL_ERROR,
+                    "search_expansion",
+                    expanded_states=expanded_states,
+                    generated_primitives=generated_primitives,
+                    rejected_l2=rejected_l2,
+                    details=(
+                        ("actual", "queue_node_mismatch"),
+                        ("expected", "admitted_node"),
+                        ("phase", "search_expansion"),
+                    ),
+                )
+            best = best_by_state.get(entry.state_key)
+            if best != (entry.path_cost, entry.candidate_id):
+                continue
+            if entry.state_key in closed:
+                continue
+            if node.state.nominal_state == request.goal_state:
+                goal_node = node
+                break
+            if expanded_states >= request.resource_budget.max_expanded_states:
+                return _provider_failure_v2(
+                    request,
+                    deadline,
+                    "hopper_expansion_budget_exhausted",
+                    FailureCategoryV2.RESOURCE_LIMIT,
+                    "search_expansion",
+                    expanded_states=expanded_states,
+                    generated_primitives=generated_primitives,
+                    rejected_l2=rejected_l2,
+                    details=(
+                        ("attempted_expanded_states", expanded_states + 1),
+                        (
+                            "max_expanded_states",
+                            request.resource_budget.max_expanded_states,
+                        ),
+                    ),
+                )
+            closed.add(entry.state_key)
+            expanded_states += 1
+
+            for speed_index in range(4):
+                for elevation_index in range(3):
+                    for azimuth_index in range(16):
+                        if deadline.expired:
+                            return _provider_failure_v2(
+                                request,
+                                deadline,
+                                "planning_deadline_expired",
+                                FailureCategoryV2.TIMEOUT,
+                                "search_expansion",
+                                expanded_states=expanded_states,
+                                generated_primitives=generated_primitives,
+                                rejected_l2=rejected_l2,
+                            )
+                        persistent = _search_persistent_bytes_v2(
+                            memory_ledger.admitted_record_count
+                        )
+                        for phase, transient in action_reservations:
+                            if persistent + transient > effective_memory:
+                                return _provider_failure_v2(
+                                    request,
+                                    deadline,
+                                    "hopper_memory_budget_exceeded",
+                                    FailureCategoryV2.RESOURCE_LIMIT,
+                                    "search_memory",
+                                    expanded_states=expanded_states,
+                                    generated_primitives=generated_primitives,
+                                    rejected_l2=rejected_l2,
+                                    details=_memory_failure_details_v2(
+                                        memory_ledger,
+                                        persistent_bytes=persistent,
+                                        transient_bytes=transient,
+                                        phase=phase,
+                                    ),
+                                )
+                            memory_ledger = _updated_memory_ledger_v2(
+                                memory_ledger,
+                                persistent_bytes=persistent,
+                                transient_bytes=transient,
+                            )
+
+                        candidate = HopperJumpCandidateV2(
+                            node.state.nominal_state,
+                            node.state.support_height_m,
+                            profile,
+                            record.parameter_set_id,
+                            speed_index,
+                            elevation_index,
+                            azimuth_index,
+                            "hopper-jump-candidate/v1",
+                        )
+                        generated_primitives += 1
+                        try:
+                            validation = validate_hopper_jump_l2(
+                                candidate,
+                                anchor,
+                                deadline,
+                            )
+                        except (KeyboardInterrupt, MemoryError, SystemExit):
+                            raise
+                        except Exception:
+                            validation = None
+                        if type(validation) is not HopperValidationResultV2:
+                            return _provider_failure_v2(
+                                request,
+                                deadline,
+                                "hopper_jump_oracle_contract_mismatch",
+                                FailureCategoryV2.INTERNAL_ERROR,
+                                "search_expansion",
+                                expanded_states=expanded_states,
+                                generated_primitives=generated_primitives,
+                                rejected_l2=rejected_l2,
+                                details=(
+                                    ("actual", "malformed_or_exception"),
+                                    ("expected", "hopper-jump-validation-result/v1"),
+                                    ("phase", "search_expansion"),
+                                ),
+                            )
+                        if validation.reason_code != "hopper_jump_l2_valid":
+                            if (
+                                validation.category
+                                is FailureCategoryV2.VALIDATION_FAILED
+                            ):
+                                rejected_l2 += 1
+                                reason_rank = _HOPPER_SEMANTIC_REASON_RANK_V2[
+                                    validation.reason_code
+                                ]
+                                segment = validation.segment_index
+                                cell_y = (
+                                    None
+                                    if validation.failed_cell is None
+                                    else validation.failed_cell.y
+                                )
+                                cell_x = (
+                                    None
+                                    if validation.failed_cell is None
+                                    else validation.failed_cell.x
+                                )
+                                action_key = (
+                                    f"{speed_index:02d}:"
+                                    f"{elevation_index:02d}:"
+                                    f"{azimuth_index:02d}"
+                                )
+                                rank_key = (
+                                    reason_rank,
+                                    (1, 0) if segment is None else (0, segment),
+                                    (1, 0) if cell_y is None else (0, cell_y),
+                                    (1, 0) if cell_x is None else (0, cell_x),
+                                    action_key,
+                                )
+                                representative = (
+                                    rank_key,
+                                    validation.reason_code,
+                                    action_key,
+                                    node.depth,
+                                    segment,
+                                    cell_y,
+                                    cell_x,
+                                )
+                                if (
+                                    semantic_representative is None
+                                    or representative[0]
+                                    < semantic_representative[0]
+                                ):
+                                    semantic_representative = representative
+                                continue
+                            details = validation.details
+                            if validation.reason_code == "planning_deadline_expired":
+                                details = ()
+                            elif validation.reason_code not in (
+                                "hopper_replay_work_budget_exceeded",
+                            ):
+                                details = (
+                                    ("actual", validation.reason_code),
+                                    ("expected", "hopper_jump_l2_valid"),
+                                    ("phase", validation.stage),
+                                )
+                            return _provider_failure_v2(
+                                request,
+                                deadline,
+                                validation.reason_code,
+                                validation.category
+                                or FailureCategoryV2.INTERNAL_ERROR,
+                                validation.stage,
+                                expanded_states=expanded_states,
+                                generated_primitives=generated_primitives,
+                                rejected_l2=rejected_l2,
+                                details=details,
+                            )
+                        selected_mass = validation.selected_landing_mass
+                        if (
+                            type(selected_mass) is not float
+                            or selected_mass < _MIN_SELECTED_LANDING_MASS_V2
+                        ):
+                            return _provider_failure_v2(
+                                request,
+                                deadline,
+                                "hopper_jump_oracle_contract_mismatch",
+                                FailureCategoryV2.INTERNAL_ERROR,
+                                "search_expansion",
+                                expanded_states=expanded_states,
+                                generated_primitives=generated_primitives,
+                                rejected_l2=rejected_l2,
+                                details=(
+                                    ("actual", "invalid_selected_landing_mass"),
+                                    ("expected", "mass_at_least_0.99"),
+                                    ("phase", "search_expansion"),
+                                ),
+                            )
+
+                        speed = profile.launch_speeds_mps[speed_index]
+                        elevation = profile.launch_elevations_rad[elevation_index]
+                        horizontal_speed = speed * cos(elevation)
+                        vertical_speed = speed * sin(elevation)
+                        flight_time = 2.0 * (
+                            vertical_speed / profile.gravity_mps2
+                        )
+                        x_direction, y_direction = _provider_direction_v2(
+                            azimuth_index
+                        )
+                        dx = (horizontal_speed * x_direction) * flight_time
+                        dy = (horizontal_speed * y_direction) * flight_time
+                        distance = horizontal_speed * flight_time
+                        end_pose = PoseStateV2(
+                            node.state.nominal_state.x_m + dx,
+                            node.state.nominal_state.y_m + dy,
+                            node.state.nominal_state.heading_rad,
+                        )
+                        end_hopper = HopperSearchStateV2(
+                            end_pose,
+                            node.state.support_height_m,
+                        )
+                        try:
+                            energy = record.energy_evaluator(speed)
+                            distance_cost = node.distance_cost + (
+                                objective.distance_weight * distance
+                            )
+                            energy_cost = node.energy_cost + (
+                                objective.energy_weight * energy
+                            )
+                            time_cost = node.time_cost + (
+                                objective.time_weight * flight_time
+                            )
+                            total = sum(
+                                (distance_cost, 0.0, energy_cost, time_cost)
+                            )
+                            if any(
+                                type(value) is not float
+                                or not isfinite(value)
+                                or value < 0.0
+                                for value in (
+                                    energy,
+                                    distance_cost,
+                                    energy_cost,
+                                    time_cost,
+                                    total,
+                                )
+                            ):
+                                raise ValueError
+                        except (KeyboardInterrupt, MemoryError, SystemExit):
+                            raise
+                        except Exception:
+                            return _provider_failure_v2(
+                                request,
+                                deadline,
+                                "hopper_numeric_contract_mismatch",
+                                FailureCategoryV2.INTERNAL_ERROR,
+                                "search_expansion",
+                                expanded_states=expanded_states,
+                                generated_primitives=generated_primitives,
+                                rejected_l2=rejected_l2,
+                                details=(
+                                    ("actual", "noncanonical_search_cost"),
+                                    ("expected", "finite_nonnegative_binary64"),
+                                    ("phase", "search_expansion"),
+                                ),
+                            )
+
+                        child_route_states = node.route_state_count + 1
+                        if child_route_states > effective_route_states:
+                            return _provider_failure_v2(
+                                request,
+                                deadline,
+                                "hopper_route_state_budget_exceeded",
+                                FailureCategoryV2.RESOURCE_LIMIT,
+                                "route_state_admission",
+                                expanded_states=expanded_states,
+                                generated_primitives=generated_primitives,
+                                rejected_l2=rejected_l2,
+                                details=(
+                                    (
+                                        "attempted_route_states",
+                                        child_route_states,
+                                    ),
+                                    (
+                                        "effective_max_route_states",
+                                        effective_route_states,
+                                    ),
+                                    (
+                                        "requested_max_route_states",
+                                        request.resource_budget.max_route_states,
+                                    ),
+                                ),
+                            )
+                        child_key = hopper_state_key_v2(end_hopper)
+                        candidate_id = f"hopper-node-{serial:020d}"
+                        serial += 1
+                        action_key = (
+                            f"{speed_index:02d}:"
+                            f"{elevation_index:02d}:"
+                            f"{azimuth_index:02d}"
+                        )
+                        existing = best_by_state.get(child_key)
+                        if child_key in closed:
+                            if existing is not None and total < existing[0]:
+                                return _provider_failure_v2(
+                                    request,
+                                    deadline,
+                                    "hopper_search_cost_contract_mismatch",
+                                    FailureCategoryV2.INTERNAL_ERROR,
+                                    "search_expansion",
+                                    expanded_states=expanded_states,
+                                    generated_primitives=generated_primitives,
+                                    rejected_l2=rejected_l2,
+                                    details=(
+                                        ("actual", "lower_cost_closed_state"),
+                                        ("expected", "dijkstra_monotonic_cost"),
+                                        ("phase", "search_expansion"),
+                                    ),
+                                )
+                            continue
+                        if existing is not None and total >= existing[0]:
+                            continue
+
+                        prospective_count = (
+                            memory_ledger.admitted_record_count + 1
+                        )
+                        prospective_persistent = _search_persistent_bytes_v2(
+                            prospective_count
+                        )
+                        if prospective_persistent > effective_memory:
+                            return _provider_failure_v2(
+                                request,
+                                deadline,
+                                "hopper_memory_budget_exceeded",
+                                FailureCategoryV2.RESOURCE_LIMIT,
+                                "search_memory",
+                                expanded_states=expanded_states,
+                                generated_primitives=generated_primitives,
+                                rejected_l2=rejected_l2,
+                                details=_memory_failure_details_v2(
+                                    memory_ledger,
+                                    persistent_bytes=prospective_persistent,
+                                    transient_bytes=0,
+                                    phase="child_admission",
+                                ),
+                            )
+                        memory_ledger = _updated_memory_ledger_v2(
+                            memory_ledger,
+                            admitted_record_count=prospective_count,
+                            persistent_bytes=prospective_persistent,
+                        )
+                        child_node = _HopperNodeRecordV2(
+                            candidate_id,
+                            end_hopper,
+                            child_key,
+                            node.depth + 1,
+                            child_route_states,
+                            distance_cost,
+                            energy_cost,
+                            time_cost,
+                            total,
+                            node.candidate_id,
+                            (speed_index, elevation_index, azimuth_index),
+                            selected_mass,
+                            flight_time,
+                            distance,
+                            energy,
+                        )
+                        nodes[candidate_id] = child_node
+                        best_by_state[child_key] = (total, candidate_id)
+                        try:
+                            queue.extend(
+                                (
+                                    SearchQueueEntryV2(
+                                        candidate_id,
+                                        child_key,
+                                        action_key,
+                                        total,
+                                        0.0,
+                                        (),
+                                    ),
+                                )
+                            )
+                        except (KeyboardInterrupt, MemoryError, SystemExit):
+                            raise
+                        except Exception:
+                            return _provider_failure_v2(
+                                request,
+                                deadline,
+                                "hopper_search_cost_contract_mismatch",
+                                FailureCategoryV2.INTERNAL_ERROR,
+                                "search_expansion",
+                                expanded_states=expanded_states,
+                                generated_primitives=generated_primitives,
+                                rejected_l2=rejected_l2,
+                                details=(
+                                    ("actual", "child_queue_rejected"),
+                                    ("expected", "stable_search_queue_entry"),
+                                    ("phase", "search_expansion"),
+                                ),
+                            )
+
+        if goal_node is None:
+            representative_details: tuple[
+                tuple[str, str | int | float | bool | None], ...
+            ]
+            if semantic_representative is None:
+                representative_details = (
+                    ("action_key", None),
+                    ("actual", None),
+                    ("candidate_id", None),
+                    ("cell_x", None),
+                    ("cell_y", None),
+                    ("hop_index", None),
+                    ("parameter_set_id", record.parameter_set_id),
+                    ("phase", "search_exhaustion"),
+                    ("reason_rank", None),
+                    ("segment_index", None),
+                )
+            else:
+                (
+                    rank_key,
+                    reason,
+                    action_key,
+                    hop_index,
+                    segment_index,
+                    cell_y,
+                    cell_x,
+                ) = semantic_representative
+                representative_details = (
+                    ("action_key", action_key),
+                    ("actual", reason),
+                    ("candidate_id", None),
+                    ("cell_x", cell_x),
+                    ("cell_y", cell_y),
+                    ("hop_index", hop_index),
+                    ("parameter_set_id", record.parameter_set_id),
+                    ("phase", "search_exhaustion"),
+                    ("reason_rank", rank_key[0]),
+                    ("segment_index", segment_index),
+                )
             return _provider_failure_v2(
                 request,
                 deadline,
@@ -569,14 +1247,114 @@ class HopperPrimitiveProviderV2:
                 expanded_states=expanded_states,
                 generated_primitives=generated_primitives,
                 rejected_l2=rejected_l2,
+                details=representative_details,
             )
 
-        _total, _action_key, primitive = best_match
+        hop_count = goal_node.depth
+        persistent = _search_persistent_bytes_v2(
+            memory_ledger.admitted_record_count
+        )
+        route_reservation = _route_materialization_bytes_v2(hop_count)
+        if persistent + route_reservation > effective_memory:
+            return _provider_failure_v2(
+                request,
+                deadline,
+                "hopper_memory_budget_exceeded",
+                FailureCategoryV2.RESOURCE_LIMIT,
+                "search_memory",
+                expanded_states=expanded_states,
+                generated_primitives=generated_primitives,
+                rejected_l2=rejected_l2,
+                details=_memory_failure_details_v2(
+                    memory_ledger,
+                    persistent_bytes=persistent,
+                    transient_bytes=route_reservation,
+                    phase="route_materialization",
+                ),
+            )
+        memory_ledger = _updated_memory_ledger_v2(
+            memory_ledger,
+            persistent_bytes=persistent,
+            transient_bytes=route_reservation,
+            route_materialization_bytes=persistent + route_reservation,
+        )
+
+        lineage: list[_HopperNodeRecordV2] = []
+        cursor = goal_node
+        while cursor.parent_candidate_id is not None:
+            lineage.append(cursor)
+            cursor = nodes[cursor.parent_candidate_id]
+        lineage.reverse()
+        primitives: list[HopperJumpPrimitiveV2] = []
+        parent = root_node
+        for child in lineage:
+            if child.incoming_action is None or child.selected_landing_mass is None:
+                return _provider_failure_v2(
+                    request,
+                    deadline,
+                    "hopper_primitive_structure_mismatch",
+                    FailureCategoryV2.INTERNAL_ERROR,
+                    "route_validation",
+                    expanded_states=expanded_states,
+                    generated_primitives=generated_primitives,
+                    rejected_l2=rejected_l2,
+                    details=(
+                        ("actual", "missing_lineage_action"),
+                        ("expected", "complete_hopper_lineage"),
+                        ("phase", "route_validation"),
+                    ),
+                )
+            speed_index, elevation_index, azimuth_index = child.incoming_action
+            primitives.append(
+                HopperJumpPrimitiveV2(
+                    kind=PrimitiveKindV2.BALLISTIC_JUMP,
+                    start_state=parent.state.nominal_state,
+                    end_state=child.state.nominal_state,
+                    duration_s=child.duration_s,
+                    distance_m=child.distance_m,
+                    energy_cost=child.energy_resource,
+                    observation_contribution=0.0,
+                    validation_level=ValidationLevelV2.L2,
+                    start_hopper_state=parent.state,
+                    end_hopper_state=child.state,
+                    speed_index=speed_index,
+                    elevation_index=elevation_index,
+                    azimuth_index=azimuth_index,
+                    parameter_set_id=record.parameter_set_id,
+                    selected_landing_mass=child.selected_landing_mass,
+                )
+            )
+            parent = child
         route = TypedRouteV2(
             PlatformKindV2.HOPPER,
-            (primitive,),
-            best_match[0],
+            tuple(primitives),
+            goal_node.total_cost,
             True,
+        )
+
+        complete_reservation = _route_materialization_bytes_v2(hop_count)
+        route_l2_transient = max(value for _phase, value in action_reservations)
+        if complete_reservation + route_l2_transient > effective_memory:
+            return _provider_failure_v2(
+                request,
+                deadline,
+                "hopper_memory_budget_exceeded",
+                FailureCategoryV2.RESOURCE_LIMIT,
+                "search_memory",
+                expanded_states=expanded_states,
+                generated_primitives=generated_primitives,
+                rejected_l2=rejected_l2,
+                details=_memory_failure_details_v2(
+                    memory_ledger,
+                    persistent_bytes=complete_reservation,
+                    transient_bytes=route_l2_transient,
+                    phase="route_l2",
+                ),
+            )
+        memory_ledger = _updated_memory_ledger_v2(
+            memory_ledger,
+            persistent_bytes=complete_reservation,
+            transient_bytes=route_l2_transient,
         )
         from path_planner.v2.hopper_route_validation import validate_hopper_route_l2
 
@@ -607,7 +1385,10 @@ class HopperPrimitiveProviderV2:
                 source=(
                     "path-planner-v2-hopper-inflight-observation-disabled/v1"
                 ),
-                sample_states=(primitive.start_state, primitive.end_state),
+                sample_states=(
+                    primitives[0].start_state,
+                    *(primitive.end_state for primitive in primitives),
+                ),
                 expected_new_observed_cells=0.0,
                 expected_information_gain=0.0,
             ),
