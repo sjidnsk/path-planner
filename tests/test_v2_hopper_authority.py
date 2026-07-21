@@ -1,7 +1,7 @@
 from dataclasses import FrozenInstanceError, fields
 from importlib import import_module
 from inspect import Parameter, signature
-from math import ceil, pi
+from math import ceil, nextafter, pi
 
 import pytest
 
@@ -828,24 +828,160 @@ def test_exact_integer_arena_requires_live_canonical_resource_authority() -> Non
     assert operation_calls == 0
 
 
-def test_neutral_resource_authority_adds_no_fixture_registry_or_package_export() -> None:
+def test_hopper_provider_authority_wraps_the_explicit_algorithm_fixture() -> None:
     module = _authority_module()
-    for forbidden in (
-        "HopperProviderAuthorityV2",
-        "HopperParameterSetRecordV2",
-        "HOPPER_PARAMETER_SET_REGISTRY_V2",
-        "HOPPER_GATE5B_ALGORITHM_FIXTURE_V1",
-        "hopper_gate5b_algorithm_fixture_v1",
-    ):
-        assert not hasattr(module, forbidden)
+    hopper_profile = module.hopper_gate5b_algorithm_fixture_v1()
+    authority = module.HopperProviderAuthorityV2(
+        hopper_profile=hopper_profile,
+        parameter_set_id="hopper_gate5b_algorithm_fixture/v1",
+        authority_schema_version="hopper-provider-authority/v1",
+    )
+
+    assert tuple(field.name for field in fields(module.HopperProviderAuthorityV2)) == (
+        "hopper_profile",
+        "parameter_set_id",
+        "authority_schema_version",
+    )
+    assert authority.hopper_profile is hopper_profile
+    assert authority.parameter_set_id == "hopper_gate5b_algorithm_fixture/v1"
+    assert authority.authority_schema_version == "hopper-provider-authority/v1"
+    assert not hasattr(authority, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        authority.parameter_set_id = None
+
+
+def test_hopper_parameter_registry_contains_only_the_frozen_gate5b_fixture() -> None:
+    module = _authority_module()
+    registry = module.HOPPER_PARAMETER_SET_REGISTRY_V2
+
+    assert type(registry) is tuple
+    assert len(registry) == 1
+    record = registry[0]
+    assert record is module.HOPPER_GATE5B_ALGORITHM_FIXTURE_V1
+    assert type(record) is module.HopperParameterSetRecordV2
+    assert tuple(field.name for field in fields(module.HopperParameterSetRecordV2)) == (
+        "parameter_set_id",
+        "base_profile_id",
+        "body_envelope_radius_m",
+        "launch_reference_height_m",
+        "arc_clearance_margin_m",
+        "landing_footprint_radius_m",
+        "stop_condition",
+        "energy_model",
+        "stop_evaluator",
+        "energy_evaluator",
+        "evidence_class",
+        "simulation_proxy",
+        "formal_evidence_eligible",
+        "schema_version",
+    )
+    assert record.parameter_set_id == "hopper_gate5b_algorithm_fixture/v1"
+    assert record.base_profile_id == "hopper-lunar-ballistic-gate5b-fixture/v1"
+    assert (
+        record.body_envelope_radius_m.hex(),
+        record.launch_reference_height_m.hex(),
+        record.arc_clearance_margin_m.hex(),
+        record.landing_footprint_radius_m.hex(),
+    ) == (
+        "0x1.0000000000000p-2",
+        "0x1.0000000000000p-1",
+        "0x1.999999999999ap-4",
+        "0x1.3333333333333p-2",
+    )
+    assert record.stop_condition == (
+        "hopper_same_height_nominal_recenter_capture_le_3mps_"
+        "stop_simulation_proxy/v1"
+    )
+    assert record.energy_model == "hopper_launch_speed_squared_relative_energy/v1"
+    assert callable(record.stop_evaluator)
+    assert callable(record.energy_evaluator)
+    assert record.evidence_class == "test_fixture"
+    assert record.simulation_proxy is True
+    assert record.formal_evidence_eligible is False
+    assert record.schema_version == "hopper-parameter-set-record/v1"
+    assert not hasattr(record, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        record.formal_evidence_eligible = True
+
+    profile = module.hopper_gate5b_algorithm_fixture_v1()
+    assert profile.profile.profile_id == record.base_profile_id
+    assert profile.body_envelope_radius_m.hex() == record.body_envelope_radius_m.hex()
+    assert profile.launch_reference_height_m.hex() == (
+        record.launch_reference_height_m.hex()
+    )
+    assert profile.arc_clearance_margin_m.hex() == record.arc_clearance_margin_m.hex()
+    assert profile.landing_footprint_radius_m.hex() == (
+        record.landing_footprint_radius_m.hex()
+    )
+    assert profile.stop_condition == record.stop_condition
+    assert profile.energy_model == record.energy_model
+
+
+def test_hopper_fixture_stop_and_energy_evaluators_use_frozen_formulas() -> None:
+    record = _authority_module().HOPPER_GATE5B_ALGORITHM_FIXTURE_V1
+
+    assert record.stop_evaluator(1.5) is True
+    assert record.stop_evaluator(3.0) is True
+    assert record.stop_evaluator(nextafter(3.0, float("inf"))) is False
+
+    assert record.energy_evaluator(1.5) == 0.25
+    ratio_2 = 2.0 / 3.0
+    ratio_2_5 = 2.5 / 3.0
+    assert record.energy_evaluator(2.0) == ratio_2 * ratio_2
+    assert record.energy_evaluator(2.5) == ratio_2_5 * ratio_2_5
+    assert record.energy_evaluator(3.0) == 1.0
+
+
+def test_hopper_parameter_lookup_and_tokens_separate_process_identity_from_lineage() -> None:
+    module = _authority_module()
+    record = module.HOPPER_GATE5B_ALGORITHM_FIXTURE_V1
+
+    assert module._lookup_hopper_parameter_set_v2(record.parameter_set_id) is record
+    assert module._lookup_hopper_parameter_set_v2(None) == (
+        "hopper-parameter-set-absent/v1",
+        None,
+    )
+    assert module._lookup_hopper_parameter_set_v2("hopper-unknown/v1") == (
+        "hopper-parameter-set-absent/v1",
+        "hopper-unknown/v1",
+    )
+
+    first_memory = module._hopper_parameter_set_in_memory_token_v2(record)
+    second_memory = module._hopper_parameter_set_in_memory_token_v2(record)
+    first_lineage = module._hopper_parameter_set_lineage_token_v2(record)
+    second_lineage = module._hopper_parameter_set_lineage_token_v2(record)
+    assert first_memory == second_memory
+    assert first_lineage == second_lineage
+    assert record.stop_evaluator in first_memory
+    assert record.energy_evaluator in first_memory
+    assert record.stop_evaluator not in first_lineage
+    assert record.energy_evaluator not in first_lineage
+    assert canonical_json_bytes(first_lineage) == canonical_json_bytes(second_lineage)
+    with pytest.raises(TypeError, match="canonical JSON"):
+        canonical_json_bytes(first_memory)
+
+
+def test_hopper_parameter_authority_remains_out_of_package_exports_until_api_gate() -> None:
+    module = _authority_module()
+    assert hasattr(module, "HopperProviderAuthorityV2")
+    assert hasattr(module, "HopperParameterSetRecordV2")
+    assert hasattr(module, "HOPPER_PARAMETER_SET_REGISTRY_V2")
+    assert hasattr(module, "HOPPER_GATE5B_ALGORITHM_FIXTURE_V1")
+    assert hasattr(module, "hopper_gate5b_algorithm_fixture_v1")
 
     for package in (v2_package, oracles_package, providers_package):
         exports = tuple(getattr(package, "__all__", ()))
-        assert "HopperResourceAuthorityV2" not in exports
-        assert "HOPPER_RESOURCE_AUTHORITY_V2" not in exports
-        assert not hasattr(package, "HopperResourceAuthorityV2")
-        assert not hasattr(package, "HOPPER_RESOURCE_AUTHORITY_V2")
-
+        for forbidden in (
+            "HopperProviderAuthorityV2",
+            "HopperParameterSetRecordV2",
+            "HOPPER_PARAMETER_SET_REGISTRY_V2",
+            "HOPPER_GATE5B_ALGORITHM_FIXTURE_V1",
+            "hopper_gate5b_algorithm_fixture_v1",
+            "HopperResourceAuthorityV2",
+            "HOPPER_RESOURCE_AUTHORITY_V2",
+        ):
+            assert forbidden not in exports
+            assert not hasattr(package, forbidden)
 
 # This CPS entry point is only the atomic N-slot reservation, exact result-tuple
 # bit audit, and consumer-lifetime substrate for 11B2's operation-specific exact
