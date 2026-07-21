@@ -109,6 +109,54 @@ def _fixture_provider():
     return module.HopperPrimitiveProviderV2(authority), profile
 
 
+def _goal_after_hops(
+    profile: HopperProfileV2,
+    hop_count: int,
+    *,
+    speed_index: int = 1,
+    elevation_index: int = 1,
+    azimuth_index: int = 0,
+) -> PoseStateV2:
+    if azimuth_index != 0:
+        raise AssertionError("the focused fixture helper only derives east hops")
+    speed = profile.launch_speeds_mps[speed_index]
+    elevation = profile.launch_elevations_rad[elevation_index]
+    horizontal_speed = speed * cos(elevation)
+    vertical_speed = speed * sin(elevation)
+    flight_time = 2.0 * (vertical_speed / profile.gravity_mps2)
+    dx = (horizontal_speed * 1.0) * flight_time
+    state = PoseStateV2(0.25, 0.25, 0.0)
+    for _ in range(hop_count):
+        state = PoseStateV2(state.x_m + dx, state.y_m, state.heading_rad)
+    return state
+
+
+def _install_selective_oracle(monkeypatch, allowed_actions):
+    module = _module()
+    oracle_module = import_module("path_planner.v2.oracles.hopper")
+    real_oracle = module.validate_hopper_jump_l2
+    allowed = frozenset(allowed_actions)
+    seen: list[tuple[int, int, int]] = []
+
+    def selective(candidate, anchor, deadline):
+        action = (
+            candidate.speed_index,
+            candidate.elevation_index,
+            candidate.azimuth_index,
+        )
+        seen.append(action)
+        if action in allowed:
+            return real_oracle(candidate, anchor, deadline)
+        return oracle_module._result_v2(
+            "hopper_stop_condition_failed",
+            "stop_validation",
+            [0, 0, 0, 0, 0, 0],
+        )
+
+    monkeypatch.setattr(module, "validate_hopper_jump_l2", selective)
+    return seen
+
+
 def test_hopper_provider_capability_preflight_rejects_incomplete_and_unknown_authority() -> None:
     module = _module()
     platform = PlatformProfileV2(
@@ -146,10 +194,11 @@ def test_hopper_provider_capability_preflight_rejects_incomplete_and_unknown_aut
     assert outcome.search_telemetry.generated_primitives == 0
 
 
-def test_hopper_provider_returns_one_hop_fixture_success_envelope() -> None:
+def test_hopper_provider_returns_one_hop_fixture_success_envelope(monkeypatch) -> None:
     module = _module()
     provider, profile = _fixture_provider()
     anchor = _anchor()
+    _install_selective_oracle(monkeypatch, ((1, 1, 0),))
     outcome = provider.plan(_request(profile, anchor), anchor, _deadline())
     assert type(outcome) is PlanningSuccessV2
     assert outcome.platform_kind is PlatformKindV2.HOPPER
@@ -172,9 +221,10 @@ def test_hopper_provider_returns_one_hop_fixture_success_envelope() -> None:
     assert provider.profile is profile.profile
 
 
-def test_hopper_provider_repeated_runs_are_byte_deterministic() -> None:
+def test_hopper_provider_repeated_runs_are_byte_deterministic(monkeypatch) -> None:
     provider, profile = _fixture_provider()
     anchor = _anchor()
+    _install_selective_oracle(monkeypatch, ((1, 1, 0),))
     request = _request(profile, anchor)
     first = provider.plan(request, anchor, _deadline())
     second = provider.plan(request, anchor, _deadline())
@@ -233,9 +283,10 @@ def test_hopper_provider_enforces_risk_accelerator_deadline_and_resource_preflig
         assert outcome.search_telemetry.generated_primitives == 0
 
 
-def test_hopper_provider_search_exhaustion_returns_no_partial_route() -> None:
+def test_hopper_provider_search_exhaustion_returns_no_partial_route(monkeypatch) -> None:
     provider, profile = _fixture_provider()
     anchor = _anchor()
+    _install_selective_oracle(monkeypatch, ())
     request = _request(
         profile,
         anchor,
@@ -249,3 +300,130 @@ def test_hopper_provider_search_exhaustion_returns_no_partial_route() -> None:
     assert outcome.evidence.stage == "hopper_search"
     assert outcome.search_telemetry.expanded_states == 1
     assert outcome.search_telemetry.generated_primitives == 192
+
+
+def test_hopper_provider_runs_fixed_order_two_hop_dijkstra_and_endpoint_envelope(
+    monkeypatch,
+) -> None:
+    provider, profile = _fixture_provider()
+    anchor = _anchor()
+    seen = _install_selective_oracle(monkeypatch, ((1, 1, 0),))
+    request = _request(
+        profile,
+        anchor,
+        goal=_goal_after_hops(profile, 2),
+        budget=ResourceBudgetV2(5, 3, 0),
+    )
+
+    outcome = provider.plan(request, anchor, _deadline())
+
+    assert type(outcome) is PlanningSuccessV2
+    assert len(outcome.route.primitives) == 2
+    assert outcome.route.primitives[0].end_state == outcome.route.primitives[1].start_state
+    assert outcome.route.primitives[-1].end_state == request.goal_state
+    assert outcome.observation_projection.sample_states == (
+        outcome.route.primitives[0].start_state,
+        outcome.route.primitives[0].end_state,
+        outcome.route.primitives[1].end_state,
+    )
+    assert outcome.search_telemetry.expanded_states == 2
+    assert outcome.search_telemetry.generated_primitives == 384
+    assert outcome.search_telemetry.rejected_l2 == 382
+    expected_order = tuple(
+        (speed_index, elevation_index, azimuth_index)
+        for speed_index in range(4)
+        for elevation_index in range(3)
+        for azimuth_index in range(16)
+    )
+    assert tuple(seen) == expected_order + expected_order
+
+
+def test_hopper_provider_enforces_expansion_and_h_plus_one_route_state_caps(
+    monkeypatch,
+) -> None:
+    provider, profile = _fixture_provider()
+    anchor = _anchor()
+    _install_selective_oracle(monkeypatch, ((1, 1, 0),))
+    goal = _goal_after_hops(profile, 2)
+
+    expansion = provider.plan(
+        _request(
+            profile,
+            anchor,
+            goal=goal,
+            budget=ResourceBudgetV2(1, 3, 0),
+        ),
+        anchor,
+        _deadline(),
+    )
+    assert type(expansion) is PlanningFailureV2
+    assert expansion.category is FailureCategoryV2.RESOURCE_LIMIT
+    assert expansion.reason_code == "hopper_expansion_budget_exhausted"
+    assert expansion.evidence.details == (
+        ("attempted_expanded_states", 2),
+        ("max_expanded_states", 1),
+    )
+    assert expansion.search_telemetry.expanded_states == 1
+    assert expansion.search_telemetry.generated_primitives == 192
+
+    route_states = provider.plan(
+        _request(
+            profile,
+            anchor,
+            goal=goal,
+            budget=ResourceBudgetV2(5, 2, 0),
+        ),
+        anchor,
+        _deadline(),
+    )
+    assert type(route_states) is PlanningFailureV2
+    assert route_states.category is FailureCategoryV2.RESOURCE_LIMIT
+    assert route_states.reason_code == "hopper_route_state_budget_exceeded"
+    assert route_states.evidence.details == (
+        ("attempted_route_states", 3),
+        ("effective_max_route_states", 2),
+        ("requested_max_route_states", 2),
+    )
+    assert route_states.search_telemetry.expanded_states == 2
+    assert route_states.search_telemetry.generated_primitives == 193
+
+
+def test_hopper_provider_enforces_accounted_memory_root_and_transient_phases(
+    monkeypatch,
+) -> None:
+    provider, profile = _fixture_provider()
+    anchor = _anchor()
+    _install_selective_oracle(monkeypatch, ((1, 1, 0),))
+
+    root = provider.plan(
+        _request(
+            profile,
+            anchor,
+            budget=ResourceBudgetV2(10, 100, 5_119),
+        ),
+        anchor,
+        _deadline(),
+    )
+    assert type(root) is PlanningFailureV2
+    assert root.category is FailureCategoryV2.RESOURCE_LIMIT
+    assert root.reason_code == "hopper_memory_budget_exceeded"
+    assert dict(root.evidence.details)["phase"] == "root_admission"
+    assert dict(root.evidence.details)["attempted_accounted_bytes"] == 5_120
+    assert root.search_telemetry.expanded_states == 0
+    assert root.search_telemetry.generated_primitives == 0
+
+    transient = provider.plan(
+        _request(
+            profile,
+            anchor,
+            budget=ResourceBudgetV2(10, 100, 10_000_000),
+        ),
+        anchor,
+        _deadline(),
+    )
+    assert type(transient) is PlanningFailureV2
+    assert transient.category is FailureCategoryV2.RESOURCE_LIMIT
+    assert transient.reason_code == "hopper_memory_budget_exceeded"
+    assert dict(transient.evidence.details)["phase"] == "arc_oracle"
+    assert transient.search_telemetry.expanded_states == 1
+    assert transient.search_telemetry.generated_primitives == 0
