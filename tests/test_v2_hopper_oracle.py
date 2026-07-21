@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError, fields, replace
 from fractions import Fraction
 from importlib import import_module
 from inspect import Parameter, signature
-from math import copysign, cos, nextafter, pi, sin, sqrt
+from math import copysign, cos, fsum, nextafter, pi, sin, sqrt
 import os
 from pathlib import Path
 import subprocess
@@ -19,7 +19,12 @@ import path_planner.v2.ballistics as ballistics_module
 import path_planner.v2.hopper_authority as authority_module
 import path_planner.v2.oracles as oracle_exports
 from path_planner.core import Cell, WorldPoint
-from path_planner.v2.ballistics import BallisticSampleV2, BallisticStartV2, sample_ballistic_arc
+from path_planner.v2.ballistics import (
+    BallisticSampleV2,
+    BallisticStartV2,
+    LandingCellMassV2,
+    sample_ballistic_arc,
+)
 from path_planner.v2.contracts import (
     FailureCategoryV2,
     PlatformKindV2,
@@ -47,10 +52,13 @@ _EXPECTED_COUNTER_IDS = (
     "hopper_arc_interval_cell_visit_count/v1",
 )
 
-_ORACLE_ONLY_PARAMETER_SET_ID = "hopper_oracle_adversarial_parameter_set/v1"
-_ORACLE_ONLY_PROFILE_ID = "hopper-oracle-adversarial-profile/v1"
-_ORACLE_ONLY_STOP_ID = "hopper_oracle_adversarial_stop_proxy/v1"
-_ORACLE_ONLY_ENERGY_ID = "hopper_oracle_adversarial_energy_proxy/v1"
+_ORACLE_ONLY_PARAMETER_SET_ID = "hopper_gate5b_algorithm_fixture/v1"
+_ORACLE_ONLY_PROFILE_ID = "hopper-lunar-ballistic-gate5b-fixture/v1"
+_ORACLE_ONLY_STOP_ID = (
+    "hopper_same_height_nominal_recenter_capture_le_3mps_"
+    "stop_simulation_proxy/v1"
+)
+_ORACLE_ONLY_ENERGY_ID = "hopper_launch_speed_squared_relative_energy/v1"
 _SECTION2_FIXTURE_IDENTITIES = frozenset(
     {
         "hopper_gate5b_algorithm_fixture/v1",
@@ -76,6 +84,13 @@ _EXPECTED_REASONS = (
     "hopper_arc_boundary_violation",
     "hopper_arc_unknown",
     "hopper_arc_clearance_violation",
+    "hopper_landing_probability_below_threshold",
+    "hopper_landing_zone_unknown",
+    "hopper_landing_zone_unsafe",
+    "hopper_landing_slope_exceeded",
+    "hopper_landing_height_unreachable",
+    "hopper_landing_theta_unreachable",
+    "hopper_stop_condition_failed",
     "hopper_jump_l2_valid",
 )
 
@@ -564,7 +579,11 @@ def _assert_result_envelope(
         passed=reason_code == "hopper_jump_l2_valid",
         checks=(reason_code,),
     )
-    assert result.selected_landing_mass is None
+    if reason_code == "hopper_jump_l2_valid":
+        assert type(result.selected_landing_mass) is float
+        assert result.selected_landing_mass >= 0.99
+    elif stage not in ("landing_probability", "landing_validation", "stop_validation"):
+        assert result.selected_landing_mass is None
 
 
 def _assert_contract_details(result, stage: str) -> None:
@@ -631,8 +650,7 @@ def test_hopper_oracle_candidate_freezes_exact_fields_slots_types_and_schema() -
         candidate.hopper_profile.profile.profile_id,
         candidate.hopper_profile.stop_condition,
         candidate.hopper_profile.energy_model,
-    }.isdisjoint(_SECTION2_FIXTURE_IDENTITIES)
-    assert "provider" not in candidate.parameter_set_id
+    } == _SECTION2_FIXTURE_IDENTITIES
     assert "formal" not in candidate.parameter_set_id
     forbidden = {
         "dt_s",
@@ -717,17 +735,17 @@ def test_hopper_oracle_result_freezes_exact_fields_reason_stage_evidence_and_sch
         ),
         reason_code="hopper_jump_l2_valid",
         category=None,
-        stage="arc_validation",
+        stage="stop_validation",
         details=(),
         timed_out=False,
         failed_cell=None,
         segment_index=None,
         replay_work_counts=_reference_default_arc_counts(),
-        selected_landing_mass=None,
+        selected_landing_mass=0.99,
         schema_version="hopper-jump-validation-result/v1",
     )
     assert not hasattr(result, "__dict__")
-    assert result.selected_landing_mass is None
+    assert result.selected_landing_mass == 0.99
     assert result.replay_work_counts == _reference_default_arc_counts()
     assert result.replay_work_counts == (
         (_EXPECTED_COUNTER_IDS[0], 1),
@@ -795,13 +813,10 @@ def test_hopper_oracle_result_freezes_exact_fields_reason_stage_evidence_and_sch
     with pytest.raises((TypeError, ValueError)):
         replace(semantic_result, segment_index=None)
 
-    # 11B2 is deliberately arc-only.  The reserved landing field/stages remain
-    # closed until 11B3 changes these tests together with the same carrier schema.
     invalid_values = (
         ("reason_code", "not-a-hopper-reason"),
         ("reason_code", StrSubclass("hopper_jump_l2_valid")),
         ("category", FailureCategoryV2.TIMEOUT),
-        ("stage", "landing_validation"),
         ("stage", StrSubclass("arc_validation")),
         ("details", []),
         ("details", TupleSubclass(())),
@@ -816,7 +831,9 @@ def test_hopper_oracle_result_freezes_exact_fields_reason_stage_evidence_and_sch
             "replay_work_counts",
             tuple((name, 100_001) for name in _EXPECTED_COUNTER_IDS),
         ),
-        ("selected_landing_mass", 0.99),
+        ("selected_landing_mass", -0.01),
+        ("selected_landing_mass", 1.01),
+        ("selected_landing_mass", float("nan")),
         ("schema_version", StrSubclass("hopper-jump-validation-result/v1")),
         ("schema_version", "hopper-jump-validation-result/v2"),
     )
@@ -1237,7 +1254,7 @@ def test_hopper_oracle_requires_captured_a2_two_sample_flight_time_partition(mon
         result,
         reason_code="hopper_jump_l2_valid",
         category=None,
-        stage="arc_validation",
+        stage="stop_validation",
     )
     expected_counts = _reference_default_arc_counts()
     assert expected_counts == (
@@ -1361,9 +1378,9 @@ def test_hopper_launch_footprint_requires_closed_in_bounds_observed_safe_same_he
     assert passing.category is None
     assert passing.evidence.passed is True
     assert passing.details == ()
-    # This slice proves only the sealed launch/arc geometry.  Registry support,
-    # stop/energy binding, provider eligibility, and the sole Section2 fixture
-    # are intentionally unavailable until 11B3/provider preflight.
+    assert passing.stage == "stop_validation"
+    assert type(passing.selected_landing_mass) is float
+    assert passing.selected_landing_mass >= 0.99
     alternate_oracle_profile = _profile(
         stop_condition="hopper_oracle_unbound_stop_proxy/v1",
         energy_model="hopper_oracle_unbound_energy_proxy/v1",
@@ -1374,7 +1391,7 @@ def test_hopper_launch_footprint_requires_closed_in_bounds_observed_safe_same_he
             parameter_set_id="hopper_oracle_unbound_parameter_set/v1",
         ),
         anchor=base_anchor,
-    ).reason_code == "hopper_jump_l2_valid"
+    ).reason_code == "hopper_authority_contract_mismatch"
     launch_unknown = _validate(anchor=_anchor(unknown=(launch_cell,)))
     assert launch_unknown.reason_code == "hopper_launch_unknown"
     assert launch_unknown.category is FailureCategoryV2.VALIDATION_FAILED
@@ -1428,6 +1445,132 @@ def test_hopper_launch_footprint_enforces_exact_radius_reference_height_and_slop
         ).reason_code
         == "hopper_launch_unsafe"
     )
+
+
+def test_hopper_landing_requires_unconditioned_probability_before_terrain(
+    monkeypatch,
+) -> None:
+    module = _module()
+    original_query = FineSafetyAnchorV2.query
+    landing_queries = 0
+
+    def tracking_query(self, cell, max_slope_deg=30.0):
+        nonlocal landing_queries
+        if max_slope_deg == 15.0:
+            landing_queries += 1
+        return original_query(self, cell, max_slope_deg)
+
+    monkeypatch.setattr(FineSafetyAnchorV2, "query", tracking_query)
+    low_prefix = (LandingCellMassV2(Cell(21, 16), 0.98, True),)
+    monkeypatch.setattr(
+        module,
+        "_call_captured_landing_helper_v2",
+        lambda *_args, **_kwargs: low_prefix,
+    )
+    low = _validate()
+    assert low.reason_code == "hopper_landing_probability_below_threshold"
+    assert low.stage == "landing_probability"
+    assert low.selected_landing_mass == fsum(
+        item.probability_mass for item in low_prefix
+    )
+    assert landing_queries == 0
+
+    oob_prefix = (LandingCellMassV2(Cell(-1, 16), 0.99, False),)
+    monkeypatch.setattr(
+        module,
+        "_call_captured_landing_helper_v2",
+        lambda *_args, **_kwargs: oob_prefix,
+    )
+    oob = _validate()
+    assert oob.reason_code == "hopper_landing_zone_unsafe"
+    assert oob.stage == "landing_validation"
+    assert oob.selected_landing_mass == 0.99
+    assert oob.failed_cell == Cell(-1, 16)
+    assert oob.segment_index == 0
+
+
+def test_hopper_landing_checks_full_cell_square_and_nominal_mean_footprints(
+    monkeypatch,
+) -> None:
+    module = _module()
+    selected = (LandingCellMassV2(Cell(21, 16), 0.99, True),)
+    monkeypatch.setattr(
+        module,
+        "_call_captured_landing_helper_v2",
+        lambda *_args, **_kwargs: selected,
+    )
+    diagonal = Cell(22, 17)
+    dilated = _validate(anchor=_anchor(slopes=((diagonal, 16.0),)))
+    assert dilated.reason_code == "hopper_landing_slope_exceeded"
+    assert dilated.failed_cell == diagonal
+    assert dilated.segment_index == 0
+
+    remote = (LandingCellMassV2(Cell(30, 16), 0.99, True),)
+    monkeypatch.setattr(
+        module,
+        "_call_captured_landing_helper_v2",
+        lambda *_args, **_kwargs: remote,
+    )
+    nominal_mean_cell = Cell(21, 16)
+    nominal = _validate(anchor=_anchor(slopes=((nominal_mean_cell, 16.0),)))
+    assert nominal.reason_code == "hopper_landing_slope_exceeded"
+    assert nominal.failed_cell == nominal_mean_cell
+    assert nominal.segment_index is None
+
+
+def test_hopper_landing_reason_mapping_and_same_height_boundary(monkeypatch) -> None:
+    module = _module()
+    selected_cell = Cell(30, 16)
+    selected = (LandingCellMassV2(selected_cell, 0.99, True),)
+    monkeypatch.setattr(
+        module,
+        "_call_captured_landing_helper_v2",
+        lambda *_args, **_kwargs: selected,
+    )
+    cases = (
+        (_anchor(unknown=(selected_cell,)), "hopper_landing_zone_unknown"),
+        (_anchor(hard=(selected_cell,)), "hopper_landing_zone_unsafe"),
+        (
+            _anchor(slopes=((selected_cell, nextafter(15.0, float("inf"))),)),
+            "hopper_landing_slope_exceeded",
+        ),
+        (
+            _anchor(elevations=((selected_cell, nextafter(0.0, float("inf"))),)),
+            "hopper_landing_height_unreachable",
+        ),
+    )
+    for anchor, expected in cases:
+        result = _validate(anchor=anchor)
+        assert result.reason_code == expected
+        assert result.stage == "landing_validation"
+        assert result.failed_cell == selected_cell
+        assert result.segment_index == 0
+        assert result.selected_landing_mass == 0.99
+
+    equality = _validate(anchor=_anchor(slopes=((selected_cell, 15.0),)))
+    assert equality.reason_code == "hopper_jump_l2_valid"
+    assert equality.stage == "stop_validation"
+
+
+def test_hopper_fixture_fixed_yaw_and_closed_stop_seam() -> None:
+    module = _module()
+    record = authority_module.HOPPER_GATE5B_ALGORITHM_FIXTURE_V1
+    candidate = _candidate(
+        start_state=PoseStateV2(0.25, 0.25, 1.25),
+        speed_index=3,
+        azimuth_index=4,
+    )
+    pose = module._nominal_landing_pose_v2(candidate, 2.0, 3.0)
+    assert pose == PoseStateV2(2.0, 3.0, 1.25)
+    assert record.evidence_class == "test_fixture"
+    assert record.simulation_proxy is True
+    assert record.formal_evidence_eligible is False
+    assert record.stop_evaluator(3.0) is True
+    result = _validate(candidate=candidate)
+    assert result.reason_code == "hopper_jump_l2_valid"
+    assert result.stage == "stop_validation"
+    assert type(result.selected_landing_mass) is float
+    assert result.selected_landing_mass >= 0.99
 
 
 def test_hopper_arc_detects_interior_unknown_and_clearance_with_safe_endpoints() -> None:
