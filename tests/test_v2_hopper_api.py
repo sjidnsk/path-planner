@@ -59,15 +59,15 @@ def _fixture():
         ),
     )
     start = PoseStateV2(0.25, 0.25, 0.0)
-    speed = profile.launch_speeds_mps[1]
-    elevation = profile.launch_elevations_rad[1]
+    speed = profile.launch_speeds_mps[0]
+    elevation = profile.launch_elevations_rad[0]
     flight_time = 2.0 * ((speed * sin(elevation)) / profile.gravity_mps2)
     distance = (speed * cos(elevation)) * flight_time
     request = PlanningRequestV2(
         request_id="gate5b-hopper-api-module",
         platform_profile_id=profile.profile.profile_id,
         start_state=start,
-        goal_state=PoseStateV2(start.x_m + distance, start.y_m, 0.0),
+        goal_state=PoseStateV2(start.x_m, start.y_m + distance, 0.0),
         terrain_snapshot=snapshot,
         objective_profile=ObjectiveProfileV2(),
         resource_budget=ResourceBudgetV2(10, 100, 0),

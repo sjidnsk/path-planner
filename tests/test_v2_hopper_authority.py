@@ -961,7 +961,7 @@ def test_hopper_parameter_lookup_and_tokens_separate_process_identity_from_linea
         canonical_json_bytes(first_memory)
 
 
-def test_hopper_parameter_authority_remains_out_of_package_exports_until_api_gate() -> None:
+def test_hopper_parameter_authority_exports_only_the_public_api_wrapper() -> None:
     module = _authority_module()
     assert hasattr(module, "HopperProviderAuthorityV2")
     assert hasattr(module, "HopperParameterSetRecordV2")
@@ -969,10 +969,15 @@ def test_hopper_parameter_authority_remains_out_of_package_exports_until_api_gat
     assert hasattr(module, "HOPPER_GATE5B_ALGORITHM_FIXTURE_V1")
     assert hasattr(module, "hopper_gate5b_algorithm_fixture_v1")
 
+    assert "HopperProviderAuthorityV2" in v2_package.__all__
+    assert v2_package.HopperProviderAuthorityV2 is module.HopperProviderAuthorityV2
+    for package in (oracles_package, providers_package):
+        assert "HopperProviderAuthorityV2" not in package.__all__
+        assert not hasattr(package, "HopperProviderAuthorityV2")
+
     for package in (v2_package, oracles_package, providers_package):
         exports = tuple(getattr(package, "__all__", ()))
         for forbidden in (
-            "HopperProviderAuthorityV2",
             "HopperParameterSetRecordV2",
             "HOPPER_PARAMETER_SET_REGISTRY_V2",
             "HOPPER_GATE5B_ALGORITHM_FIXTURE_V1",
