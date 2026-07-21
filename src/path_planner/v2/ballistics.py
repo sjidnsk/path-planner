@@ -249,6 +249,81 @@ class LandingCellMassV2:
             raise TypeError("in_bounds must be exact bool")
 
 
+def _materialize_ballistic_arc_v2(
+    audited_start: BallisticStartV2,
+    horizontal_dx: float,
+    horizontal_dy: float,
+    landing_x: float,
+    landing_y: float,
+    apex_height: float,
+    flight_time: float,
+    dt: float,
+    max_sample_count: int,
+) -> tuple[BallisticSampleV2, ...]:
+    interval_count = _exact_positive_ratio_ceil(flight_time, dt)
+    sample_count = interval_count + 1
+    if type(max_sample_count) is not int:
+        raise TypeError("max_sample_count must be an exact int")
+    if max_sample_count <= 0:
+        raise ValueError("max_sample_count must be positive")
+    if sample_count > max_sample_count:
+        raise ValueError(f"sample_count must not exceed {max_sample_count}")
+
+    interior_times = _interior_sample_times(
+        flight_time,
+        dt,
+        interval_count,
+        max_sample_count,
+    )
+
+    samples = [
+        BallisticSampleV2(
+            0.0,
+            audited_start.x_m,
+            audited_start.y_m,
+            audited_start.z_m,
+        )
+    ]
+    for time_s in interior_times:
+        fraction = _derived_positive(time_s / flight_time, "sample time fraction")
+        if fraction >= 1.0:
+            raise ValueError("sample time fraction failed representability")
+        x_offset = _derived_finite(
+            horizontal_dx * fraction, "sample x displacement"
+        )
+        y_offset = _derived_finite(
+            horizontal_dy * fraction, "sample y displacement"
+        )
+        z_offset = _derived_positive(
+            4.0 * apex_height * fraction * (1.0 - fraction),
+            "sample z displacement",
+        )
+        if horizontal_dx != 0.0 and x_offset == 0.0:
+            raise ValueError("sample x_m failed representability")
+        if horizontal_dy != 0.0 and y_offset == 0.0:
+            raise ValueError("sample y_m failed representability")
+        x_m = _add_representable_offset(
+            audited_start.x_m, x_offset, "sample x_m"
+        )
+        y_m = _add_representable_offset(
+            audited_start.y_m, y_offset, "sample y_m"
+        )
+        z_m = _add_representable_offset(
+            audited_start.z_m, z_offset, "sample z_m"
+        )
+        samples.append(BallisticSampleV2(time_s, x_m, y_m, z_m))
+
+    samples.append(
+        BallisticSampleV2(
+            flight_time,
+            landing_x,
+            landing_y,
+            audited_start.z_m,
+        )
+    )
+    return tuple(samples)
+
+
 def sample_ballistic_arc(
     start: BallisticStartV2,
     speed_mps: float,
@@ -328,68 +403,107 @@ def sample_ballistic_arc_capped_v2(
     )
     _add_representable_offset(audited_start.z_m, apex_height, "apex z_m")
 
-    interval_count = _exact_positive_ratio_ceil(flight_time, dt)
-    sample_count = interval_count + 1
-    if type(max_sample_count) is not int:
-        raise TypeError("max_sample_count must be an exact int")
-    if max_sample_count <= 0:
-        raise ValueError("max_sample_count must be positive")
-    if sample_count > max_sample_count:
-        raise ValueError(f"sample_count must not exceed {max_sample_count}")
-
-    interior_times = _interior_sample_times(
+    return _materialize_ballistic_arc_v2(
+        audited_start,
+        horizontal_dx,
+        horizontal_dy,
+        landing_x,
+        landing_y,
+        apex_height,
         flight_time,
         dt,
-        interval_count,
         max_sample_count,
     )
 
-    samples = [
-        BallisticSampleV2(
-            0.0,
-            audited_start.x_m,
-            audited_start.y_m,
-            audited_start.z_m,
-        )
-    ]
-    for time_s in interior_times:
-        fraction = _derived_positive(time_s / flight_time, "sample time fraction")
-        if fraction >= 1.0:
-            raise ValueError("sample time fraction failed representability")
-        x_offset = _derived_finite(
-            horizontal_dx * fraction, "sample x displacement"
-        )
-        y_offset = _derived_finite(
-            horizontal_dy * fraction, "sample y displacement"
-        )
-        z_offset = _derived_positive(
-            4.0 * apex_height * fraction * (1.0 - fraction),
-            "sample z displacement",
-        )
-        if horizontal_dx != 0.0 and x_offset == 0.0:
-            raise ValueError("sample x_m failed representability")
-        if horizontal_dy != 0.0 and y_offset == 0.0:
-            raise ValueError("sample y_m failed representability")
-        x_m = _add_representable_offset(
-            audited_start.x_m, x_offset, "sample x_m"
-        )
-        y_m = _add_representable_offset(
-            audited_start.y_m, y_offset, "sample y_m"
-        )
-        z_m = _add_representable_offset(
-            audited_start.z_m, z_offset, "sample z_m"
-        )
-        samples.append(BallisticSampleV2(time_s, x_m, y_m, z_m))
 
-    samples.append(
-        BallisticSampleV2(
-            flight_time,
-            landing_x,
-            landing_y,
-            audited_start.z_m,
-        )
+def _sample_hopper_ballistic_arc_capped_v2(
+    start: BallisticStartV2,
+    speed_mps: float,
+    elevation_rad: float,
+    azimuth_index: int,
+    g_mps2: float,
+    *,
+    max_sample_count: int,
+) -> tuple[BallisticSampleV2, ...]:
+    if type(start) is not BallisticStartV2:
+        raise TypeError("start must be exact BallisticStartV2")
+    try:
+        start_x_m, start_y_m, start_z_m = start.x_m, start.y_m, start.z_m
+    except AttributeError:
+        raise TypeError("start must have exact fields") from None
+    audited_start = BallisticStartV2(start_x_m, start_y_m, start_z_m)
+    speed = _positive_real(speed_mps, "speed_mps")
+    elevation = _finite_real(elevation_rad, "elevation_rad")
+    if type(azimuth_index) is not int:
+        raise TypeError("azimuth_index must be an exact int")
+    if not 0 <= azimuth_index <= 15:
+        raise ValueError("azimuth_index must be in 0..15")
+    azimuth = _derived_finite(
+        2.0 * pi * azimuth_index / 16.0,
+        "azimuth_rad",
     )
-    return tuple(samples)
+    gravity = _positive_real(g_mps2, "g_mps2")
+    if not 0.0 < elevation < pi / 2.0:
+        raise ValueError("elevation_rad must be in (0, pi/2)")
+
+    horizontal_speed = _derived_positive(speed * cos(elevation), "horizontal speed")
+    vertical_speed = _derived_positive(speed * sin(elevation), "vertical speed")
+    if azimuth_index == 0:
+        x_direction, y_direction = 1.0, 0.0
+    elif azimuth_index == 4:
+        x_direction, y_direction = 0.0, 1.0
+    elif azimuth_index == 8:
+        x_direction, y_direction = -1.0, 0.0
+    elif azimuth_index == 12:
+        x_direction, y_direction = 0.0, -1.0
+    else:
+        x_direction = _derived_finite(cos(azimuth), "cos(azimuth_rad)")
+        y_direction = _derived_finite(sin(azimuth), "sin(azimuth_rad)")
+    vx = _derived_finite(horizontal_speed * x_direction, "x velocity")
+    vy = _derived_finite(horizontal_speed * y_direction, "y velocity")
+    if x_direction != 0.0 and vx == 0.0:
+        raise ValueError("x velocity failed representability")
+    if y_direction != 0.0 and vy == 0.0:
+        raise ValueError("y velocity failed representability")
+    vertical_time_scale = _derived_positive(
+        vertical_speed / gravity,
+        "vertical speed / gravity",
+    )
+    flight_time = _derived_positive(2.0 * vertical_time_scale, "flight time")
+
+    horizontal_dx = _derived_finite(vx * flight_time, "landing x displacement")
+    horizontal_dy = _derived_finite(vy * flight_time, "landing y displacement")
+    if vx != 0.0 and horizontal_dx == 0.0:
+        raise ValueError("landing x displacement failed representability")
+    if vy != 0.0 and horizontal_dy == 0.0:
+        raise ValueError("landing y displacement failed representability")
+    _derived_positive(horizontal_speed * flight_time, "horizontal range")
+    landing_x = _add_representable_offset(
+        audited_start.x_m, horizontal_dx, "landing x_m"
+    )
+    landing_y = _add_representable_offset(
+        audited_start.y_m, horizontal_dy, "landing y_m"
+    )
+    apex_height = _derived_positive(
+        vertical_time_scale * (0.5 * vertical_speed),
+        "apex height",
+    )
+    _add_representable_offset(audited_start.z_m, apex_height, "apex z_m")
+
+    samples = _materialize_ballistic_arc_v2(
+        audited_start,
+        horizontal_dx,
+        horizontal_dy,
+        landing_x,
+        landing_y,
+        apex_height,
+        flight_time,
+        flight_time,
+        max_sample_count,
+    )
+    if len(samples) != 2:
+        raise ValueError("hopper sample_count must be exactly 2")
+    return samples
 
 
 def normal_interval_mass(lo: float, hi: float, mean: float, sigma: float) -> float:

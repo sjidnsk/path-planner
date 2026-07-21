@@ -43,13 +43,13 @@ HOPPER_EXACT_ORACLE_MAX_BYTES_V2 = (
     + HOPPER_MAX_REPLAY_STEPS_V2 * HOPPER_EXACT_DISTINCT_CELL_BYTES_V2
 )
 
-_BALLISTIC_HELPER_ID = "sample_ballistic_arc_capped/v1"
+_BALLISTIC_HELPER_ID = "sample_hopper_ballistic_arc_capped/v1"
 _LANDING_HELPER_ID = "landing_zone_cells_capped/v1"
 _MEMORY_ACCOUNTING_ID = "hopper_deterministic_admission_bytes/v1"
 _RESOURCE_SCHEMA_VERSION = "hopper-resource-authority/v1"
 _RESOURCE_LINEAGE_SCHEMA_VERSION = "hopper-resource-authority-lineage/v1"
 
-_TRUSTED_BALLISTIC_HELPER = _ballistics.sample_ballistic_arc_capped_v2
+_TRUSTED_BALLISTIC_HELPER = _ballistics._sample_hopper_ballistic_arc_capped_v2
 _TRUSTED_LANDING_HELPER = _ballistics.landing_zone_cells_capped_v2
 
 _NUMERIC_FIELD_VALUES = (
@@ -267,7 +267,7 @@ def _require_canonical_resource_authority_v2(
     if not _resource_authority_record_is_exact_v2(authority):
         raise ValueError("hopper_authority_contract_mismatch")
     if (
-        getattr(_ballistics, "sample_ballistic_arc_capped_v2", None)
+        getattr(_ballistics, "_sample_hopper_ballistic_arc_capped_v2", None)
         is not _TRUSTED_BALLISTIC_HELPER
         or getattr(_ballistics, "landing_zone_cells_capped_v2", None)
         is not _TRUSTED_LANDING_HELPER
@@ -290,9 +290,8 @@ def _call_captured_ballistic_helper_v2(
     start: _ballistics.BallisticStartV2,
     speed_mps: float,
     elevation_rad: float,
-    azimuth_rad: float,
+    azimuth_index: int,
     g_mps2: float,
-    dt_s: float,
 ) -> tuple[_ballistics.BallisticSampleV2, ...]:
     _require_canonical_resource_authority_v2(authority)
     helper = authority.ballistic_helper
@@ -302,9 +301,8 @@ def _call_captured_ballistic_helper_v2(
             start,
             speed_mps,
             elevation_rad,
-            azimuth_rad,
+            azimuth_index,
             g_mps2,
-            dt_s,
             max_sample_count=cap,
         )
     except (KeyboardInterrupt, MemoryError, SystemExit):
