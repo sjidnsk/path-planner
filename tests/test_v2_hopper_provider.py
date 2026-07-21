@@ -410,6 +410,9 @@ def test_hopper_provider_enforces_accounted_memory_root_and_transient_phases(
     assert root.reason_code == "hopper_memory_budget_exceeded"
     assert dict(root.evidence.details)["phase"] == "root_admission"
     assert dict(root.evidence.details)["attempted_accounted_bytes"] == 5_120
+    assert dict(root.evidence.details)["persistent_accounted_bytes"] == 4_096
+    assert dict(root.evidence.details)["transient_reserved_bytes"] == 0
+    assert dict(root.evidence.details)["admitted_record_count"] == 0
     assert root.search_telemetry.expanded_states == 0
     assert root.search_telemetry.generated_primitives == 0
 
