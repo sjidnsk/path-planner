@@ -1,6 +1,7 @@
 from dataclasses import FrozenInstanceError, fields
+from importlib import import_module
 from inspect import Parameter, signature
-from math import acos, asin, cos, fsum, nextafter, pi, sin, ulp
+from math import acos, asin, copysign, cos, fsum, nextafter, pi, sin, ulp
 
 import pytest
 
@@ -706,6 +707,55 @@ class _CapCoercible:
         return 8
 
 
+class _ActionIndexIntSubclass(int):
+    pass
+
+
+class _ActionIndexCoercible:
+    def __int__(self) -> int:
+        return 0
+
+
+def _hopper_direction_for_test(azimuth_index: int) -> tuple[float, float]:
+    cardinal_directions = {
+        0: (1.0, 0.0),
+        4: (0.0, 1.0),
+        8: (-1.0, 0.0),
+        12: (0.0, -1.0),
+    }
+    if azimuth_index in cardinal_directions:
+        return cardinal_directions[azimuth_index]
+    azimuth_rad = 2.0 * pi * azimuth_index / 16.0
+    return cos(azimuth_rad), sin(azimuth_rad)
+
+
+def _expected_two_sample_hopper_arc(
+    start: BallisticStartV2,
+    speed_mps: float,
+    elevation_rad: float,
+    azimuth_index: int,
+    g_mps2: float,
+) -> tuple[BallisticSampleV2, BallisticSampleV2]:
+    x_direction, y_direction = _hopper_direction_for_test(azimuth_index)
+    horizontal_speed = speed_mps * cos(elevation_rad)
+    vertical_speed = speed_mps * sin(elevation_rad)
+    vertical_time_scale = vertical_speed / g_mps2
+    flight_time = 2.0 * vertical_time_scale
+    vx = horizontal_speed * x_direction
+    vy = horizontal_speed * y_direction
+    horizontal_dx = vx * flight_time
+    horizontal_dy = vy * flight_time
+    return (
+        BallisticSampleV2(0.0, start.x_m, start.y_m, start.z_m),
+        BallisticSampleV2(
+            flight_time,
+            start.x_m + horizontal_dx,
+            start.y_m + horizontal_dy,
+            start.z_m,
+        ),
+    )
+
+
 def _ballistic_call_args() -> tuple[object, ...]:
     return (
         BallisticStartV2(0.0, 0.0, 0.5),
@@ -976,3 +1026,667 @@ def test_legacy_wrappers_keep_input_audit_precedence_over_invalid_global_caps(
     monkeypatch.setattr(ballistics_module, "MAX_LANDING_ZONE_CANDIDATES_V2", True)
     with pytest.raises(TypeError, match="mean_xy.*exact WorldPoint"):
         landing_zone_cells(object(), 0.05, 0.99, FineGridGeometryV2(4, 4))
+
+
+def test_hopper_ballistic_helper_freezes_private_no_cadence_signature() -> None:
+    helper = getattr(
+        ballistics_module, "_sample_hopper_ballistic_arc_capped_v2", None
+    )
+    assert callable(helper), "A2 Hopper ballistic helper must exist"
+
+    helper_signature = signature(helper)
+    parameters = tuple(helper_signature.parameters.values())
+    assert tuple(parameter.name for parameter in parameters) == (
+        "start",
+        "speed_mps",
+        "elevation_rad",
+        "azimuth_index",
+        "g_mps2",
+        "max_sample_count",
+    )
+    assert all(
+        parameter.kind is Parameter.POSITIONAL_OR_KEYWORD
+        and parameter.default is Parameter.empty
+        for parameter in parameters[:-1]
+    )
+    assert parameters[-1].kind is Parameter.KEYWORD_ONLY
+    assert parameters[-1].default is Parameter.empty
+    assert tuple(parameter.annotation for parameter in parameters) == (
+        "BallisticStartV2",
+        "float",
+        "float",
+        "int",
+        "float",
+        "int",
+    )
+    assert helper_signature.return_annotation == "tuple[BallisticSampleV2, ...]"
+
+    start = BallisticStartV2(0.0, 0.0, 0.5)
+    call_args = (start, 2.0, pi / 4.0, 0, 1.62)
+    for unexpected_name, unexpected_value in (
+        ("azimuth_rad", 0.0),
+        ("direction", (1.0, 0.0)),
+        ("dt_s", 0.25),
+        ("cadence", 0.25),
+    ):
+        with pytest.raises(TypeError):
+            helper(
+                *call_args,
+                max_sample_count=100_000,
+                **{unexpected_name: unexpected_value},
+            )
+    with pytest.raises(TypeError):
+        helper(*call_args, 0.25, max_sample_count=100_000)
+
+    for invalid_cap in (True, _CapIntSubclass(2), _CapCoercible()):
+        with pytest.raises(TypeError, match="max_sample_count.*exact int"):
+            helper(*call_args, max_sample_count=invalid_cap)
+    for invalid_cap in (0, -1):
+        with pytest.raises(ValueError, match="max_sample_count.*positive"):
+            helper(*call_args, max_sample_count=invalid_cap)
+    with pytest.raises(ValueError, match="sample_count.*1"):
+        helper(*call_args, max_sample_count=1)
+
+    expected = _expected_two_sample_hopper_arc(start, 2.0, pi / 4.0, 0, 1.62)
+    assert helper(*call_args, max_sample_count=2) == expected
+    assert helper(*call_args, max_sample_count=100_000) == expected
+
+    absorbed_start = BallisticStartV2(1.0e308, 0.0, 0.5)
+    for invalid_cap in (True, 0):
+        with pytest.raises(ValueError, match="landing x_m.*representability"):
+            helper(
+                absorbed_start,
+                2.0,
+                pi / 4.0,
+                0,
+                1.62,
+                max_sample_count=invalid_cap,
+            )
+    with pytest.raises(ValueError, match="apex z_m.*representability"):
+        helper(
+            BallisticStartV2(0.0, 0.0, 1.0e308),
+            2.0,
+            pi / 4.0,
+            0,
+            1.62,
+            max_sample_count=1,
+        )
+
+
+def test_hopper_ballistic_helper_rejects_invalid_exact_action_index() -> None:
+    helper = getattr(
+        ballistics_module, "_sample_hopper_ballistic_arc_capped_v2", None
+    )
+    assert callable(helper), "A2 Hopper ballistic helper must exist"
+
+    start = BallisticStartV2(0.0, 0.0, 0.5)
+    with pytest.raises(TypeError, match="^start must be exact BallisticStartV2$"):
+        helper(object(), True, float("nan"), True, 0.0, max_sample_count=True)
+
+    forged_start = object.__new__(BallisticStartV2)
+    object.__setattr__(forged_start, "x_m", 0.0)
+    object.__setattr__(forged_start, "y_m", 0.0)
+    with pytest.raises(TypeError, match="^start must have exact fields$"):
+        helper(
+            forged_start,
+            2.0,
+            pi / 4.0,
+            0,
+            1.62,
+            max_sample_count=100_000,
+        )
+
+    forged_nonfinite_start = BallisticStartV2(0.0, 0.0, 0.5)
+    object.__setattr__(forged_nonfinite_start, "z_m", float("nan"))
+    with pytest.raises(ValueError, match="^z_m must be finite$"):
+        helper(
+            forged_nonfinite_start,
+            2.0,
+            pi / 4.0,
+            0,
+            1.62,
+            max_sample_count=100_000,
+        )
+
+    for invalid_speed, error, message in (
+        (True, TypeError, "^speed_mps must be a finite real number$"),
+        (0.0, ValueError, "^speed_mps must be positive$"),
+        (float("nan"), ValueError, "^speed_mps must be finite$"),
+        (float("inf"), ValueError, "^speed_mps must be finite$"),
+    ):
+        with pytest.raises(error, match=message):
+            helper(
+                start,
+                invalid_speed,
+                float("nan"),
+                True,
+                0.0,
+                max_sample_count=True,
+            )
+
+    with pytest.raises(ValueError, match="^elevation_rad must be finite$"):
+        helper(start, 2.0, float("nan"), True, 0.0, max_sample_count=True)
+    with pytest.raises(
+        TypeError,
+        match="^elevation_rad must be a finite real number$",
+    ):
+        helper(start, 2.0, True, True, 0.0, max_sample_count=True)
+
+    for invalid_index in (
+        True,
+        _ActionIndexIntSubclass(0),
+        _ActionIndexCoercible(),
+        0.0,
+        pi / 4.0,
+        (1.0, 0.0),
+    ):
+        with pytest.raises(TypeError, match="azimuth_index.*exact int"):
+            helper(
+                start,
+                2.0,
+                pi / 4.0,
+                invalid_index,
+                1.62,
+                max_sample_count=100_000,
+            )
+    for invalid_index in (-1, 16):
+        with pytest.raises(ValueError, match="azimuth_index.*0.*15"):
+            helper(
+                start,
+                2.0,
+                pi / 4.0,
+                invalid_index,
+                1.62,
+                max_sample_count=100_000,
+            )
+
+    for invalid_gravity, error, message in (
+        (True, TypeError, "^g_mps2 must be a finite real number$"),
+        (0.0, ValueError, "^g_mps2 must be positive$"),
+        (float("nan"), ValueError, "^g_mps2 must be finite$"),
+        (float("inf"), ValueError, "^g_mps2 must be finite$"),
+    ):
+        with pytest.raises(error, match=message):
+            helper(
+                start,
+                2.0,
+                pi / 4.0,
+                0,
+                invalid_gravity,
+                max_sample_count=True,
+            )
+
+    for invalid_elevation in (0.0, pi / 2.0):
+        with pytest.raises(
+            ValueError,
+            match=r"^elevation_rad must be in \(0, pi/2\)$",
+        ):
+            helper(
+                start,
+                2.0,
+                invalid_elevation,
+                0,
+                1.62,
+                max_sample_count=True,
+            )
+
+
+def test_hopper_ballistic_helper_derives_all_16_exact_directions_and_two_samples(
+    monkeypatch,
+) -> None:
+    helper = getattr(
+        ballistics_module, "_sample_hopper_ballistic_arc_capped_v2", None
+    )
+    assert callable(helper), "A2 Hopper ballistic helper must exist"
+
+    ratio_calls: list[tuple[float, float, int]] = []
+    interior_calls: list[tuple[float, float, int, int, tuple[float, ...]]] = []
+    cosine_inputs: list[float] = []
+    sine_inputs: list[float] = []
+    raw_velocity_inputs: list[tuple[str, float]] = []
+    repair_calls = 0
+    original_ratio = ballistics_module._exact_positive_ratio_ceil
+    original_interior = ballistics_module._interior_sample_times
+    original_cosine = ballistics_module.cos
+    original_sine = ballistics_module.sin
+    original_derived_finite = ballistics_module._derived_finite
+
+    def tracking_ratio(numerator: float, denominator: float) -> int:
+        interval_count = original_ratio(numerator, denominator)
+        ratio_calls.append((numerator, denominator, interval_count))
+        return interval_count
+
+    def tracking_interior(
+        flight_time: float,
+        cadence: float,
+        interval_count: int,
+        max_sample_count: int,
+    ) -> tuple[float, ...]:
+        result = original_interior(
+            flight_time,
+            cadence,
+            interval_count,
+            max_sample_count,
+        )
+        interior_calls.append(
+            (flight_time, cadence, interval_count, max_sample_count, result)
+        )
+        return result
+
+    def forbidden_repair(*_args, **_kwargs):
+        nonlocal repair_calls
+        repair_calls += 1
+        raise AssertionError("two-sample Hopper cadence must not need repair")
+
+    def tracking_cosine(value: float) -> float:
+        cosine_inputs.append(value)
+        return original_cosine(value)
+
+    def tracking_sine(value: float) -> float:
+        sine_inputs.append(value)
+        return original_sine(value)
+
+    def tracking_derived_finite(value: float, name: str) -> float:
+        if name in ("x velocity", "y velocity"):
+            raw_velocity_inputs.append((name, value))
+        return original_derived_finite(value, name)
+
+    monkeypatch.setattr(
+        ballistics_module, "_exact_positive_ratio_ceil", tracking_ratio
+    )
+    monkeypatch.setattr(ballistics_module, "_interior_sample_times", tracking_interior)
+    monkeypatch.setattr(ballistics_module, "_bounded_local_repair", forbidden_repair)
+    monkeypatch.setattr(ballistics_module, "cos", tracking_cosine)
+    monkeypatch.setattr(ballistics_module, "sin", tracking_sine)
+    monkeypatch.setattr(
+        ballistics_module,
+        "_derived_finite",
+        tracking_derived_finite,
+    )
+
+    start = BallisticStartV2(0.0, 0.0, 0.5)
+    elevation_rad = pi / 6.0
+    expected_by_index = tuple(
+        _expected_two_sample_hopper_arc(
+            start,
+            2.0,
+            elevation_rad,
+            azimuth_index,
+            1.62,
+        )
+        for azimuth_index in range(16)
+    )
+    assert tuple(
+        (2.0 * pi * azimuth_index / 16.0).hex()
+        for azimuth_index in (0, 4, 8, 12)
+    ) == (
+        "0x0.0p+0",
+        "0x1.921fb54442d18p+0",
+        "0x1.921fb54442d18p+1",
+        "0x1.2d97c7f3321d2p+2",
+    )
+    for azimuth_index in range(16):
+        cosine_start = len(cosine_inputs)
+        sine_start = len(sine_inputs)
+        velocity_start = len(raw_velocity_inputs)
+        expected = expected_by_index[azimuth_index]
+        actual = helper(
+            start,
+            2.0,
+            elevation_rad,
+            azimuth_index,
+            1.62,
+            max_sample_count=100_000,
+        )
+        assert type(actual) is tuple
+        assert actual == expected
+        assert len(actual) == 2
+        assert tuple(sample.time_s for sample in actual) == (
+            0.0,
+            expected[-1].time_s,
+        )
+
+        canonical_azimuth = 2.0 * pi * azimuth_index / 16.0
+        observed_cosine_words = {
+            value.hex() for value in cosine_inputs[cosine_start:]
+        }
+        observed_sine_words = {value.hex() for value in sine_inputs[sine_start:]}
+        if azimuth_index in (0, 4, 8, 12):
+            assert canonical_azimuth.hex() not in observed_cosine_words
+            assert canonical_azimuth.hex() not in observed_sine_words
+        else:
+            assert canonical_azimuth.hex() in observed_cosine_words
+            assert canonical_azimuth.hex() in observed_sine_words
+
+        observed_velocities = dict(raw_velocity_inputs[velocity_start:])
+        assert "x velocity" in observed_velocities
+        assert "y velocity" in observed_velocities
+        x_direction, y_direction = _hopper_direction_for_test(azimuth_index)
+        horizontal_speed = 2.0 * cos(elevation_rad)
+        expected_velocities = {
+            "x velocity": horizontal_speed * x_direction,
+            "y velocity": horizontal_speed * y_direction,
+        }
+        for name, expected_velocity in expected_velocities.items():
+            observed_velocity = observed_velocities[name]
+            assert observed_velocity.hex() == expected_velocity.hex()
+            if expected_velocity == 0.0:
+                assert copysign(1.0, observed_velocity) == 1.0
+
+    assert len(ratio_calls) == 16
+    assert all(
+        numerator.hex() == denominator.hex() and interval_count == 1
+        for numerator, denominator, interval_count in ratio_calls
+    )
+    assert len(interior_calls) == 16
+    assert all(
+        flight_time.hex() == cadence.hex()
+        and interval_count == 1
+        and max_sample_count == 100_000
+        and result == ()
+        for (
+            flight_time,
+            cadence,
+            interval_count,
+            max_sample_count,
+            result,
+        ) in interior_calls
+    )
+    assert repair_calls == 0
+
+
+def test_hopper_ballistic_helper_covers_192_actions_at_nonzero_and_large_origins() -> None:
+    helper = getattr(
+        ballistics_module, "_sample_hopper_ballistic_arc_capped_v2", None
+    )
+    assert callable(helper), "A2 Hopper ballistic helper must exist"
+
+    action_count = 0
+    for origin in (0.0, 1.0, 10.0, 1_000_000.0):
+        start = BallisticStartV2(origin, origin, origin)
+        origin_action_count = 0
+        for speed_mps in (1.5, 2.0, 2.5, 3.0):
+            for elevation_rad in (pi / 6.0, pi / 4.0, pi / 3.0):
+                for azimuth_index in range(16):
+                    expected = _expected_two_sample_hopper_arc(
+                        start,
+                        speed_mps,
+                        elevation_rad,
+                        azimuth_index,
+                        1.62,
+                    )
+                    actual = helper(
+                        start,
+                        speed_mps,
+                        elevation_rad,
+                        azimuth_index,
+                        1.62,
+                        max_sample_count=100_000,
+                    )
+                    assert actual == expected
+                    assert tuple(sample.time_s for sample in actual) == (
+                        0.0,
+                        expected[-1].time_s,
+                    )
+                    origin_action_count += 1
+                    action_count += 1
+        assert origin_action_count == 192
+    assert action_count == 4 * 192
+
+
+def test_hopper_ballistic_helper_keeps_real_representability_failures_global() -> None:
+    helper = getattr(
+        ballistics_module, "_sample_hopper_ballistic_arc_capped_v2", None
+    )
+    assert callable(helper), "A2 Hopper ballistic helper must exist"
+
+    minimum_subnormal = nextafter(0.0, 1.0)
+    with pytest.raises(ValueError, match="y velocity.*representability"):
+        helper(
+            BallisticStartV2(0.0, 0.0, 0.0),
+            2.0 * minimum_subnormal,
+            pi / 3.0,
+            1,
+            2.0 * minimum_subnormal,
+            max_sample_count=100_000,
+        )
+    with pytest.raises(ValueError, match="landing x displacement.*representability"):
+        helper(
+            BallisticStartV2(0.0, 0.0, 0.0),
+            6.0 * minimum_subnormal,
+            acos(0.25),
+            2,
+            24.0 * minimum_subnormal,
+            max_sample_count=100_000,
+        )
+
+    global_failures = (
+        (
+            BallisticStartV2(0.0, 0.0, 0.0),
+            minimum_subnormal,
+            pi / 6.0,
+            1.62,
+            "vertical speed.*representable",
+        ),
+        (
+            BallisticStartV2(1.0e308, 1.0e308, 0.0),
+            3.0,
+            pi / 4.0,
+            1.62,
+            "landing [xy]_m.*representability",
+        ),
+        (
+            BallisticStartV2(0.0, 0.0, 1.0e308),
+            3.0,
+            pi / 4.0,
+            1.62,
+            "apex z_m.*representability",
+        ),
+        (
+            BallisticStartV2(0.0, 0.0, 0.0),
+            1.0e308,
+            pi / 4.0,
+            1.0e-308,
+            "vertical speed / gravity.*finite",
+        ),
+    )
+    for start, speed_mps, elevation_rad, gravity, reason in global_failures:
+        for azimuth_index in range(16):
+            with pytest.raises(ValueError, match=reason):
+                helper(
+                    start,
+                    speed_mps,
+                    elevation_rad,
+                    azimuth_index,
+                    gravity,
+                    max_sample_count=100_000,
+                )
+
+
+def test_hopper_ballistic_helper_is_module_private_and_unexported() -> None:
+    helper_name = "_sample_hopper_ballistic_arc_capped_v2"
+    public_alias = "sample_hopper_ballistic_arc_capped_v2"
+    helper = getattr(ballistics_module, helper_name, None)
+    assert callable(helper), "A2 Hopper ballistic helper must exist"
+
+    wildcard_namespace: dict[str, object] = {}
+    exec("from path_planner.v2.ballistics import *", wildcard_namespace)
+    assert helper_name not in wildcard_namespace
+    assert public_alias not in wildcard_namespace
+    assert helper_name not in getattr(ballistics_module, "__all__", ())
+    assert public_alias not in vars(ballistics_module)
+
+    public_surfaces = (
+        import_module("path_planner.v2"),
+        import_module("path_planner.v2.oracles"),
+        import_module("path_planner.v2.providers"),
+    )
+    for surface in public_surfaces:
+        assert not hasattr(surface, helper_name)
+        assert not hasattr(surface, public_alias)
+        exported_names = getattr(surface, "__all__", ())
+        assert helper_name not in exported_names
+        assert public_alias not in exported_names
+        assert all(
+            name.startswith("_") or value is not helper
+            for name, value in vars(surface).items()
+        )
+
+
+def test_generic_ballistic_helpers_keep_pre_a2_bytes_and_failure_precedence() -> None:
+    capped = getattr(ballistics_module, "sample_ballistic_arc_capped_v2")
+    start = BallisticStartV2(0.0, 0.0, 0.5)
+    flight_time = 2.0 * ((2.0 * sin(pi / 4.0)) / 1.62)
+    assert flight_time.hex() == "0x1.bef6194a9b872p+0"
+
+    args = (start, 2.0, pi / 4.0, pi / 2.0, 1.62, flight_time)
+    expected = (
+        BallisticSampleV2(0.0, 0.0, 0.0, 0.5),
+        BallisticSampleV2(
+            flight_time,
+            float.fromhex("0x1.5c9f64561d398p-53"),
+            float.fromhex("0x1.3c0ca4587e6b8p+1"),
+            0.5,
+        ),
+    )
+    public_samples = sample_ballistic_arc(*args)
+    capped_samples = capped(*args, max_sample_count=100_000)
+    assert public_samples == expected
+    assert capped_samples == expected
+    assert public_samples[-1].x_m.hex() == "0x1.5c9f64561d398p-53"
+    expected_bytes = (
+        b'[{"time_s":0.0,"x_m":0.0,"y_m":0.0,"z_m":0.5},'
+        b'{"time_s":1.7459426695964138,"x_m":1.5119096285769795e-16,'
+        b'"y_m":2.469135802469136,"z_m":0.5}]'
+    )
+    assert canonical_json_bytes(public_samples) == expected_bytes
+    assert canonical_json_bytes(capped_samples) == expected_bytes
+
+    fine_samples = sample_ballistic_arc(
+        start,
+        2.0,
+        pi / 4.0,
+        pi / 2.0,
+        1.62,
+        0.25,
+    )
+    assert tuple(sample.time_s.hex() for sample in fine_samples) == (
+        "0x0.0p+0",
+        "0x1.0000000000000p-2",
+        "0x1.0000000000000p-1",
+        "0x1.8000000000000p-1",
+        "0x1.0000000000000p+0",
+        "0x1.4000000000000p+0",
+        "0x1.8000000000000p+0",
+        "0x1.bef6194a9b872p+0",
+    )
+    below = nextafter(flight_time, 0.0)
+    above = nextafter(flight_time, float("inf"))
+    below_samples = sample_ballistic_arc(
+        start,
+        2.0,
+        pi / 4.0,
+        pi / 2.0,
+        1.62,
+        below,
+    )
+    above_samples = sample_ballistic_arc(
+        start,
+        2.0,
+        pi / 4.0,
+        pi / 2.0,
+        1.62,
+        above,
+    )
+    assert tuple(sample.time_s for sample in below_samples) == (
+        0.0,
+        below,
+        flight_time,
+    )
+    assert tuple(sample.time_s for sample in above_samples) == (0.0, flight_time)
+
+    with pytest.raises(ValueError, match="landing x_m.*representability"):
+        sample_ballistic_arc(
+            BallisticStartV2(10.0, 10.0, 0.5),
+            2.0,
+            pi / 4.0,
+            pi / 2.0,
+            1.62,
+            flight_time,
+        )
+    with pytest.raises(ValueError, match="landing x_m.*representability"):
+        capped(
+            BallisticStartV2(10.0, 10.0, 0.5),
+            2.0,
+            pi / 4.0,
+            pi / 2.0,
+            1.62,
+            flight_time,
+            max_sample_count=True,
+        )
+
+    pre_cap_precedence = (
+        (
+            (object(), True, float("inf"), float("-inf"), 0.0, -1.0),
+            TypeError,
+            "^start must be exact BallisticStartV2$",
+        ),
+        (
+            (start, True, float("nan"), float("inf"), 0.0, -1.0),
+            TypeError,
+            "^speed_mps must be a finite real number$",
+        ),
+        (
+            (start, 2.0, True, float("inf"), 0.0, -1.0),
+            TypeError,
+            "^elevation_rad must be a finite real number$",
+        ),
+        (
+            (start, 2.0, float("nan"), float("inf"), 0.0, -1.0),
+            ValueError,
+            "^elevation_rad must be finite$",
+        ),
+        (
+            (start, 2.0, 0.0, float("inf"), 0.0, -1.0),
+            ValueError,
+            "^azimuth_rad must be finite$",
+        ),
+        (
+            (start, 2.0, 0.0, 0.0, 0.0, -1.0),
+            ValueError,
+            "^g_mps2 must be positive$",
+        ),
+        (
+            (start, 2.0, 0.0, 0.0, 1.62, 0.0),
+            ValueError,
+            "^dt_s must be positive$",
+        ),
+        (
+            (start, 2.0, pi / 4.0, float("inf"), 0.0, -1.0),
+            ValueError,
+            "^azimuth_rad must be finite$",
+        ),
+        (
+            (start, 2.0, pi / 4.0, 0.0, 0.0, -1.0),
+            ValueError,
+            "^g_mps2 must be positive$",
+        ),
+        (
+            (start, 2.0, pi / 4.0, 0.0, 1.62, 0.0),
+            ValueError,
+            "^dt_s must be positive$",
+        ),
+        (
+            (start, 2.0, 0.0, 0.0, 1.62, flight_time),
+            ValueError,
+            r"^elevation_rad must be in \(0, pi/2\)$",
+        ),
+    )
+    for invalid_args, error, message in pre_cap_precedence:
+        with pytest.raises(error, match=message):
+            sample_ballistic_arc(*invalid_args)
+        with pytest.raises(error, match=message):
+            capped(*invalid_args, max_sample_count=True)
+
+    with pytest.raises(TypeError, match="^max_sample_count must be an exact int$"):
+        capped(*args, max_sample_count=True)

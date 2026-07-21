@@ -114,10 +114,14 @@ def test_hopper_resource_authority_freezes_exact_record_singleton_and_values() -
     with pytest.raises(FrozenInstanceError):
         authority.max_replay_steps = 1
 
-    assert authority.ballistic_helper is getattr(
+    specialized_ballistic_helper = getattr(
+        ballistics_module, "_sample_hopper_ballistic_arc_capped_v2"
+    )
+    assert authority.ballistic_helper is specialized_ballistic_helper
+    assert authority.ballistic_helper is not getattr(
         ballistics_module, "sample_ballistic_arc_capped_v2"
     )
-    assert authority.ballistic_helper_id == "sample_ballistic_arc_capped/v1"
+    assert authority.ballistic_helper_id == "sample_hopper_ballistic_arc_capped/v1"
     assert authority.landing_helper is getattr(
         ballistics_module, "landing_zone_cells_capped_v2"
     )
@@ -216,6 +220,9 @@ def test_hopper_resource_authority_rejects_non_exact_record_field_types() -> Non
 def test_hopper_resource_authority_tokens_follow_exact_frozen_order() -> None:
     module = _authority_module()
     authority = module.HOPPER_RESOURCE_AUTHORITY_V2
+    specialized_ballistic_helper = getattr(
+        ballistics_module, "_sample_hopper_ballistic_arc_capped_v2"
+    )
     expected_in_memory = tuple(
         getattr(authority, name) for name in _RESOURCE_FIELD_NAMES
     )
@@ -233,14 +240,18 @@ def test_hopper_resource_authority_tokens_follow_exact_frozen_order() -> None:
 
     assert type(module.HOPPER_RESOURCE_AUTHORITY_IN_MEMORY_TOKEN_V2) is tuple
     assert module.HOPPER_RESOURCE_AUTHORITY_IN_MEMORY_TOKEN_V2 == expected_in_memory
+    assert authority.ballistic_helper is specialized_ballistic_helper
+    assert authority.ballistic_helper_id == "sample_hopper_ballistic_arc_capped/v1"
     assert module.HOPPER_RESOURCE_AUTHORITY_IN_MEMORY_TOKEN_V2[0] is (
-        authority.ballistic_helper
+        specialized_ballistic_helper
     )
     assert module.HOPPER_RESOURCE_AUTHORITY_IN_MEMORY_TOKEN_V2[2] is (
         authority.landing_helper
     )
     assert type(module.HOPPER_RESOURCE_AUTHORITY_LINEAGE_TOKEN_V2) is tuple
     assert module.HOPPER_RESOURCE_AUTHORITY_LINEAGE_TOKEN_V2 == expected_lineage
+    assert "sample_ballistic_arc_capped/v1" not in expected_in_memory
+    assert "sample_ballistic_arc_capped/v1" not in expected_lineage
     first_in_memory = module._hopper_resource_authority_in_memory_token_v2(
         authority
     )
@@ -264,9 +275,8 @@ def test_captured_resource_helpers_use_sealed_caps_not_legacy_globals(
         BallisticStartV2(0.0, 0.0, 0.5),
         3.0,
         pi / 4.0,
-        0.0,
+        0,
         1.62,
-        0.25,
     )
     landing_args = (
         WorldPoint(0.25, 0.25),
@@ -348,9 +358,24 @@ def test_captured_resource_helpers_fail_before_rebound_module_callable(
     module = _authority_module()
     authority = module.HOPPER_RESOURCE_AUTHORITY_V2
     calls: list[str] = []
+    ballistic_args = (
+        BallisticStartV2(0.0, 0.0, 0.5),
+        3.0,
+        pi / 4.0,
+        0,
+        1.62,
+    )
+    expected_ballistic = authority.ballistic_helper(
+        *ballistic_args,
+        max_sample_count=authority.max_ballistic_samples,
+    )
 
-    def rebound_ballistic(*_args, **_kwargs):
-        calls.append("ballistic")
+    def rebound_generic_ballistic(*_args, **_kwargs):
+        calls.append("generic-ballistic")
+        return ()
+
+    def rebound_specialized_ballistic(*_args, **_kwargs):
+        calls.append("specialized-ballistic")
         return ()
 
     def rebound_landing(*_args, **_kwargs):
@@ -358,7 +383,24 @@ def test_captured_resource_helpers_fail_before_rebound_module_callable(
         return ()
 
     monkeypatch.setattr(
-        ballistics_module, "sample_ballistic_arc_capped_v2", rebound_ballistic
+        ballistics_module,
+        "sample_ballistic_arc_capped_v2",
+        rebound_generic_ballistic,
+    )
+    actual_ballistic = module._call_captured_ballistic_helper_v2(
+        authority,
+        *ballistic_args,
+    )
+    assert canonical_json_bytes(actual_ballistic) == canonical_json_bytes(
+        expected_ballistic
+    )
+    assert calls == []
+
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        ballistics_module,
+        "_sample_hopper_ballistic_arc_capped_v2",
+        rebound_specialized_ballistic,
     )
     with pytest.raises(ValueError, match="^hopper_authority_contract_mismatch$"):
         module._call_captured_ballistic_helper_v2(
@@ -366,9 +408,8 @@ def test_captured_resource_helpers_fail_before_rebound_module_callable(
             object(),
             3.0,
             pi / 4.0,
-            0.0,
+            0,
             1.62,
-            0.25,
         )
     assert calls == []
 
@@ -411,9 +452,8 @@ def test_captured_resource_helpers_fail_before_every_token_field_drift() -> None
         object(),
         3.0,
         pi / 4.0,
-        0.0,
+        0,
         1.62,
-        0.25,
     )
     invalid_landing_args = (
         object(),
@@ -468,6 +508,186 @@ def test_captured_resource_helpers_fail_before_every_token_field_drift() -> None
                 object.__setattr__(authority, field_name, original)
 
     assert all(forged.calls == 0 for forged in equality_forgers)
+
+
+def test_captured_hopper_ballistic_wrapper_freezes_index_only_signature_and_forwarding(
+    monkeypatch,
+) -> None:
+    module = _authority_module()
+    authority = module.HOPPER_RESOURCE_AUTHORITY_V2
+    wrapper = module._call_captured_ballistic_helper_v2
+    parameters = tuple(signature(wrapper).parameters.values())
+    assert tuple(parameter.name for parameter in parameters) == (
+        "authority",
+        "start",
+        "speed_mps",
+        "elevation_rad",
+        "azimuth_index",
+        "g_mps2",
+    )
+    assert all(
+        parameter.kind is Parameter.POSITIONAL_OR_KEYWORD
+        for parameter in parameters
+    )
+    assert all(parameter.default is Parameter.empty for parameter in parameters)
+
+    specialized_helper = getattr(
+        ballistics_module, "_sample_hopper_ballistic_arc_capped_v2"
+    )
+    assert authority.ballistic_helper is specialized_helper
+    ballistic_args = (
+        BallisticStartV2(10.0, 10.0, 0.5),
+        3.0,
+        pi / 4.0,
+        12,
+        1.62,
+    )
+    expected = specialized_helper(
+        *ballistic_args,
+        max_sample_count=authority.max_ballistic_samples,
+    )
+
+    original_interior = ballistics_module._interior_sample_times
+    observed_caps: list[int] = []
+
+    def auditing_interior(
+        flight_time: float,
+        dt_s: float,
+        interval_count: int,
+        max_sample_count: int,
+    ):
+        observed_caps.append(max_sample_count)
+        return original_interior(
+            flight_time,
+            dt_s,
+            interval_count,
+            max_sample_count,
+        )
+
+    monkeypatch.setattr(ballistics_module, "_interior_sample_times", auditing_interior)
+    actual = wrapper(authority, *ballistic_args)
+    assert canonical_json_bytes(actual) == canonical_json_bytes(expected)
+    assert observed_caps == [100_000]
+
+
+def test_captured_hopper_ballistic_wrapper_reseals_normal_and_ordinary_completion(
+    monkeypatch,
+) -> None:
+    module = _authority_module()
+    authority = module.HOPPER_RESOURCE_AUTHORITY_V2
+    wrapper = module._call_captured_ballistic_helper_v2
+    ballistic_args = (
+        BallisticStartV2(0.0, 0.0, 0.5),
+        3.0,
+        pi / 4.0,
+        0,
+        1.62,
+    )
+    expected = authority.ballistic_helper(
+        *ballistic_args,
+        max_sample_count=authority.max_ballistic_samples,
+    )
+    assert canonical_json_bytes(wrapper(authority, *ballistic_args)) == (
+        canonical_json_bytes(expected)
+    )
+
+    original_sin = ballistics_module.sin
+
+    class _OrdinaryHelperFailure(RuntimeError):
+        pass
+
+    def failing_sin(_value: float) -> float:
+        raise _OrdinaryHelperFailure("ordinary helper failure")
+
+    monkeypatch.setattr(ballistics_module, "sin", failing_sin)
+    with pytest.raises(_OrdinaryHelperFailure, match="^ordinary helper failure$"):
+        wrapper(authority, *ballistic_args)
+    monkeypatch.undo()
+
+    specialized_name = "_sample_hopper_ballistic_arc_capped_v2"
+    trusted_specialized = authority.ballistic_helper
+    rebound_calls: list[str] = []
+
+    def rebound_specialized(*_args, **_kwargs):
+        rebound_calls.append("specialized")
+        return ()
+
+    def drifting_sin(value: float) -> float:
+        monkeypatch.setattr(
+            ballistics_module,
+            specialized_name,
+            rebound_specialized,
+        )
+        return original_sin(value)
+
+    monkeypatch.setattr(ballistics_module, "sin", drifting_sin)
+    try:
+        with pytest.raises(ValueError, match="^hopper_authority_contract_mismatch$"):
+            wrapper(authority, *ballistic_args)
+    finally:
+        monkeypatch.undo()
+    assert rebound_calls == []
+    assert getattr(ballistics_module, specialized_name) is trusted_specialized
+
+    def drifting_failed_sin(_value: float) -> float:
+        monkeypatch.setattr(
+            ballistics_module,
+            specialized_name,
+            rebound_specialized,
+        )
+        raise _OrdinaryHelperFailure("authority drift must win")
+
+    monkeypatch.setattr(ballistics_module, "sin", drifting_failed_sin)
+    try:
+        with pytest.raises(ValueError, match="^hopper_authority_contract_mismatch$"):
+            wrapper(authority, *ballistic_args)
+    finally:
+        monkeypatch.undo()
+    assert rebound_calls == []
+    assert getattr(ballistics_module, specialized_name) is trusted_specialized
+
+
+def test_captured_hopper_ballistic_wrapper_preserves_critical_exception_precedence(
+    monkeypatch,
+) -> None:
+    module = _authority_module()
+    authority = module.HOPPER_RESOURCE_AUTHORITY_V2
+    wrapper = module._call_captured_ballistic_helper_v2
+    ballistic_args = (
+        BallisticStartV2(0.0, 0.0, 0.5),
+        3.0,
+        pi / 4.0,
+        0,
+        1.62,
+    )
+    specialized_name = "_sample_hopper_ballistic_arc_capped_v2"
+    trusted_specialized = authority.ballistic_helper
+    rebound_calls: list[str] = []
+
+    def rebound_specialized(*_args, **_kwargs):
+        rebound_calls.append("specialized")
+        return ()
+
+    for critical_type in (KeyboardInterrupt, MemoryError, SystemExit):
+        def critical_sin(
+            _value: float,
+            exception_type=critical_type,
+        ) -> float:
+            monkeypatch.setattr(
+                ballistics_module,
+                specialized_name,
+                rebound_specialized,
+            )
+            raise exception_type("critical helper failure")
+
+        monkeypatch.setattr(ballistics_module, "sin", critical_sin)
+        try:
+            with pytest.raises(critical_type, match="^critical helper failure$"):
+                wrapper(authority, *ballistic_args)
+        finally:
+            monkeypatch.undo()
+        assert rebound_calls == []
+        assert getattr(ballistics_module, specialized_name) is trusted_specialized
 
 
 def test_exact_integer_arena_admits_bit_ceiling_before_operation_and_unwinds() -> None:
