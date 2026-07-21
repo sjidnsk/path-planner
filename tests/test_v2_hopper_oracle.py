@@ -938,7 +938,7 @@ def test_hopper_oracle_result_freezes_exact_fields_reason_stage_evidence_and_sch
         )
 
 
-def test_hopper_oracle_entrypoint_freezes_exact_signature_and_remains_unexported_until_11b6() -> None:
+def test_hopper_oracle_entrypoint_freezes_exact_signature_and_11b6_exports() -> None:
     module = _module()
     function = module.validate_hopper_jump_l2
     parameters = tuple(signature(function).parameters.values())
@@ -963,11 +963,12 @@ def test_hopper_oracle_entrypoint_freezes_exact_signature_and_remains_unexported
         "HopperValidationResultV2",
         "validate_hopper_jump_l2",
     ):
-        assert getattr(module, name) is not None
-        assert name not in getattr(oracle_exports, "__all__", ())
-        assert name not in getattr(v2_exports, "__all__", ())
-        assert not hasattr(oracle_exports, name)
-        assert not hasattr(v2_exports, name)
+        implementation = getattr(module, name)
+        assert implementation is not None
+        assert name in getattr(oracle_exports, "__all__", ())
+        assert name in getattr(v2_exports, "__all__", ())
+        assert getattr(oracle_exports, name) is implementation
+        assert getattr(v2_exports, name) is implementation
 
 
 def test_hopper_oracle_rejects_forged_candidate_profile_and_indices_before_helpers(monkeypatch) -> None:
