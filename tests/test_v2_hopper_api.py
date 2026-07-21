@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from math import cos, sin
 
 import numpy as np
@@ -12,6 +13,7 @@ from path_planner.v2.contracts import (
     FailureCategoryV2,
     FailureEvidenceV2,
     ObjectiveProfileV2,
+    ObservationProjectionV2,
     PlanningFailureV2,
     PlanningRequestV2,
     PlanningSuccessV2,
@@ -157,3 +159,209 @@ def test_hopper_api_requires_composite_resource_authority() -> None:
     assert type(outcome) is PlanningFailureV2
     assert outcome.reason_code == "hopper_authority_contract_mismatch"
     assert outcome.evidence.stage == "provider_authority"
+
+
+def test_hopper_api_dispatches_the_exact_bound_plan_captured_by_the_seal() -> None:
+    request, registry, delegate = _fixture()
+
+    class SwitchingPlanProvider:
+        profile = delegate.profile
+        hopper_authority = delegate.hopper_authority
+        hopper_resource_authority = delegate.hopper_resource_authority
+
+        def __init__(self) -> None:
+            self.completed = False
+            self.plan_access_count = 0
+            self.unsealed_plan_called = False
+
+        @property
+        def plan(self):
+            self.plan_access_count += 1
+            if self.completed:
+                return self._sealed_plan
+            if self.plan_access_count == 3:
+                return self._unsealed_plan
+            return self._sealed_plan
+
+        def _sealed_plan(self, request, anchor, deadline):
+            outcome = delegate.plan(request, anchor, deadline)
+            self.completed = True
+            return outcome
+
+        def _unsealed_plan(self, request, anchor, deadline):
+            self.unsealed_plan_called = True
+            raise AssertionError("an uncaptured plan implementation ran")
+
+    provider = SwitchingPlanProvider()
+    outcome = _call(request, registry, provider)
+    assert type(outcome) is PlanningSuccessV2
+    assert provider.unsealed_plan_called is False
+
+
+def test_hopper_api_rejects_failure_detail_value_and_contract_stage_mismatches() -> None:
+    request, registry, delegate = _fixture()
+
+    malformed_outcomes = (
+        PlanningFailureV2(
+            request.request_id,
+            PlatformKindV2.HOPPER,
+            FailureCategoryV2.UNSUPPORTED_CAPABILITY,
+            "hopper_proxy_profile_incomplete",
+            FailureEvidenceV2(
+                "capability_preflight",
+                ("hopper_proxy_profile_incomplete",),
+                (
+                    ("actual", True),
+                    ("expected", 7),
+                    ("parameter_set_id", False),
+                    ("profile_id", 11),
+                ),
+            ),
+            SearchTelemetryV2(
+                0,
+                0,
+                0,
+                0,
+                0,
+                0.0,
+                False,
+                False,
+                False,
+                "hopper_proxy_profile_incomplete",
+            ),
+        ),
+        PlanningFailureV2(
+            request.request_id,
+            PlatformKindV2.HOPPER,
+            FailureCategoryV2.INTERNAL_ERROR,
+            "route_hash_contract_mismatch",
+            FailureEvidenceV2(
+                "search_setup",
+                ("route_hash_contract_mismatch",),
+                (
+                    ("actual", "route_hash_contract_mismatch"),
+                    ("expected", "stable_route_hash"),
+                    ("phase", "search_setup"),
+                ),
+            ),
+            SearchTelemetryV2(
+                0,
+                0,
+                0,
+                0,
+                0,
+                0.0,
+                False,
+                False,
+                False,
+                "route_hash_contract_mismatch",
+            ),
+        ),
+    )
+
+    for malformed in malformed_outcomes:
+        class MalformedProvider:
+            profile = delegate.profile
+            hopper_authority = delegate.hopper_authority
+            hopper_resource_authority = delegate.hopper_resource_authority
+
+            def plan(self, request, anchor, deadline):
+                return malformed
+
+        outcome = _call(request, registry, MalformedProvider())
+        assert type(outcome) is PlanningFailureV2
+        assert outcome.reason_code == "hopper_provider_outcome_contract_mismatch"
+        assert outcome.evidence.details[1] == (
+            "expected",
+            "valid_hopper_provider_failure",
+        )
+
+
+def test_hopper_api_rejects_provider_failure_beyond_request_expansion_cap() -> None:
+    request, registry, delegate = _fixture()
+    attempted = request.resource_budget.max_expanded_states + 1
+
+    class OverBudgetFailureProvider:
+        profile = delegate.profile
+        hopper_authority = delegate.hopper_authority
+        hopper_resource_authority = delegate.hopper_resource_authority
+
+        def plan(self, request, anchor, deadline):
+            return PlanningFailureV2(
+                request.request_id,
+                PlatformKindV2.HOPPER,
+                FailureCategoryV2.RESOURCE_LIMIT,
+                "hopper_expansion_budget_exhausted",
+                FailureEvidenceV2(
+                    "search_expansion",
+                    ("hopper_expansion_budget_exhausted",),
+                    (
+                        ("attempted_expanded_states", attempted),
+                        ("max_expanded_states", request.resource_budget.max_expanded_states),
+                    ),
+                ),
+                SearchTelemetryV2(
+                    attempted,
+                    192 * attempted,
+                    0,
+                    0,
+                    0,
+                    0.0,
+                    False,
+                    False,
+                    False,
+                    "hopper_expansion_budget_exhausted",
+                ),
+            )
+
+    outcome = _call(request, registry, OverBudgetFailureProvider())
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "hopper_provider_outcome_contract_mismatch"
+
+
+def test_hopper_api_rejects_success_with_noncanonical_observation_endpoints() -> None:
+    request, registry, delegate = _fixture()
+
+    class ForgedObservationProvider:
+        profile = delegate.profile
+        hopper_authority = delegate.hopper_authority
+        hopper_resource_authority = delegate.hopper_resource_authority
+
+        def plan(self, request, anchor, deadline):
+            outcome = delegate.plan(request, anchor, deadline)
+            observation = replace(
+                outcome.observation_projection,
+                sample_states=tuple(
+                    PoseStateV2(99.0, 99.0, 0.0)
+                    for _state in outcome.observation_projection.sample_states
+                ),
+            )
+            assert type(observation) is ObservationProjectionV2
+            return replace(outcome, observation_projection=observation)
+
+    outcome = _call(request, registry, ForgedObservationProvider())
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "hopper_provider_outcome_contract_mismatch"
+
+
+def test_hopper_api_rejects_success_telemetry_outside_exact_request_bounds() -> None:
+    request, registry, delegate = _fixture()
+    attempted = request.resource_budget.max_expanded_states + 1
+
+    class ForgedTelemetryProvider:
+        profile = delegate.profile
+        hopper_authority = delegate.hopper_authority
+        hopper_resource_authority = delegate.hopper_resource_authority
+
+        def plan(self, request, anchor, deadline):
+            outcome = delegate.plan(request, anchor, deadline)
+            telemetry = replace(
+                outcome.search_telemetry,
+                expanded_states=attempted,
+                generated_primitives=192 * attempted,
+            )
+            return replace(outcome, search_telemetry=telemetry)
+
+    outcome = _call(request, registry, ForgedTelemetryProvider())
+    assert type(outcome) is PlanningFailureV2
+    assert outcome.reason_code == "hopper_provider_outcome_contract_mismatch"
