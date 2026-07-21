@@ -1186,6 +1186,7 @@ def test_api_hopper_claimed_success_is_independently_replayed() -> None:
     class ForgingProvider:
         profile = provider.profile
         hopper_authority = provider.hopper_authority
+        hopper_resource_authority = provider.hopper_resource_authority
 
         def plan(self, request, anchor, deadline):
             outcome = provider.plan(request, anchor, deadline)
@@ -1205,3 +1206,8 @@ def test_api_hopper_claimed_success_is_independently_replayed() -> None:
     assert outcome.category is FailureCategoryV2.INTERNAL_ERROR
     assert outcome.reason_code == "hopper_provider_outcome_contract_mismatch"
     assert outcome.evidence.stage == "provider_postcondition"
+    assert outcome.evidence.details == (
+        ("actual", "hopper_primitive_contract_mismatch"),
+        ("expected", "hopper_route_l2_valid"),
+        ("phase", "provider_postcondition"),
+    )
