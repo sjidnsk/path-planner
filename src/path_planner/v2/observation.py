@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-from math import atan2, cos, hypot, inf, isclose, radians, sin
+from math import cos, hypot, inf, isclose, radians, remainder, sin, tau
 from typing import Iterator
 
 import numpy as np
@@ -28,6 +28,7 @@ OBSERVATION_RANGE_M_V2 = 20.0
 OBSERVATION_FOV_DEG_V2 = 90.0
 OBSERVATION_RAY_STEP_DEG_V2 = 1.0
 OBSERVED_TERRAIN_CANONICALIZATION_V2 = "path-planner-v2-observed-only-mask/v1"
+OBSERVED_TERRAIN_SOURCE_KIND_V2 = "path-planner-v2-observed-terrain/v1"
 OBSERVED_TERRAIN_SOURCE_ID_V2 = "path-planner-v2-observed-only-snapshot/v1"
 
 _OBSERVED_HASH_DOMAIN_V2 = b"path-planner-v2-observed-terrain-content/v1\0"
@@ -51,7 +52,6 @@ def _observed_content_hash(
     confidence: np.ndarray,
 ) -> str:
     geometry = snapshot.geometry
-    provenance = snapshot.provenance
     metadata = {
         "geometry": {
             "frame_id": geometry.frame_id,
@@ -63,8 +63,6 @@ def _observed_content_hash(
             "resolution_m": geometry.resolution_m,
             "width": geometry.width,
         },
-        "physical_obstacle_cells_written": provenance.physical_obstacle_cells_written,
-        "source_kind": provenance.source_kind,
     }
     hasher = sha256()
     _update_hash_chunk(hasher, _OBSERVED_HASH_DOMAIN_V2)
@@ -115,12 +113,10 @@ def _canonical_observed_snapshot(snapshot: TerrainSnapshotV2) -> TerrainSnapshot
         confidence=confidence,
     )
     provenance = TerrainProvenanceV2(
-        source_kind=snapshot.provenance.source_kind,
+        source_kind=OBSERVED_TERRAIN_SOURCE_KIND_V2,
         source_id=OBSERVED_TERRAIN_SOURCE_ID_V2,
         source_hash=source_hash,
-        physical_obstacle_cells_written=(
-            snapshot.provenance.physical_obstacle_cells_written
-        ),
+        physical_obstacle_cells_written=False,
         details=(("canonicalization", OBSERVED_TERRAIN_CANONICALIZATION_V2),),
     )
     return TerrainSnapshotV2(
@@ -191,39 +187,70 @@ def _arc_length_samples(
     waypoints: tuple[PoseStateV2, ...],
     endpoint_theta_rad: float,
 ) -> tuple[PoseStateV2, ...]:
-    segments: list[tuple[PoseStateV2, PoseStateV2, float, float]] = []
+    segments: list[tuple[PoseStateV2, PoseStateV2, float, float, float]] = []
+    turn_events: list[tuple[float, int, PoseStateV2]] = []
     cumulative_distance = 0.0
-    for left, right in zip(waypoints[:-1], waypoints[1:], strict=True):
+    for sequence_index, (left, right) in enumerate(
+        zip(waypoints[:-1], waypoints[1:], strict=True)
+    ):
         length = hypot(right.x_m - left.x_m, right.y_m - left.y_m)
         if length == 0.0:
+            if left.heading_rad != right.heading_rad:
+                turn_events.append((cumulative_distance, sequence_index, left))
             continue
+        start_distance = cumulative_distance
         cumulative_distance += length
-        segments.append((left, right, length, cumulative_distance))
+        segments.append(
+            (left, right, length, start_distance, cumulative_distance)
+        )
 
-    samples: list[PoseStateV2] = []
+    regular_events: list[tuple[float, int, PoseStateV2]] = []
     distance = 0.0
     total_length = cumulative_distance
     while distance < total_length - 1e-12:
-        segment_start_distance = 0.0
-        selected: tuple[PoseStateV2, PoseStateV2, float, float] | None = None
+        selected: tuple[PoseStateV2, PoseStateV2, float, float, float] | None = None
         for index, segment in enumerate(segments):
-            if distance < segment[3] - 1e-12 or index == len(segments) - 1:
+            if distance < segment[4] - 1e-12 or index == len(segments) - 1:
                 selected = segment
                 break
-            segment_start_distance = segment[3]
         if selected is None:
             raise ValueError("route arc-length sampling could not select a segment")
-        left, right, length, _end_distance = selected
+        left, right, length, segment_start_distance, _end_distance = selected
         fraction = (distance - segment_start_distance) / length
-        samples.append(
-            PoseStateV2(
-                left.x_m + fraction * (right.x_m - left.x_m),
-                left.y_m + fraction * (right.y_m - left.y_m),
-                atan2(right.y_m - left.y_m, right.x_m - left.x_m),
+        raw_heading_delta = right.heading_rad - left.heading_rad
+        heading_delta = remainder(raw_heading_delta, tau)
+        if heading_delta == -tau / 2.0 and raw_heading_delta > 0.0:
+            heading_delta = tau / 2.0
+        heading = (
+            left.heading_rad
+            if fraction == 0.0
+            else right.heading_rad
+            if fraction == 1.0
+            else left.heading_rad + fraction * heading_delta
+        )
+        regular_events.append(
+            (
+                distance,
+                len(regular_events),
+                PoseStateV2(
+                    left.x_m + fraction * (right.x_m - left.x_m),
+                    left.y_m + fraction * (right.y_m - left.y_m),
+                    heading,
+                ),
             )
         )
         distance += OBSERVATION_ROUTE_SAMPLE_STEP_M_V2
 
+    ordered_events = [
+        (event_distance, 0, sequence_index, state)
+        for event_distance, sequence_index, state in turn_events
+    ]
+    ordered_events.extend(
+        (event_distance, 1, sequence_index, state)
+        for event_distance, sequence_index, state in regular_events
+    )
+    ordered_events.sort(key=lambda item: (item[0], item[1], item[2]))
+    samples = [event[3] for event in ordered_events]
     endpoint = waypoints[-1]
     samples.append(PoseStateV2(endpoint.x_m, endpoint.y_m, endpoint_theta_rad))
     return tuple(samples)
@@ -343,6 +370,7 @@ __all__ = (
     "OBSERVATION_ROUTE_SAMPLE_STEP_M_V2",
     "OBSERVED_TERRAIN_CANONICALIZATION_V2",
     "OBSERVED_TERRAIN_SOURCE_ID_V2",
+    "OBSERVED_TERRAIN_SOURCE_KIND_V2",
     "ObservedTerrainInputV2",
     "project_route_observation_v2",
 )
