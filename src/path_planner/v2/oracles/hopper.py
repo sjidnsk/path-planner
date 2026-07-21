@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil, cos, floor, isfinite, nextafter, pi, sin
+from math import ceil, cos, floor, fsum, isfinite, nextafter, pi, sin
 
 import numpy as np
 
-from path_planner.core import Cell
-from path_planner.v2.ballistics import BallisticSampleV2, BallisticStartV2
+from path_planner.core import Cell, WorldPoint
+from path_planner.v2.ballistics import (
+    BallisticSampleV2,
+    BallisticStartV2,
+    LandingCellMassV2,
+)
 from path_planner.v2.contracts import (
     FailureCategoryV2,
     PlatformKindV2,
@@ -19,8 +23,12 @@ from path_planner.v2.hopper_authority import (
     HOPPER_MAX_REPLAY_STEPS_V2,
     HOPPER_RESOURCE_AUTHORITY_V2,
     _call_captured_ballistic_helper_v2,
+    _call_captured_landing_helper_v2,
+    _hopper_parameter_set_in_memory_token_v2,
     _HopperExactIntegerArenaV2,
+    _lookup_hopper_parameter_set_v2,
     _require_canonical_resource_authority_v2,
+    HopperParameterSetRecordV2,
 )
 from path_planner.v2.profiles import HopperProfileV2, PlatformProfileV2
 from path_planner.v2.runtime import PlanningDeadlineV2
@@ -58,6 +66,13 @@ HOPPER_JUMP_REASON_CODES_V1 = (
     "hopper_arc_boundary_violation",
     "hopper_arc_unknown",
     "hopper_arc_clearance_violation",
+    "hopper_landing_probability_below_threshold",
+    "hopper_landing_zone_unknown",
+    "hopper_landing_zone_unsafe",
+    "hopper_landing_slope_exceeded",
+    "hopper_landing_height_unreachable",
+    "hopper_landing_theta_unreachable",
+    "hopper_stop_condition_failed",
     "hopper_jump_l2_valid",
 )
 
@@ -68,6 +83,9 @@ _STAGES = (
     "arc_candidate_enumeration",
     "replay_work",
     "arc_validation",
+    "landing_probability",
+    "landing_validation",
+    "stop_validation",
 )
 
 
@@ -174,7 +192,7 @@ class HopperValidationResultV2:
     failed_cell: Cell | None
     segment_index: int | None
     replay_work_counts: tuple[tuple[str, int], ...]
-    selected_landing_mass: None
+    selected_landing_mass: float | None
     schema_version: str = _RESULT_SCHEMA
 
     def __post_init__(self) -> None:
@@ -216,7 +234,12 @@ class HopperValidationResultV2:
             if type(count) is not int or not 0 <= count <= HOPPER_MAX_REPLAY_STEPS_V2:
                 raise ValueError("replay counter value mismatch")
         if self.selected_landing_mass is not None:
-            raise ValueError("selected_landing_mass is reserved for 11B3")
+            if (
+                type(self.selected_landing_mass) is not float
+                or not isfinite(self.selected_landing_mass)
+                or not 0.0 <= self.selected_landing_mass <= 1.0
+            ):
+                raise ValueError("selected_landing_mass must be canonical probability or None")
         if type(self.schema_version) is not str or self.schema_version != _RESULT_SCHEMA:
             raise ValueError("result schema mismatch")
         if type(self.evidence) is not ValidationEvidenceV2:
@@ -244,11 +267,19 @@ class HopperValidationResultV2:
             "hopper_arc_clearance_violation",
         )
         launch_semantic = self.reason_code in ("hopper_launch_unknown", "hopper_launch_unsafe")
+        landing_cell_semantic = self.reason_code in (
+            "hopper_landing_zone_unknown",
+            "hopper_landing_zone_unsafe",
+            "hopper_landing_slope_exceeded",
+            "hopper_landing_height_unreachable",
+        )
         if arc_semantic and (self.failed_cell is None or self.segment_index is None):
             raise ValueError("arc semantic failure requires cell and segment")
         if launch_semantic and (self.failed_cell is None or self.segment_index is not None):
             raise ValueError("launch semantic failure requires only cell")
-        if not arc_semantic and not launch_semantic and (
+        if landing_cell_semantic and self.failed_cell is None:
+            raise ValueError("landing semantic failure requires a cell")
+        if not arc_semantic and not launch_semantic and not landing_cell_semantic and (
             self.failed_cell is not None or self.segment_index is not None
         ):
             raise ValueError("nonsemantic result cannot carry failure location")
@@ -267,6 +298,13 @@ def _category_for_reason_v2(reason_code: str) -> FailureCategoryV2 | None:
         "hopper_arc_boundary_violation",
         "hopper_arc_unknown",
         "hopper_arc_clearance_violation",
+        "hopper_landing_probability_below_threshold",
+        "hopper_landing_zone_unknown",
+        "hopper_landing_zone_unsafe",
+        "hopper_landing_slope_exceeded",
+        "hopper_landing_height_unreachable",
+        "hopper_landing_theta_unreachable",
+        "hopper_stop_condition_failed",
     ):
         return FailureCategoryV2.VALIDATION_FAILED
     return FailureCategoryV2.INTERNAL_ERROR
@@ -284,6 +322,7 @@ def _result_v2(
     details: tuple[tuple[str, object], ...] = (),
     failed_cell: Cell | None = None,
     segment_index: int | None = None,
+    selected_landing_mass: float | None = None,
 ) -> HopperValidationResultV2:
     if type(counts) is list:
         frozen_counts = tuple(
@@ -308,7 +347,7 @@ def _result_v2(
         failed_cell=failed_cell,
         segment_index=segment_index,
         replay_work_counts=frozen_counts,
-        selected_landing_mass=None,
+        selected_landing_mass=selected_landing_mass,
         schema_version=_RESULT_SCHEMA,
     )
 
@@ -1480,6 +1519,285 @@ def _validate_hopper_arc_partitions_v2(
     return _result_v2("hopper_jump_l2_valid", "arc_validation", counts)
 
 
+def _nominal_landing_pose_v2(
+    candidate: HopperJumpCandidateV2,
+    mean_x_m: float,
+    mean_y_m: float,
+) -> PoseStateV2:
+    if type(candidate) is not HopperJumpCandidateV2:
+        raise ValueError("hopper_numeric_contract_mismatch")
+    if type(mean_x_m) is not float or type(mean_y_m) is not float:
+        raise ValueError("hopper_numeric_contract_mismatch")
+    return PoseStateV2(mean_x_m, mean_y_m, candidate.start_state.heading_rad)
+
+
+def _candidate_parameter_record_v2(
+    candidate: HopperJumpCandidateV2,
+) -> HopperParameterSetRecordV2:
+    record = _lookup_hopper_parameter_set_v2(candidate.parameter_set_id)
+    if type(record) is not HopperParameterSetRecordV2:
+        raise ValueError("hopper_authority_contract_mismatch")
+    _hopper_parameter_set_in_memory_token_v2(record)
+    profile = candidate.hopper_profile
+    if (
+        profile.profile.profile_id != record.base_profile_id
+        or profile.stop_condition != record.stop_condition
+        or profile.energy_model != record.energy_model
+    ):
+        raise ValueError("hopper_profile_contract_mismatch")
+    return record
+
+
+def _closed_square_dilation_intersects_cell_v2(
+    source_left: float,
+    source_right: float,
+    source_bottom: float,
+    source_top: float,
+    radius_m: float,
+    cell_left: float,
+    cell_right: float,
+    cell_bottom: float,
+    cell_top: float,
+) -> bool:
+    dx = max(source_left - cell_right, cell_left - source_right, 0.0)
+    dy = max(source_bottom - cell_top, cell_bottom - source_top, 0.0)
+    return dx * dx + dy * dy <= radius_m * radius_m
+
+
+def _landing_failure_from_query_v2(
+    query: SafetyQueryV2,
+    elevation_m: float | None,
+    support_height_m: float,
+) -> tuple[int, str] | None:
+    if query.reason_code == "terrain_unknown":
+        return 40, "hopper_landing_zone_unknown"
+    if query.reason_code in (
+        "terrain_out_of_bounds",
+        "terrain_hard_obstacle",
+        "terrain_not_traversable",
+    ):
+        return 41, "hopper_landing_zone_unsafe"
+    if query.reason_code == "terrain_slope_exceeded":
+        return 42, "hopper_landing_slope_exceeded"
+    if not query.passed:
+        return 41, "hopper_landing_zone_unsafe"
+    if elevation_m != support_height_m:
+        return 43, "hopper_landing_height_unreachable"
+    return None
+
+
+def _validate_hopper_landing_and_stop_v2(
+    candidate: HopperJumpCandidateV2,
+    anchor: FineSafetyAnchorV2,
+    deadline: PlanningDeadlineV2,
+    counts: list[int],
+    record: HopperParameterSetRecordV2,
+    mean_x_m: float,
+    mean_y_m: float,
+    horizontal_range_m: float,
+    speed_mps: float,
+) -> HopperValidationResultV2:
+    profile = candidate.hopper_profile
+    sigma_m = horizontal_range_m * profile.landing_sigma_range_scale
+    sigma_m = sigma_m + profile.landing_sigma_offset_m
+    try:
+        prefix = _call_captured_landing_helper_v2(
+            HOPPER_RESOURCE_AUTHORITY_V2,
+            WorldPoint(mean_x_m, mean_y_m),
+            sigma_m,
+            profile.landing_probability_threshold,
+            anchor.snapshot.geometry,
+        )
+        _require_canonical_resource_authority_v2(HOPPER_RESOURCE_AUTHORITY_V2)
+        _hopper_parameter_set_in_memory_token_v2(record)
+    except (KeyboardInterrupt, MemoryError, SystemExit):
+        raise
+    except Exception:
+        return _contract_result_v2(
+            "hopper_numeric_contract_mismatch", "landing_probability", counts
+        )
+    if _deadline_expired_v2(deadline):
+        return _result_v2("planning_deadline_expired", "landing_probability", counts)
+    if type(prefix) is not tuple or not prefix:
+        return _contract_result_v2(
+            "hopper_numeric_contract_mismatch", "landing_probability", counts
+        )
+    if any(type(item) is not LandingCellMassV2 for item in prefix):
+        return _contract_result_v2(
+            "hopper_numeric_contract_mismatch", "landing_probability", counts
+        )
+    selected_mass = fsum(item.probability_mass for item in prefix)
+    if not isfinite(selected_mass) or not 0.0 <= selected_mass <= 1.0:
+        return _contract_result_v2(
+            "hopper_numeric_contract_mismatch", "landing_probability", counts
+        )
+    if selected_mass < profile.landing_probability_threshold:
+        return _result_v2(
+            "hopper_landing_probability_below_threshold",
+            "landing_probability",
+            counts,
+            selected_landing_mass=selected_mass,
+        )
+
+    geometry = anchor.snapshot.geometry
+    radius = profile.landing_footprint_radius_m
+    failures: list[
+        tuple[int, tuple[int, int], int, int, int, str, Cell, int | None]
+    ] = []
+
+    def check_cell(cell: Cell, prefix_rank: int | None) -> HopperValidationResultV2 | None:
+        if _deadline_expired_v2(deadline):
+            return _result_v2(
+                "planning_deadline_expired",
+                "landing_validation",
+                counts,
+                selected_landing_mass=selected_mass,
+            )
+        query = anchor.query(cell, profile.max_landing_slope_deg)
+        if not _query_is_exact_v2(query, cell, anchor._snapshot_hash):
+            return _contract_result_v2(
+                "terrain_query_contract_mismatch", "landing_validation", counts
+            )
+        elevation = None
+        if geometry.in_bounds(cell):
+            elevation = float(anchor.snapshot.elevation_m[cell.y, cell.x])
+        failure = _landing_failure_from_query_v2(
+            query, elevation, candidate.support_height_m
+        )
+        if failure is not None:
+            rank, reason = failure
+            optional_rank = (0, prefix_rank) if prefix_rank is not None else (1, 0)
+            failures.append(
+                (rank, optional_rank, 1, cell.y, cell.x, reason, cell, prefix_rank)
+            )
+        return None
+
+    for prefix_rank, item in enumerate(prefix):
+        if not item.in_bounds:
+            failures.append(
+                (
+                    41,
+                    (0, prefix_rank),
+                    0,
+                    item.cell.y,
+                    item.cell.x,
+                    "hopper_landing_zone_unsafe",
+                    item.cell,
+                    prefix_rank,
+                )
+            )
+        source_left = geometry.origin[0] + item.cell.x * geometry.resolution_m
+        source_right = source_left + geometry.resolution_m
+        source_bottom = geometry.origin[1] + item.cell.y * geometry.resolution_m
+        source_top = source_bottom + geometry.resolution_m
+        min_x, max_x = _fast_candidate_index_bounds_v2(
+            source_left - radius,
+            source_right + radius,
+            geometry.origin[0],
+            geometry.resolution_m,
+        )
+        min_y, max_y = _fast_candidate_index_bounds_v2(
+            source_bottom - radius,
+            source_top + radius,
+            geometry.origin[1],
+            geometry.resolution_m,
+        )
+        for cell_y in range(min_y, max_y + 1):
+            for cell_x in range(min_x, max_x + 1):
+                cell_left = geometry.origin[0] + cell_x * geometry.resolution_m
+                cell_bottom = geometry.origin[1] + cell_y * geometry.resolution_m
+                if not _closed_square_dilation_intersects_cell_v2(
+                    source_left,
+                    source_right,
+                    source_bottom,
+                    source_top,
+                    radius,
+                    cell_left,
+                    cell_left + geometry.resolution_m,
+                    cell_bottom,
+                    cell_bottom + geometry.resolution_m,
+                ):
+                    continue
+                result = check_cell(Cell(cell_x, cell_y), prefix_rank)
+                if result is not None:
+                    return result
+
+    min_x, max_x = _fast_candidate_index_bounds_v2(
+        mean_x_m - radius,
+        mean_x_m + radius,
+        geometry.origin[0],
+        geometry.resolution_m,
+    )
+    min_y, max_y = _fast_candidate_index_bounds_v2(
+        mean_y_m - radius,
+        mean_y_m + radius,
+        geometry.origin[1],
+        geometry.resolution_m,
+    )
+    for cell_y in range(min_y, max_y + 1):
+        for cell_x in range(min_x, max_x + 1):
+            cell_left = geometry.origin[0] + cell_x * geometry.resolution_m
+            cell_bottom = geometry.origin[1] + cell_y * geometry.resolution_m
+            relation = _fast_disk_segment_square_relation_v2(
+                mean_x_m,
+                mean_y_m,
+                0.0,
+                0.0,
+                radius,
+                0.0,
+                cell_left,
+                cell_left + geometry.resolution_m,
+                cell_bottom,
+                cell_bottom + geometry.resolution_m,
+            )
+            if relation == "empty":
+                continue
+            result = check_cell(Cell(cell_x, cell_y), None)
+            if result is not None:
+                return result
+
+    if failures:
+        _rank, _optional, _source, _y, _x, reason, cell, prefix_rank = min(
+            failures
+        )
+        return _result_v2(
+            reason,
+            "landing_validation",
+            counts,
+            failed_cell=cell,
+            segment_index=prefix_rank,
+            selected_landing_mass=selected_mass,
+        )
+
+    _nominal_landing_pose_v2(candidate, mean_x_m, mean_y_m)
+    try:
+        stopped = record.stop_evaluator(speed_mps)
+        _hopper_parameter_set_in_memory_token_v2(record)
+    except (KeyboardInterrupt, MemoryError, SystemExit):
+        raise
+    except Exception:
+        return _contract_result_v2(
+            "hopper_numeric_contract_mismatch", "stop_validation", counts
+        )
+    if type(stopped) is not bool:
+        return _contract_result_v2(
+            "hopper_numeric_contract_mismatch", "stop_validation", counts
+        )
+    if not stopped:
+        return _result_v2(
+            "hopper_stop_condition_failed",
+            "stop_validation",
+            counts,
+            selected_landing_mass=selected_mass,
+        )
+    return _result_v2(
+        "hopper_jump_l2_valid",
+        "stop_validation",
+        counts,
+        selected_landing_mass=selected_mass,
+    )
+
+
 def _audit_candidate_for_call_v2(value: object) -> HopperJumpCandidateV2:
     if type(value) is not HopperJumpCandidateV2:
         raise ValueError("hopper_numeric_contract_mismatch")
@@ -1534,6 +1852,17 @@ def validate_hopper_jump_l2(
         audited_candidate = _audit_candidate_for_call_v2(candidate)
     except ValueError as error:
         reason = "hopper_profile_contract_mismatch" if str(error) == "hopper_profile_contract_mismatch" else "hopper_numeric_contract_mismatch"
+        return _contract_result_v2(reason, "launch_validation", counts)
+    try:
+        parameter_record = _candidate_parameter_record_v2(audited_candidate)
+    except (KeyboardInterrupt, MemoryError, SystemExit):
+        raise
+    except ValueError as error:
+        reason = (
+            "hopper_profile_contract_mismatch"
+            if str(error) == "hopper_profile_contract_mismatch"
+            else "hopper_authority_contract_mismatch"
+        )
         return _contract_result_v2(reason, "launch_validation", counts)
     if type(anchor) is not FineSafetyAnchorV2 or type(anchor.snapshot) is not TerrainSnapshotV2:
         return _contract_result_v2("terrain_snapshot_identity_mismatch", "launch_validation", counts)
@@ -1637,4 +1966,21 @@ def validate_hopper_jump_l2(
         )
     if launch_result is not None:
         return launch_result
-    return _validate_hopper_arc_partitions_v2(audited_candidate, anchor, deadline, samples)
+    arc_result = _validate_hopper_arc_partitions_v2(
+        audited_candidate, anchor, deadline, samples
+    )
+    if arc_result.reason_code != "hopper_jump_l2_valid":
+        return arc_result
+    landing_counts = [count for _counter_id, count in arc_result.replay_work_counts]
+    horizontal_range = horizontal_speed * flight_time
+    return _validate_hopper_landing_and_stop_v2(
+        audited_candidate,
+        anchor,
+        deadline,
+        landing_counts,
+        parameter_record,
+        landing_x,
+        landing_y,
+        horizontal_range,
+        speed,
+    )
