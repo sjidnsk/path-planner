@@ -741,6 +741,8 @@ class HybridAStarPlanner:
         if deadline_expired():
             return None
         terrain_cost = 0.0
+        search_heading_change_rad = 0.0
+        previous_pose = start.normalized()
         dt = primitive.duration_s / float(len(transition.samples) - 1)
         for next_pose in transition.samples[1:]:
             if deadline_expired():
@@ -751,13 +753,17 @@ class HybridAStarPlanner:
             cell = grid.spec.world_to_cell(WorldPoint(next_pose.x_m, next_pose.y_m))
             if not grid.spec.in_bounds(cell):
                 return None
+            search_heading_change_rad += abs(
+                _angle_diff(next_pose.theta_rad, previous_pose.theta_rad)
+            )
+            previous_pose = next_pose
             terrain_cost += max(0.0, grid.cost_at(cell) - grid.min_passable_cost()) * request.terrain_cost_weight * dt
 
         breakdown = PoseCostBreakdown(
             translation_cost=transition.distance_m * request.translation_cost_weight,
-            rotation_cost=transition.absolute_heading_change_rad * request.rotation_cost_weight,
+            rotation_cost=search_heading_change_rad * request.rotation_cost_weight,
             reverse_penalty=(transition.distance_m * request.reverse_penalty_weight if primitive.reverse else 0.0),
-            turn_penalty=(transition.absolute_heading_change_rad * request.turn_penalty_weight if abs(primitive.omega_radps) > 1.0e-12 else 0.0),
+            turn_penalty=(search_heading_change_rad * request.turn_penalty_weight if abs(primitive.omega_radps) > 1.0e-12 else 0.0),
             slope_cost=terrain_cost,
             clearance_cost=0.0,
         )
