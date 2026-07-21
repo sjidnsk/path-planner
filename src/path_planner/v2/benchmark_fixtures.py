@@ -243,7 +243,7 @@ class Gate6EpisodeMetricRowV2:
     primitive_false_negative_count: int
     primitive_false_positive_count: int
     resource_cost: float | None
-    coverage_efficiency: float | None
+    coverage_efficiency: float
     expanded_states: int
     rejected_l0: int
     rejected_l1: int
@@ -296,22 +296,20 @@ class Gate6EpisodeMetricRowV2:
             "resource_cost",
             _optional_nonnegative_float(self.resource_cost, "resource_cost"),
         )
+        if self.coverage_efficiency is None:
+            raise ValueError("coverage_efficiency is required for every episode")
         object.__setattr__(
             self,
             "coverage_efficiency",
-            _optional_nonnegative_float(
-                self.coverage_efficiency,
-                "coverage_efficiency",
-            ),
+            _nonnegative_float(self.coverage_efficiency, "coverage_efficiency"),
         )
         object.__setattr__(self, "runtime_ms", _nonnegative_float(self.runtime_ms, "runtime_ms"))
         if self.provider_complete_l2 and not self.provider_success:
             raise ValueError("complete L2 requires provider success")
         if self.timed_out and self.provider_success:
             raise ValueError("timed out row cannot report provider success")
-        has_metrics = self.resource_cost is not None and self.coverage_efficiency is not None
-        if self.provider_success != has_metrics:
-            raise ValueError("successful rows require resource and coverage metrics")
+        if self.provider_success != (self.resource_cost is not None):
+            raise ValueError("resource_cost must be present exactly for successful rows")
         if type(self.semantic_digest) is not str or _LOWER_SHA256.fullmatch(
             self.semantic_digest
         ) is None:
@@ -377,8 +375,11 @@ def aggregate_gate6_metrics_v2(
     cache_lookups = sum(row.cache_lookups for row in ordered)
     runtimes = tuple(row.runtime_ms for row in ordered)
     return {
+        "metrics_status": "evaluated" if ordered else "not_evaluated",
         "row_count": len(ordered),
-        "safety_passed": false_positives == 0 and unsafe_successes == 0,
+        "safety_passed": (
+            false_positives == 0 and unsafe_successes == 0 if ordered else None
+        ),
         "unsafe_success_count": unsafe_successes,
         "primitive_false_positive_count": false_positives,
         "primitive_recall": _ratio(true_positives, true_positives + false_negatives),
@@ -392,9 +393,7 @@ def aggregate_gate6_metrics_v2(
             row.resource_cost for row in successful if row.resource_cost is not None
         ),
         "mean_coverage_efficiency": _mean(
-            row.coverage_efficiency
-            for row in successful
-            if row.coverage_efficiency is not None
+            row.coverage_efficiency for row in ordered
         ),
         "expanded_states": sum(row.expanded_states for row in ordered),
         "rejected_l0": sum(row.rejected_l0 for row in ordered),
@@ -420,8 +419,6 @@ def _paired_key(row: Gate6EpisodeMetricRowV2) -> tuple[object, ...]:
         row.scale,
         row.pair_id,
         row.seed,
-        row.worker_count,
-        row.cache_enabled,
     )
 
 
@@ -446,10 +443,12 @@ def paired_bootstrap_coverage_ci95_v2(
     def by_key(case_id: str) -> dict[tuple[object, ...], float]:
         result: dict[tuple[object, ...], float] = {}
         for row in materialized:
-            if row.ablation_case != case_id:
+            if (
+                row.ablation_case != case_id
+                or row.worker_count != 1
+                or row.cache_enabled
+            ):
                 continue
-            if row.coverage_efficiency is None:
-                raise ValueError("paired coverage rows require coverage_efficiency")
             key = _paired_key(row)
             if key in result:
                 raise ValueError("duplicate paired coverage key")
@@ -500,6 +499,15 @@ def audit_gate6_worker_cache_semantics_v2(
     materialized = tuple(rows)
     if any(type(row) is not Gate6EpisodeMetricRowV2 for row in materialized):
         raise TypeError("rows must contain only Gate6EpisodeMetricRowV2")
+    if not materialized:
+        return {
+            "status": "not_evaluated",
+            "semantic_equivalent": False,
+            "group_count": 0,
+            "missing_variant_count": 0,
+            "duplicate_variant_count": 0,
+            "semantic_mismatch_count": 0,
+        }
     groups: dict[tuple[object, ...], list[Gate6EpisodeMetricRowV2]] = {}
     for row in materialized:
         key = (
