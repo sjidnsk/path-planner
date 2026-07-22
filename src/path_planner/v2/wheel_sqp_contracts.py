@@ -121,6 +121,15 @@ class WheelSQPWorkLedgerV1:
             return _WHEEL_SQP_HARD_MEMORY_LIMIT_BYTES_V1
         return min(requested, _WHEEL_SQP_HARD_MEMORY_LIMIT_BYTES_V1)
 
+    @property
+    def within_limits(self) -> bool:
+        """Report only shared count/memory limits; deadline is checked separately."""
+        return (
+            self.expanded_states <= self.resource_budget.max_expanded_states
+            and self.accounted_bytes <= self.effective_memory_limit_bytes
+            and self.route_states <= self.resource_budget.max_route_states
+        )
+
     def check_deadline(self) -> None:
         if self.deadline.expired:
             raise WheelSQPWorkLimitError("planning_deadline_expired")
@@ -435,11 +444,67 @@ class WheelSQPInitialGuessV2:
 
 
 @dataclass(frozen=True, slots=True)
+class _WheelSQPExactSegmentV1:
+    """Private, independently audited solver output; this is not an L-level primitive."""
+
+    start_state: PoseStateV2
+    end_state: PoseStateV2
+    v_mps: float
+    omega_radps: float
+    duration_s: float
+    mode: WheelSQPModeV2
+    distance_m: float
+    relative_energy: float
+
+    def __post_init__(self) -> None:
+        if type(self.start_state) is not PoseStateV2:
+            raise TypeError("start_state must be exact PoseStateV2")
+        if type(self.end_state) is not PoseStateV2:
+            raise TypeError("end_state must be exact PoseStateV2")
+        v_mps = _exact_finite_float(self.v_mps, "v_mps")
+        omega_radps = _exact_finite_float(self.omega_radps, "omega_radps")
+        duration_s = _exact_finite_float(
+            self.duration_s,
+            "duration_s",
+            nonnegative=True,
+        )
+        if duration_s == 0.0:
+            raise ValueError("duration_s must be positive")
+        if type(self.mode) is not WheelSQPModeV2:
+            raise TypeError("mode must be exact WheelSQPModeV2")
+        distance_m = _exact_finite_float(
+            self.distance_m,
+            "distance_m",
+            nonnegative=True,
+        )
+        _exact_finite_float(
+            self.relative_energy,
+            "relative_energy",
+            nonnegative=True,
+        )
+        if distance_m != abs(v_mps) * duration_s:
+            raise ValueError("distance_m must match exact solver controls")
+        expected_mode = (
+            WheelSQPModeV2.FORWARD
+            if v_mps > 0.0
+            else WheelSQPModeV2.REVERSE
+            if v_mps < 0.0
+            else WheelSQPModeV2.TURN_LEFT
+            if omega_radps > 0.0
+            else WheelSQPModeV2.TURN_RIGHT
+            if omega_radps < 0.0
+            else WheelSQPModeV2.STOP
+        )
+        if self.mode is not expected_mode:
+            raise ValueError("mode must exactly match solver controls")
+
+
+@dataclass(frozen=True, slots=True)
 class WheelSQPCandidateV2:
     candidate_hash: str
     corridor_hash: str
     initial_guess_hash: str
-    segments: tuple[WheelKinematicSegmentV2, ...]
+    segments: tuple[_WheelSQPExactSegmentV1, ...]
     objective_value: float
     status: WheelSQPStatusV2
 
@@ -448,11 +513,16 @@ class WheelSQPCandidateV2:
             _exact_hash(getattr(self, name), name)
         if type(self.segments) is not tuple or not self.segments:
             raise TypeError("segments must be a nonempty exact tuple")
-        if any(type(segment) is not WheelKinematicSegmentV2 for segment in self.segments):
-            raise TypeError("segments must contain exact WheelKinematicSegmentV2 values")
+        if any(type(segment) is not _WheelSQPExactSegmentV1 for segment in self.segments):
+            raise TypeError("segments must contain exact private solver segments")
+        for left, right in zip(self.segments, self.segments[1:]):
+            if left.end_state != right.start_state:
+                raise ValueError("solver candidate segments must be connected")
         _exact_finite_float(self.objective_value, "objective_value", nonnegative=True)
         if type(self.status) is not WheelSQPStatusV2:
             raise TypeError("status must be exact WheelSQPStatusV2")
+        if self.status is not WheelSQPStatusV2.FEASIBLE:
+            raise ValueError("solver candidate status must be FEASIBLE")
 
 
 @dataclass(frozen=True, slots=True)

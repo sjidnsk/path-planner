@@ -151,6 +151,48 @@ def wheel_relative_energy_v1(
     return (translation + rotation + idle) / profile.energy_normalization
 
 
+def wheel_relative_energy_jacobian_v1(
+    v_mps: float,
+    omega_radps: float,
+    duration_s: float,
+    profile: WheelKinematicSQPProfileV2,
+) -> tuple[float, float, float]:
+    """Analytic derivative of the sole relative-energy authority.
+
+    At an exact zero control the derivative of the absolute-value branch is
+    defined as zero.  Fixed SQP modes keep non-zero control signs constant.
+    """
+
+    v = _finite(v_mps, "v_mps")
+    omega = _finite(omega_radps, "omega_radps")
+    dt = _positive(duration_s, "duration_s")
+    profile = _exact_profile(profile)
+    translation_factor = profile.translation_energy_per_m
+    if v < 0.0:
+        translation_factor *= profile.reverse_energy_multiplier
+    dv = (
+        dt * translation_factor
+        if v > 0.0
+        else -dt * translation_factor
+        if v < 0.0
+        else 0.0
+    )
+    domega = (
+        dt * profile.rotation_energy_per_rad
+        if omega > 0.0
+        else -dt * profile.rotation_energy_per_rad
+        if omega < 0.0
+        else 0.0
+    )
+    ddt = (
+        abs(v) * translation_factor
+        + abs(omega) * profile.rotation_energy_per_rad
+        + profile.idle_energy_per_s
+    )
+    normalization = profile.energy_normalization
+    return dv / normalization, domega / normalization, ddt / normalization
+
+
 def wheel_segment_center_control_slew_v1(
     left_v_mps: float,
     left_omega_radps: float,
