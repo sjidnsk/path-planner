@@ -30,6 +30,10 @@ from path_planner.v2.wheel_sqp_contracts import (
     WheelSQPValidationEvidenceV2,
     WheelTrajectoryL2ResultV2,
 )
+from path_planner.v2.wheel_sqp_serialization import (
+    CanonicalWheelCandidateV1,
+    CanonicalWheelSegmentV1,
+)
 
 
 REQUEST_HASH = "c" * 64
@@ -158,6 +162,9 @@ def test_wheel_sqp_contract_surface_is_opt_in_v2_only() -> None:
         WheelSQPModeV2.STOP,
     )
     assert WheelSQPStatusV2.FEASIBLE.value == "feasible"
+    assert "validation_level" not in CanonicalWheelCandidateV1.__dataclass_fields__
+    assert "validation_level" not in CanonicalWheelSegmentV1.__dataclass_fields__
+    assert not issubclass(CanonicalWheelSegmentV1, WheelKinematicSegmentV2)
     assert all(
         value is not None
         for value in (
