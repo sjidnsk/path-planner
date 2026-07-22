@@ -177,11 +177,36 @@ class WheelKinematicRouteV2(TypedRouteV2):
         )
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class WheelTopologySignatureV1:
+    entries: tuple[tuple[str, int], ...]
+    signature_id: str = "wheel_component_cut_crossings/v1"
+
+    def __post_init__(self) -> None:
+        if type(self.entries) is not tuple:
+            raise TypeError("entries must be an exact tuple")
+        for entry in self.entries:
+            if type(entry) is not tuple or len(entry) != 2:
+                raise TypeError("entries must contain exact (component_hash, count) tuples")
+            component_hash, crossing_count = entry
+            _exact_hash(component_hash, "component_hash")
+            if type(crossing_count) is not int:
+                raise TypeError("crossing_count must be exact int")
+        _exact_id(
+            self.signature_id,
+            "signature_id",
+            "wheel_component_cut_crossings/v1",
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class WheelCorridorV2:
     corridor_index: int
     cells: tuple[Cell, ...]
     corridor_hash: str
+    guide_cost: float
+    path_length_m: float
+    topology_signature: WheelTopologySignatureV1
     source_id: str = WHEEL_KINEMATIC_CORRIDOR_SOURCE_V2
 
     def __post_init__(self) -> None:
@@ -191,7 +216,15 @@ class WheelCorridorV2:
         if any(type(cell) is not Cell for cell in self.cells):
             raise TypeError("cells must contain exact Cell values")
         _exact_hash(self.corridor_hash, "corridor_hash")
+        _exact_finite_float(self.guide_cost, "guide_cost", nonnegative=True)
+        _exact_finite_float(self.path_length_m, "path_length_m", nonnegative=True)
+        if type(self.topology_signature) is not WheelTopologySignatureV1:
+            raise TypeError("topology_signature must be exact WheelTopologySignatureV1")
         _exact_id(self.source_id, "source_id", WHEEL_KINEMATIC_CORRIDOR_SOURCE_V2)
+
+    @property
+    def path_hash(self) -> str:
+        return self.corridor_hash
 
 
 @dataclass(frozen=True, slots=True)
