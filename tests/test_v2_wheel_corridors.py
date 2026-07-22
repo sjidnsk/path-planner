@@ -12,6 +12,7 @@ import sys
 import numpy as np
 import pytest
 
+import path_planner.v2.wheel_corridors as wheel_corridors
 from path_planner.core import Cell
 from path_planner.v2.contracts import ResourceBudgetV2
 from path_planner.v2.runtime import PlanningDeadlineV2
@@ -121,6 +122,218 @@ def _ordered_identity(result) -> tuple[tuple[tuple[tuple[str, int], ...], str], 
         (corridor.topology_signature.entries, corridor.path_hash)
         for corridor in result.corridors
     )
+
+
+class _StageClock:
+    def __init__(self, expires_in_stage: str) -> None:
+        self.expires_in_stage = expires_in_stage
+        self.stage = "preflight"
+
+    def __call__(self) -> float:
+        return 1.0 if self.stage == self.expires_in_stage else 0.0
+
+
+@pytest.mark.parametrize(
+    "threshold",
+    [nextafter(30.0, inf), 31.0, 30, np.float64(30.0)],
+)
+def test_corridor_graph_rejects_any_nonexact_frozen_slope_threshold(
+    threshold: object,
+) -> None:
+    snapshot = _snapshot(3, 3, slope={Cell(1, 1): nextafter(30.0, inf)})
+
+    with pytest.raises((TypeError, ValueError), match="max_slope_deg"):
+        WheelCorridorGraphV1.from_snapshot(snapshot, threshold)
+
+
+@pytest.mark.parametrize(
+    ("expired", "reason"),
+    [
+        (False, "wheel_sqp_resource_budget_exceeded"),
+        (True, "planning_deadline_expired"),
+    ],
+)
+def test_resource_preflight_stops_before_graph_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    expired: bool,
+    reason: str,
+) -> None:
+    def forbidden_factory(*args: object, **kwargs: object) -> None:
+        raise AssertionError("graph factory ran before resource preflight")
+
+    monkeypatch.setattr(
+        WheelCorridorGraphV1,
+        "from_snapshot",
+        classmethod(forbidden_factory),
+    )
+
+    result = generate_wheel_corridors_v2(
+        _snapshot(5, 3),
+        Cell(0, 1),
+        Cell(4, 1),
+        _budget(max_memory_bytes=1),
+        _deadline(expired=expired),
+    )
+
+    assert result.reason_code == reason
+    assert result.corridors == ()
+
+
+def test_deadline_flip_during_passable_rows_stops_before_clearance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RowClock:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self) -> float:
+            self.calls += 1
+            return 1.0 if self.calls >= 3 else 0.0
+
+    def forbidden_clearance(*args: object, **kwargs: object) -> None:
+        raise AssertionError("clearance ran after passable-row deadline")
+
+    monkeypatch.setattr(
+        WheelCorridorGraphV1,
+        "_clearance_pass",
+        staticmethod(forbidden_clearance),
+    )
+    result = generate_wheel_corridors_v2(
+        _snapshot(20, 20),
+        Cell(0, 0),
+        Cell(19, 19),
+        _budget(),
+        PlanningDeadlineV2(0.0, 1.0, _RowClock()),
+    )
+
+    assert result.reason_code == "planning_deadline_expired"
+    assert result.corridors == ()
+    assert result.expanded_states == 0
+
+
+def test_deadline_flip_during_clearance_stops_before_snapshot_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _StageClock("clearance")
+    original_clearance = WheelCorridorGraphV1._clearance_pass
+
+    def staged_clearance(*args: object, **kwargs: object):
+        clock.stage = "clearance"
+        return original_clearance(*args, **kwargs)
+
+    def forbidden_snapshot_hash(*args: object, **kwargs: object) -> None:
+        raise AssertionError("snapshot hash ran after clearance deadline")
+
+    monkeypatch.setattr(
+        WheelCorridorGraphV1,
+        "_clearance_pass",
+        staticmethod(staged_clearance),
+    )
+    monkeypatch.setattr(wheel_corridors, "snapshot_hash", forbidden_snapshot_hash)
+    result = generate_wheel_corridors_v2(
+        _snapshot(20, 20, not_traversable={Cell(10, 10)}),
+        Cell(0, 0),
+        Cell(19, 19),
+        _budget(),
+        PlanningDeadlineV2(0.0, 1.0, clock),
+    )
+
+    assert result.reason_code == "planning_deadline_expired"
+    assert result.corridors == ()
+    assert result.expanded_states == 0
+
+
+def test_deadline_flip_during_components_stops_before_yen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _StageClock("components")
+    original_components = wheel_corridors.build_blocked_components_v1
+
+    def staged_components(*args: object, **kwargs: object):
+        clock.stage = "components"
+        return original_components(*args, **kwargs)
+
+    def forbidden_yen(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Yen ran after component deadline")
+
+    monkeypatch.setattr(
+        wheel_corridors,
+        "build_blocked_components_v1",
+        staged_components,
+    )
+    monkeypatch.setattr(wheel_corridors, "yen_k_shortest_v1", forbidden_yen)
+    result = generate_wheel_corridors_v2(
+        _snapshot(9, 7, not_traversable={Cell(4, 3)}),
+        Cell(0, 3),
+        Cell(8, 3),
+        _budget(),
+        PlanningDeadlineV2(0.0, 1.0, clock),
+    )
+
+    assert result.reason_code == "planning_deadline_expired"
+    assert result.corridors == ()
+    assert result.expanded_states == 0
+
+
+def test_deadline_flip_during_topology_stops_before_path_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _StageClock("topology")
+    original_topology = wheel_corridors.topology_signature_v1
+
+    def staged_topology(*args: object, **kwargs: object):
+        clock.stage = "topology"
+        return original_topology(*args, **kwargs)
+
+    def forbidden_path_hash(*args: object, **kwargs: object) -> None:
+        raise AssertionError("path hash ran after topology deadline")
+
+    monkeypatch.setattr(wheel_corridors, "topology_signature_v1", staged_topology)
+    monkeypatch.setattr(wheel_corridors, "_path_hash", forbidden_path_hash)
+    result = generate_wheel_corridors_v2(
+        _snapshot(5, 3),
+        Cell(0, 1),
+        Cell(4, 1),
+        _budget(),
+        PlanningDeadlineV2(0.0, 1.0, clock),
+    )
+
+    assert result.reason_code == "planning_deadline_expired"
+    assert result.corridors == ()
+
+
+def test_deadline_flip_before_path_hash_payload_returns_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _StageClock("path_hash")
+    original_path_hash = wheel_corridors._path_hash
+    original_canonical_sha256 = wheel_corridors._canonical_sha256
+
+    def staged_path_hash(*args: object, **kwargs: object):
+        clock.stage = "path_hash"
+        return original_path_hash(*args, **kwargs)
+
+    def guarded_canonical_sha256(payload: object) -> str:
+        if clock.stage == "path_hash":
+            raise AssertionError("path hash payload allocated after deadline")
+        return original_canonical_sha256(payload)
+
+    monkeypatch.setattr(wheel_corridors, "_path_hash", staged_path_hash)
+    monkeypatch.setattr(
+        wheel_corridors,
+        "_canonical_sha256",
+        guarded_canonical_sha256,
+    )
+    result = generate_wheel_corridors_v2(
+        _snapshot(5, 3),
+        Cell(0, 1),
+        Cell(4, 1),
+        _budget(),
+        PlanningDeadlineV2(0.0, 1.0, clock),
+    )
+
+    assert result.reason_code == "planning_deadline_expired"
+    assert result.corridors == ()
 
 
 def test_corridor_graph_uses_only_current_observed_center_cell_safety() -> None:
@@ -467,16 +680,28 @@ def test_memory_accounting_and_deadline_precedence_are_fail_closed() -> None:
     )
 
 
-def test_deadline_flip_before_neighbor_batch_returns_no_partial_corridor() -> None:
+def test_deadline_flip_before_neighbor_batch_returns_no_partial_corridor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _Clock:
         def __init__(self) -> None:
             self.calls = 0
+            self.stage = "preflight"
 
         def __call__(self) -> float:
+            if self.stage != "astar":
+                return 0.0
             self.calls += 1
-            return 0.0 if self.calls < 3 else 1.0
+            return 0.0 if self.calls < 4 else 1.0
 
     clock = _Clock()
+    original_astar = wheel_corridors._stable_astar
+
+    def staged_astar(*args: object, **kwargs: object):
+        clock.stage = "astar"
+        return original_astar(*args, **kwargs)
+
+    monkeypatch.setattr(wheel_corridors, "_stable_astar", staged_astar)
     result = generate_wheel_corridors_v2(
         _snapshot(5, 3),
         Cell(0, 1),

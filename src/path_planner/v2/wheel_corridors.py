@@ -5,8 +5,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import heapq
 import json
-from math import hypot, isfinite, sqrt
-from numbers import Real
+from math import hypot, sqrt
 
 from path_planner.core import Cell
 from path_planner.v2.contracts import ResourceBudgetV2
@@ -22,6 +21,7 @@ from path_planner.v2.wheel_sqp_contracts import (
 WHEEL_CORRIDOR_GRAPH_SAFETY_SCOPE_V1 = "current_observed_center_cell_passable/v1"
 WHEEL_CORRIDOR_COMPONENT_SCHEMA_V1 = "wheel_blocked_component_quarter_cut/v1"
 WHEEL_CORRIDOR_MEMORY_ACCOUNTING_V1 = "wheel_corridor_deterministic_records/v1"
+WHEEL_CORRIDOR_MAX_SLOPE_DEG_V1 = 30.0
 
 _CARDINAL_LENGTH_M = 0.5
 _DIAGONAL_LENGTH_M = 0.5 * sqrt(2.0)
@@ -54,15 +54,12 @@ def _exact_cell(value: object, name: str) -> Cell:
     return value
 
 
-def _finite_float(value: object, name: str, *, nonnegative: bool = False) -> float:
-    if isinstance(value, bool) or not isinstance(value, Real):
-        raise TypeError(f"{name} must be a finite real")
-    normalized = float(value)
-    if not isfinite(normalized):
-        raise ValueError(f"{name} must be finite")
-    if nonnegative and normalized < 0.0:
-        raise ValueError(f"{name} must be nonnegative")
-    return normalized
+def _exact_slope_threshold(value: object) -> float:
+    if type(value) is not float:
+        raise TypeError("max_slope_deg must be exact built-in float")
+    if value != WHEEL_CORRIDOR_MAX_SLOPE_DEG_V1:
+        raise ValueError("max_slope_deg must be exactly 30.0")
+    return value
 
 
 def _canonical_sha256(payload: object) -> str:
@@ -90,37 +87,54 @@ class WheelCorridorGraphV1:
     def from_snapshot(
         cls,
         snapshot: TerrainSnapshotV2,
-        max_slope_deg: float = 30.0,
+        max_slope_deg: float = WHEEL_CORRIDOR_MAX_SLOPE_DEG_V1,
+        *,
+        ledger: _CorridorLedger | None = None,
     ) -> WheelCorridorGraphV1:
         if type(snapshot) is not TerrainSnapshotV2:
             raise TypeError("snapshot must be exact TerrainSnapshotV2")
-        threshold = _finite_float(max_slope_deg, "max_slope_deg", nonnegative=True)
-        passable_mask = (
-            snapshot.observed_mask
-            & ~snapshot.hard_obstacle_mask
-            & snapshot.traversable_mask
-            & (snapshot.slope_deg <= threshold)
-        )
+        threshold = _exact_slope_threshold(max_slope_deg)
+        if ledger is not None and type(ledger) is not _CorridorLedger:
+            raise TypeError("ledger must be exact _CorridorLedger or None")
         geometry = snapshot.geometry
-        passable = frozenset(
-            Cell(x, y)
-            for y in range(geometry.height)
-            for x in range(geometry.width)
-            if bool(passable_mask[y, x])
+        if ledger is not None:
+            ledger.check_deadline()
+        passable_cells: set[Cell] = set()
+        invalid_cells: list[Cell] = []
+        for y in range(geometry.height):
+            if ledger is not None:
+                ledger.check_deadline()
+            for x in range(geometry.width):
+                cell = Cell(x, y)
+                is_passable = (
+                    bool(snapshot.observed_mask[y, x])
+                    and not bool(snapshot.hard_obstacle_mask[y, x])
+                    and bool(snapshot.traversable_mask[y, x])
+                    and float(snapshot.slope_deg[y, x]) <= threshold
+                )
+                if is_passable:
+                    passable_cells.add(cell)
+                else:
+                    invalid_cells.append(cell)
+        passable = frozenset(passable_cells)
+        invalid = tuple(invalid_cells)
+        clearance = cls._clearance_pass(
+            geometry.width,
+            geometry.height,
+            invalid,
+            ledger=ledger,
         )
-        invalid = tuple(
-            Cell(x, y)
-            for y in range(geometry.height)
-            for x in range(geometry.width)
-            if not bool(passable_mask[y, x])
-        )
-        clearance = cls._clearance_pass(geometry.width, geometry.height, invalid)
+        if ledger is not None:
+            ledger.check_deadline()
+        identity = snapshot_hash(snapshot)
+        if ledger is not None:
+            ledger.check_deadline()
         return cls(
             snapshot=snapshot,
             max_slope_deg=threshold,
             _passable_cells=passable,
             _clearance=clearance,
-            snapshot_identity=snapshot_hash(snapshot),
+            snapshot_identity=identity,
         )
 
     @staticmethod
@@ -128,9 +142,16 @@ class WheelCorridorGraphV1:
         width: int,
         height: int,
         invalid: tuple[Cell, ...],
+        *,
+        ledger: _CorridorLedger | None = None,
     ) -> tuple[int, ...]:
+        if ledger is not None:
+            ledger.check_deadline()
         if not invalid:
-            return (max(width, height),) * (width * height)
+            clearance = (max(width, height),) * (width * height)
+            if ledger is not None:
+                ledger.check_deadline()
+            return clearance
         sentinel = width + height + 1
         distances = [sentinel] * (width * height)
         queue: deque[Cell] = deque()
@@ -138,8 +159,12 @@ class WheelCorridorGraphV1:
             distances[cell.y * width + cell.x] = 0
             queue.append(cell)
         while queue:
+            if ledger is not None:
+                ledger.check_deadline()
             current = queue.popleft()
             next_distance = distances[current.y * width + current.x] + 1
+            if ledger is not None:
+                ledger.check_deadline()
             for dx, dy in _NEIGHBOR_STEPS:
                 x = current.x + dx
                 y = current.y + dy
@@ -150,7 +175,10 @@ class WheelCorridorGraphV1:
                     continue
                 distances[index] = next_distance
                 queue.append(Cell(x, y))
-        return tuple(distances)
+        clearance = tuple(distances)
+        if ledger is not None:
+            ledger.check_deadline()
+        return clearance
 
     @property
     def width(self) -> int:
@@ -204,7 +232,7 @@ class WheelCorridorGraphV1:
         clearance_cells = self.clearance_cells(destination)
         return self.edge_length_m(source, destination) * (
             1.0
-            + 0.05 * (slope_deg / 30.0) ** 2
+            + 0.05 * (slope_deg / WHEEL_CORRIDOR_MAX_SLOPE_DEG_V1) ** 2
             + 0.10 / (1.0 + clearance_cells)
         )
 
@@ -263,7 +291,7 @@ class WheelCorridorGenerationResultV2:
     corridors: tuple[WheelCorridorV2, ...]
     reason_code: str
     expanded_states: int
-    terrain_snapshot_hash: str
+    terrain_snapshot_hash: str | None
 
     def __post_init__(self) -> None:
         if type(self.corridors) is not tuple or any(
@@ -274,14 +302,16 @@ class WheelCorridorGenerationResultV2:
             raise TypeError("reason_code must be exact nonempty str")
         if type(self.expanded_states) is not int or self.expanded_states < 0:
             raise ValueError("expanded_states must be an exact nonnegative int")
-        if (
+        if self.terrain_snapshot_hash is not None and (
             type(self.terrain_snapshot_hash) is not str
             or len(self.terrain_snapshot_hash) != 64
         ):
-            raise ValueError("terrain_snapshot_hash must be a SHA-256 digest")
+            raise ValueError("terrain_snapshot_hash must be None or a SHA-256 digest")
         if self.reason_code == "wheel_sqp_corridors_ready":
             if not 1 <= len(self.corridors) <= 3:
                 raise ValueError("ready result requires one to three corridors")
+            if self.terrain_snapshot_hash is None:
+                raise ValueError("ready result requires terrain_snapshot_hash")
         elif self.corridors:
             raise ValueError("failed generation must not expose partial corridors")
 
@@ -336,11 +366,13 @@ class _CorridorLedger:
             raise _CorridorAbort("planning_deadline_expired")
 
     def charge_expansion(self) -> None:
+        self.check_deadline()
         if self.expanded_states >= self.budget.max_expanded_states:
             raise _CorridorAbort("wheel_sqp_corridor_budget_exceeded")
         self.expanded_states += 1
 
     def charge_memory(self, amount: int) -> None:
+        self.check_deadline()
         if type(amount) is not int or amount < 0:
             raise ValueError("memory charge must be an exact nonnegative int")
         attempted = self.accounted_bytes + amount
@@ -386,30 +418,47 @@ def _quarter_cut(
 
 def build_blocked_components_v1(
     graph: WheelCorridorGraphV1,
+    *,
+    ledger: _CorridorLedger | None = None,
 ) -> tuple[WheelBlockedComponentV1, ...]:
     if type(graph) is not WheelCorridorGraphV1:
         raise TypeError("graph must be exact WheelCorridorGraphV1")
-    remaining = {
-        Cell(x, y)
-        for y in range(graph.height)
-        for x in range(graph.width)
-        if not graph.passable(Cell(x, y))
-    }
+    if ledger is not None and type(ledger) is not _CorridorLedger:
+        raise TypeError("ledger must be exact _CorridorLedger or None")
+    remaining: set[Cell] = set()
+    for y in range(graph.height):
+        if ledger is not None:
+            ledger.check_deadline()
+        for x in range(graph.width):
+            cell = Cell(x, y)
+            if graph.passable(cell):
+                continue
+            if ledger is not None:
+                ledger.charge_memory(_PATH_CELL_BYTES)
+            remaining.add(cell)
     components: list[WheelBlockedComponentV1] = []
     while remaining:
+        if ledger is not None:
+            ledger.check_deadline()
         seed = min(remaining, key=lambda cell: (cell.y, cell.x))
         remaining.remove(seed)
         queue: deque[Cell] = deque((seed,))
         cells: list[Cell] = []
         while queue:
+            if ledger is not None:
+                ledger.check_deadline()
             current = queue.popleft()
             cells.append(current)
+            if ledger is not None:
+                ledger.check_deadline()
             for dx, dy in _COMPONENT_STEPS:
                 neighbor = Cell(current.x + dx, current.y + dy)
                 if neighbor not in remaining:
                     continue
                 remaining.remove(neighbor)
                 queue.append(neighbor)
+        if ledger is not None:
+            ledger.check_deadline()
         ordered = tuple(sorted(cells, key=lambda cell: (cell.y, cell.x)))
         component_hash = _canonical_sha256(
             {
@@ -422,6 +471,8 @@ def build_blocked_components_v1(
             graph.width,
             graph.height,
         )
+        if ledger is not None:
+            ledger.check_deadline()
         components.append(
             WheelBlockedComponentV1(
                 cells=ordered,
@@ -437,12 +488,17 @@ def build_blocked_components_v1(
                 ),
             )
         )
-    return tuple(
+    if ledger is not None:
+        ledger.check_deadline()
+    ordered_components = tuple(
         sorted(
             components,
             key=lambda component: (component.cell_order_key, component.component_hash),
         )
     )
+    if ledger is not None:
+        ledger.check_deadline()
+    return ordered_components
 
 
 def _orientation(
@@ -481,6 +537,8 @@ def _crossing_sign(
 def topology_signature_v1(
     cells: tuple[Cell, ...],
     components: tuple[WheelBlockedComponentV1, ...],
+    *,
+    ledger: _CorridorLedger | None = None,
 ) -> WheelTopologySignatureV1:
     if type(cells) is not tuple or not cells:
         raise TypeError("cells must be a nonempty exact tuple")
@@ -490,9 +548,15 @@ def topology_signature_v1(
         type(component) is not WheelBlockedComponentV1 for component in components
     ):
         raise TypeError("components must contain exact WheelBlockedComponentV1 values")
+    if ledger is not None and type(ledger) is not _CorridorLedger:
+        raise TypeError("ledger must be exact _CorridorLedger or None")
     entries: list[tuple[str, int]] = []
     for component in components:
+        if ledger is not None:
+            ledger.charge_memory(_PATH_CELL_BYTES)
         crossing_count = 0
+        if ledger is not None:
+            ledger.check_deadline()
         for source, destination in zip(cells, cells[1:]):
             path_start = (4 * source.x + 2, 4 * source.y + 2)
             path_end = (4 * destination.x + 2, 4 * destination.y + 2)
@@ -503,7 +567,12 @@ def topology_signature_v1(
                 component.cut_q4[1],
             )
         entries.append((component.component_hash, crossing_count))
-    return WheelTopologySignatureV1(tuple(entries))
+    if ledger is not None:
+        ledger.check_deadline()
+    signature = WheelTopologySignatureV1(tuple(entries))
+    if ledger is not None:
+        ledger.check_deadline()
+    return signature
 
 
 def _reconstruct_path(came_from: dict[Cell, Cell], goal: Cell) -> tuple[Cell, ...]:
@@ -539,6 +608,7 @@ def _stable_astar(
         tuple[float, float, int, int, int, int, Cell, tuple[int, int, int]]
     ] = []
     heuristic = _CARDINAL_LENGTH_M * hypot(goal.x - start.x, goal.y - start.y)
+    ledger.charge_memory(_SEARCH_RECORD_BYTES)
     heapq.heappush(
         queue,
         (
@@ -552,7 +622,6 @@ def _stable_astar(
             start_predecessor,
         ),
     )
-    ledger.charge_memory(_SEARCH_RECORD_BYTES)
     while queue:
         ledger.check_deadline()
         _, g_cost, _, _, _, _, current, predecessor_key = heapq.heappop(queue)
@@ -625,16 +694,30 @@ def stable_astar_v1(
     return path, ledger.expanded_states
 
 
-def _path_cost(graph: WheelCorridorGraphV1, cells: tuple[Cell, ...]) -> float:
+def _path_cost(
+    graph: WheelCorridorGraphV1,
+    cells: tuple[Cell, ...],
+    *,
+    ledger: _CorridorLedger | None = None,
+) -> float:
     cost = 0.0
     for source, destination in zip(cells, cells[1:]):
+        if ledger is not None:
+            ledger.check_deadline()
         cost += graph.edge_cost(source, destination)
     return cost
 
 
-def _path_length(graph: WheelCorridorGraphV1, cells: tuple[Cell, ...]) -> float:
+def _path_length(
+    graph: WheelCorridorGraphV1,
+    cells: tuple[Cell, ...],
+    *,
+    ledger: _CorridorLedger | None = None,
+) -> float:
     length = 0.0
     for source, destination in zip(cells, cells[1:]):
+        if ledger is not None:
+            ledger.check_deadline()
         length += graph.edge_length_m(source, destination)
     return length
 
@@ -699,8 +782,8 @@ def yen_k_shortest_v1(
             heapq.heappush(
                 candidates,
                 (
-                    _path_cost(graph, candidate),
-                    _path_length(graph, candidate),
+                    _path_cost(graph, candidate, ledger=ledger),
+                    _path_length(graph, candidate, ledger=ledger),
                     _cell_path_key(candidate),
                     insertion_id,
                     candidate,
@@ -716,14 +799,24 @@ def yen_k_shortest_v1(
     return tuple(accepted)
 
 
-def _path_hash(snapshot_identity: str, cells: tuple[Cell, ...]) -> str:
-    return _canonical_sha256(
+def _path_hash(
+    snapshot_identity: str,
+    cells: tuple[Cell, ...],
+    *,
+    ledger: _CorridorLedger | None = None,
+) -> str:
+    if ledger is not None:
+        ledger.charge_memory(len(cells) * _PATH_CELL_BYTES)
+    digest = _canonical_sha256(
         {
             "cells": [[cell.x, cell.y] for cell in cells],
             "snapshot_hash": snapshot_identity,
             "source_id": WHEEL_KINEMATIC_CORRIDOR_SOURCE_V2,
         }
     )
+    if ledger is not None:
+        ledger.check_deadline()
+    return digest
 
 
 def corridor_order_key_v2(
@@ -744,13 +837,13 @@ def _generation_result(
     corridors: tuple[WheelCorridorV2, ...],
     reason_code: str,
     ledger: _CorridorLedger,
-    graph: WheelCorridorGraphV1,
+    graph: WheelCorridorGraphV1 | None,
 ) -> WheelCorridorGenerationResultV2:
     return WheelCorridorGenerationResultV2(
         corridors=corridors,
         reason_code=reason_code,
         expanded_states=ledger.expanded_states,
-        terrain_snapshot_hash=graph.snapshot_identity,
+        terrain_snapshot_hash=None if graph is None else graph.snapshot_identity,
     )
 
 
@@ -766,14 +859,16 @@ def generate_wheel_corridors_v2(
     start_cell = _exact_cell(start_cell, "start_cell")
     goal_cell = _exact_cell(goal_cell, "goal_cell")
     ledger = _CorridorLedger(resource_budget, deadline)
-    graph = WheelCorridorGraphV1.from_snapshot(snapshot, max_slope_deg=30.0)
+    graph: WheelCorridorGraphV1 | None = None
     try:
-        ledger.check_deadline()
-        ledger.charge_memory(graph.width * graph.height * _GRAPH_CELL_BYTES)
-        components = build_blocked_components_v1(graph)
-        ledger.charge_memory(
-            sum(len(component.cells) for component in components) * _PATH_CELL_BYTES
+        geometry = snapshot.geometry
+        ledger.charge_memory(geometry.width * geometry.height * _GRAPH_CELL_BYTES)
+        graph = WheelCorridorGraphV1.from_snapshot(
+            snapshot,
+            max_slope_deg=WHEEL_CORRIDOR_MAX_SLOPE_DEG_V1,
+            ledger=ledger,
         )
+        components = build_blocked_components_v1(graph, ledger=ledger)
         raw_paths = yen_k_shortest_v1(
             graph,
             start_cell,
@@ -790,17 +885,20 @@ def generate_wheel_corridors_v2(
             )
         first_per_signature: dict[WheelTopologySignatureV1, _CorridorCandidate] = {}
         for cells in raw_paths:
-            signature = topology_signature_v1(cells, components)
+            ledger.check_deadline()
+            signature = topology_signature_v1(cells, components, ledger=ledger)
             if signature in first_per_signature:
                 continue
-            path_hash = _path_hash(graph.snapshot_identity, cells)
+            path_hash = _path_hash(graph.snapshot_identity, cells, ledger=ledger)
+            ledger.charge_memory(_PATH_CELL_BYTES)
             first_per_signature[signature] = _CorridorCandidate(
                 cells=cells,
                 path_hash=path_hash,
-                guide_cost=_path_cost(graph, cells),
-                path_length_m=_path_length(graph, cells),
+                guide_cost=_path_cost(graph, cells, ledger=ledger),
+                path_length_m=_path_length(graph, cells, ledger=ledger),
                 topology_signature=signature,
             )
+        ledger.charge_memory(len(first_per_signature) * _PATH_CELL_BYTES)
         ordered = sorted(
             first_per_signature.values(),
             key=lambda candidate: candidate.order_key,
