@@ -16,6 +16,9 @@ dependencies = [
 dev = [
   "pytest>=8",
 ]
+wheel-sqp = [
+  "scipy==1.18.0",
+]
 
 [project.scripts]
 path-planner = "path_planner.cli:main"

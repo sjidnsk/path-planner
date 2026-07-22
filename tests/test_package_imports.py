@@ -24,6 +24,16 @@ def test_dependency_metadata_caps_numpy_before_windows_matplotlib_crash_range():
     assert '"numpy>=1.26,<2.3"' in content
 
 
+def test_path_planner_pins_the_solver_optional_extra() -> None:
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    content = pyproject.read_text(encoding="utf-8")
+
+    assert "wheel-sqp = [" in content
+    assert '"scipy==1.18.0"' in content
+
+
 def test_readme_describes_phase4_trackable_path_scope_and_non_goals():
     from pathlib import Path
 

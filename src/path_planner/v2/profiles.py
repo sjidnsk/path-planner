@@ -10,6 +10,7 @@ from path_planner.v2.contracts import PlatformKindV2
 
 PLATFORM_PROFILE_SCHEMA_VERSION_V2 = "path-planner-v2-platform-profile/v1"
 WHEEL_RELATIVE_ENERGY_PROXY_ID_V2 = "wheel_relative_motion_energy/v1"
+WHEEL_KINEMATIC_CORRIDOR_SQP_CAPABILITY_V2 = "wheel_kinematic_corridor_sqp/v1"
 LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2 = "simulation_proxy_static_crawl/v1"
 HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2 = (
     "simulation_proxy_lunar_ballistic/v1"
@@ -193,6 +194,64 @@ def _reaudit_hopper_platform_profile(value: object) -> PlatformProfileV2:
     return audited
 
 
+def _required_wheel_sqp_profile_field(value: PlatformProfileV2, name: str) -> object:
+    try:
+        return getattr(value, name)
+    except AttributeError:
+        raise TypeError(f"profile is missing required field {name}") from None
+
+
+def _reaudit_wheel_sqp_platform(value: object) -> PlatformProfileV2:
+    if type(value) is not PlatformProfileV2:
+        raise TypeError("profile must be exact PlatformProfileV2")
+    audited = PlatformProfileV2(
+        profile_id=_exact_profile_string(
+            _required_wheel_sqp_profile_field(value, "profile_id"), "profile_id"
+        ),
+        platform_kind=_required_wheel_sqp_profile_field(value, "platform_kind"),
+        capability_revision=_exact_profile_string(
+            _required_wheel_sqp_profile_field(value, "capability_revision"),
+            "capability_revision",
+        ),
+        simulation_proxy=_required_wheel_sqp_profile_field(value, "simulation_proxy"),
+        max_traversable_slope_deg=_exact_profile_float(
+            _required_wheel_sqp_profile_field(value, "max_traversable_slope_deg"),
+            "max_traversable_slope_deg",
+        ),
+        goal_position_tolerance_m=_exact_profile_float(
+            _required_wheel_sqp_profile_field(value, "goal_position_tolerance_m"),
+            "goal_position_tolerance_m",
+        ),
+        goal_heading_tolerance_rad=_exact_profile_float(
+            _required_wheel_sqp_profile_field(value, "goal_heading_tolerance_rad"),
+            "goal_heading_tolerance_rad",
+        ),
+        schema_version=_exact_profile_string(
+            _required_wheel_sqp_profile_field(value, "schema_version"),
+            "schema_version",
+        ),
+    )
+    if type(audited.platform_kind) is not PlatformKindV2:
+        raise TypeError("platform_kind must be exact PlatformKindV2")
+    if type(audited.simulation_proxy) is not bool:
+        raise TypeError("simulation_proxy must be exact bool")
+    if audited.profile_id != "scout-mini-wheel-kinematic-sqp/v1":
+        raise ValueError("profile_id must be the fixed Scout Mini wheel SQP profile")
+    if audited.platform_kind is not PlatformKindV2.WHEEL:
+        raise ValueError("wheel SQP profile requires PlatformKindV2.WHEEL")
+    if audited.simulation_proxy is not False:
+        raise ValueError("wheel SQP profile requires simulation_proxy=False")
+    if audited.capability_revision != WHEEL_KINEMATIC_CORRIDOR_SQP_CAPABILITY_V2:
+        raise ValueError("capability_revision must be the fixed wheel SQP capability")
+    if audited.max_traversable_slope_deg != 30.0:
+        raise ValueError("max_traversable_slope_deg must be exactly 30.0")
+    if audited.goal_position_tolerance_m != 0.25:
+        raise ValueError("goal_position_tolerance_m must be exactly 0.25")
+    if audited.goal_heading_tolerance_rad != 0.08726646259971647:
+        raise ValueError("goal_heading_tolerance_rad must be exactly 0.08726646259971647")
+    return audited
+
+
 @dataclass(frozen=True, slots=True)
 class PlatformProfileV2:
     profile_id: str
@@ -237,6 +296,123 @@ class PlatformProfileV2:
             raise ValueError(
                 f"schema_version must be {PLATFORM_PROFILE_SCHEMA_VERSION_V2}"
             )
+
+
+_WHEEL_SQP_FROZEN_VALUES_V2 = (
+    ("steering_model", "differential_skid_steer"),
+    ("body_length_m", 0.612),
+    ("body_width_m", 0.580),
+    ("footprint_safety_margin_m", 0.0),
+    ("reverse_enabled", True),
+    ("turn_in_place_enabled", True),
+    ("max_speed_mps", 1.0),
+    ("max_angular_speed_radps", 0.7853981633974483),
+    ("max_linear_accel_mps2", 0.5),
+    ("max_linear_decel_mps2", 0.75),
+    ("max_angular_accel_radps2", 1.5707963267948966),
+    ("min_segment_duration_s", 0.05),
+    ("max_segment_duration_s", 120.0),
+    ("max_segment_heading_change_rad", 1.5707963267948966),
+    ("max_corridors", 3),
+    ("max_corridor_candidates", 24),
+    ("max_segments", 48),
+    ("max_sqp_iterations", 40),
+    ("max_sqp_function_evaluations", 4096),
+    ("sqp_ftol", 1.0e-10),
+    ("hard_constraint_tolerance", 1.0e-9),
+    ("near_zero_omega_radps", 1.0e-8),
+    ("min_nonzero_control", 1.0e-4),
+    ("canonical_decimal_places", 12),
+    ("max_l2_interval_records", 262_144),
+    ("max_l2_candidate_cells", 1_000_000),
+    ("max_l2_subdivision_depth", 24),
+    ("continuous_separation_epsilon_m", 1.0e-9),
+    ("repair_clearance_m", 1.0e-4),
+    ("observation_sample_translation_m", 0.25),
+    ("observation_sample_heading_rad", 0.08726646259971647),
+    ("solver_memory_reservation_bytes", 16_777_216),
+    ("relative_energy_proxy_id", WHEEL_RELATIVE_ENERGY_PROXY_ID_V2),
+    ("translation_energy_per_m", 1.0),
+    ("rotation_energy_per_rad", 0.2),
+    ("idle_energy_per_s", 0.05),
+    ("reverse_energy_multiplier", 1.25),
+    ("energy_normalization", 1.0),
+    ("time_normalization_s", 1.0),
+    ("control_slew_regularization_weight", 1.0e-4),
+    ("corridor_deviation_regularization_weight", 1.0e-3),
+    ("clearance_soft_weight", 0.0),
+)
+
+
+def _require_frozen_wheel_sqp_values(value: WheelKinematicSQPProfileV2) -> None:
+    for name, expected in _WHEEL_SQP_FROZEN_VALUES_V2:
+        actual = getattr(value, name)
+        if type(actual) is not type(expected):
+            raise TypeError(f"{name} must be exact {type(expected).__name__}")
+        if actual != expected:
+            raise ValueError(f"{name} must be exactly {expected}")
+
+
+@dataclass(frozen=True, slots=True)
+class WheelKinematicSQPProfileV2:
+    profile: PlatformProfileV2
+    steering_model: str = "differential_skid_steer"
+    body_length_m: float = 0.612
+    body_width_m: float = 0.580
+    footprint_safety_margin_m: float = 0.0
+    reverse_enabled: bool = True
+    turn_in_place_enabled: bool = True
+    max_speed_mps: float = 1.0
+    max_angular_speed_radps: float = 0.7853981633974483
+    max_linear_accel_mps2: float = 0.5
+    max_linear_decel_mps2: float = 0.75
+    max_angular_accel_radps2: float = 1.5707963267948966
+    min_segment_duration_s: float = 0.05
+    max_segment_duration_s: float = 120.0
+    max_segment_heading_change_rad: float = 1.5707963267948966
+    max_corridors: int = 3
+    max_corridor_candidates: int = 24
+    max_segments: int = 48
+    max_sqp_iterations: int = 40
+    max_sqp_function_evaluations: int = 4096
+    sqp_ftol: float = 1.0e-10
+    hard_constraint_tolerance: float = 1.0e-9
+    near_zero_omega_radps: float = 1.0e-8
+    min_nonzero_control: float = 1.0e-4
+    canonical_decimal_places: int = 12
+    max_l2_interval_records: int = 262_144
+    max_l2_candidate_cells: int = 1_000_000
+    max_l2_subdivision_depth: int = 24
+    continuous_separation_epsilon_m: float = 1.0e-9
+    repair_clearance_m: float = 1.0e-4
+    observation_sample_translation_m: float = 0.25
+    observation_sample_heading_rad: float = 0.08726646259971647
+    solver_memory_reservation_bytes: int = 16_777_216
+    relative_energy_proxy_id: str = WHEEL_RELATIVE_ENERGY_PROXY_ID_V2
+    translation_energy_per_m: float = 1.0
+    rotation_energy_per_rad: float = 0.2
+    idle_energy_per_s: float = 0.05
+    reverse_energy_multiplier: float = 1.25
+    energy_normalization: float = 1.0
+    time_normalization_s: float = 1.0
+    control_slew_regularization_weight: float = 1.0e-4
+    corridor_deviation_regularization_weight: float = 1.0e-3
+    clearance_soft_weight: float = 0.0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "profile", _reaudit_wheel_sqp_platform(self.profile))
+        _require_frozen_wheel_sqp_values(self)
+
+
+def audit_wheel_kinematic_sqp_profile_v2(
+    profile: WheelKinematicSQPProfileV2,
+) -> WheelKinematicSQPProfileV2:
+    if type(profile) is not WheelKinematicSQPProfileV2:
+        raise TypeError("profile must be exact WheelKinematicSQPProfileV2")
+    return WheelKinematicSQPProfileV2(
+        profile=_reaudit_wheel_sqp_platform(profile.profile),
+        **{name: getattr(profile, name) for name, _ in _WHEEL_SQP_FROZEN_VALUES_V2},
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -17,6 +17,8 @@ from path_planner.v2.profiles import (
     PlatformProfileRegistryV2,
     PlatformProfileV2,
     WheelProfileV2,
+    WheelKinematicSQPProfileV2,
+    audit_wheel_kinematic_sqp_profile_v2,
     audit_hopper_profile_v2,
 )
 from path_planner.v2.providers import PrimitiveProviderV2
@@ -40,6 +42,58 @@ def _profile(profile_id: str = "wheel-safe/v1", **overrides) -> PlatformProfileV
     }
     values.update(overrides)
     return PlatformProfileV2(**values)
+
+
+def _wheel_sqp_platform(**overrides) -> PlatformProfileV2:
+    values = {
+        "profile_id": "scout-mini-wheel-kinematic-sqp/v1",
+        "platform_kind": PlatformKindV2.WHEEL,
+        "capability_revision": "wheel_kinematic_corridor_sqp/v1",
+        "simulation_proxy": False,
+        "max_traversable_slope_deg": 30.0,
+        "goal_position_tolerance_m": 0.25,
+        "goal_heading_tolerance_rad": 0.08726646259971647,
+    }
+    values.update(overrides)
+    return PlatformProfileV2(**values)
+
+
+def test_wheel_sqp_profile_freezes_current_scout_mini_contract() -> None:
+    profile = WheelKinematicSQPProfileV2(profile=_wheel_sqp_platform())
+
+    assert profile.profile.capability_revision == "wheel_kinematic_corridor_sqp/v1"
+    assert profile.profile.goal_position_tolerance_m == 0.25
+    assert profile.profile.goal_heading_tolerance_rad == 0.08726646259971647
+    assert profile.body_length_m == 0.612
+    assert profile.body_width_m == 0.580
+    assert profile.max_corridors == 3
+    assert profile.max_segments == 48
+    assert profile.relative_energy_proxy_id == "wheel_relative_motion_energy/v1"
+    assert not hasattr(profile, "__dict__")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_traversable_slope_deg", 30.000000000000004),
+        ("goal_position_tolerance_m", 0.25000000000000006),
+        ("goal_heading_tolerance_rad", nextafter(0.08726646259971647, float("inf"))),
+        ("capability_revision", "wheel_kinematic_corridor_sqp/v2"),
+    ],
+)
+def test_wheel_sqp_profile_rejects_boundary_or_identity_drift(field, value) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        WheelKinematicSQPProfileV2(profile=_wheel_sqp_platform(**{field: value}))
+
+
+def test_wheel_sqp_profile_audit_returns_an_immutable_exact_copy() -> None:
+    profile = WheelKinematicSQPProfileV2(profile=_wheel_sqp_platform())
+    audited = audit_wheel_kinematic_sqp_profile_v2(profile)
+
+    assert audited == profile
+    assert audited is not profile
+    assert audited.profile is not profile.profile
+    assert not hasattr(audited, "__dict__")
 
 
 def _legged_platform(**overrides) -> PlatformProfileV2:
