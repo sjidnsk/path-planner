@@ -336,29 +336,102 @@ class WheelCorridorV2:
 
 
 @dataclass(frozen=True, slots=True)
+class _WheelSQPInitialSegmentV1:
+    start_state: PoseStateV2
+    end_state: PoseStateV2
+    v_mps: float
+    omega_radps: float
+    duration_s: float
+    mode: WheelSQPModeV2
+    distance_m: float
+    relative_energy: float
+
+    def __post_init__(self) -> None:
+        if type(self.start_state) is not PoseStateV2:
+            raise TypeError("start_state must be exact PoseStateV2")
+        if type(self.end_state) is not PoseStateV2:
+            raise TypeError("end_state must be exact PoseStateV2")
+        v_mps = _exact_finite_float(self.v_mps, "v_mps")
+        omega_radps = _exact_finite_float(self.omega_radps, "omega_radps")
+        duration_s = _exact_finite_float(
+            self.duration_s,
+            "duration_s",
+            nonnegative=True,
+        )
+        if duration_s == 0.0:
+            raise ValueError("duration_s must be positive")
+        if type(self.mode) is not WheelSQPModeV2:
+            raise TypeError("mode must be exact WheelSQPModeV2")
+        _exact_finite_float(self.distance_m, "distance_m", nonnegative=True)
+        _exact_finite_float(
+            self.relative_energy,
+            "relative_energy",
+            nonnegative=True,
+        )
+        expected_mode = (
+            WheelSQPModeV2.FORWARD
+            if v_mps > 0.0
+            else WheelSQPModeV2.REVERSE
+            if v_mps < 0.0
+            else WheelSQPModeV2.TURN_LEFT
+            if omega_radps > 0.0
+            else WheelSQPModeV2.TURN_RIGHT
+            if omega_radps < 0.0
+            else WheelSQPModeV2.STOP
+        )
+        if self.mode is not expected_mode:
+            raise ValueError("mode must exactly match initial controls")
+        if self.distance_m != abs(v_mps) * duration_s:
+            raise ValueError("distance_m must match initial translation controls")
+
+
+@dataclass(frozen=True, slots=True)
 class WheelSQPInitialGuessV2:
     corridor_hash: str
-    modes: tuple[WheelSQPModeV2, ...]
-    v_mps: tuple[float, ...]
-    omega_radps: tuple[float, ...]
-    duration_s: tuple[float, ...]
+    start_state: PoseStateV2
+    requested_goal: PoseStateV2
+    segments: tuple[_WheelSQPInitialSegmentV1, ...]
+    actual_endpoint: PoseStateV2
+    initial_guess_hash: str
     initializer_id: str = WHEEL_KINEMATIC_INITIALIZER_V2
 
     def __post_init__(self) -> None:
         _exact_hash(self.corridor_hash, "corridor_hash")
-        if type(self.modes) is not tuple or not self.modes:
-            raise TypeError("modes must be a nonempty exact tuple")
-        if any(type(mode) is not WheelSQPModeV2 for mode in self.modes):
-            raise TypeError("modes must contain exact WheelSQPModeV2 values")
-        for name in ("v_mps", "omega_radps", "duration_s"):
-            values = getattr(self, name)
-            if type(values) is not tuple or len(values) != len(self.modes):
-                raise ValueError(f"{name} must be an exact tuple matching modes")
-            for value in values:
-                _exact_finite_float(value, name, nonnegative=name == "duration_s")
-        if any(value == 0.0 for value in self.duration_s):
-            raise ValueError("duration_s values must be positive")
+        if type(self.start_state) is not PoseStateV2:
+            raise TypeError("start_state must be exact PoseStateV2")
+        if type(self.requested_goal) is not PoseStateV2:
+            raise TypeError("requested_goal must be exact PoseStateV2")
+        if type(self.segments) is not tuple or not self.segments:
+            raise TypeError("segments must be a nonempty exact tuple")
+        if any(type(segment) is not _WheelSQPInitialSegmentV1 for segment in self.segments):
+            raise TypeError("segments must contain exact internal initial segments")
+        if self.segments[0].start_state != self.start_state:
+            raise ValueError("first segment must start at exact request start")
+        for left, right in zip(self.segments, self.segments[1:]):
+            if left.end_state != right.start_state:
+                raise ValueError("initial segment endpoints must be connected")
+        if type(self.actual_endpoint) is not PoseStateV2:
+            raise TypeError("actual_endpoint must be exact PoseStateV2")
+        if self.segments[-1].end_state != self.actual_endpoint:
+            raise ValueError("actual_endpoint must match the final replay endpoint")
+        _exact_hash(self.initial_guess_hash, "initial_guess_hash")
         _exact_id(self.initializer_id, "initializer_id", WHEEL_KINEMATIC_INITIALIZER_V2)
+
+    @property
+    def modes(self) -> tuple[WheelSQPModeV2, ...]:
+        return tuple(segment.mode for segment in self.segments)
+
+    @property
+    def v_mps(self) -> tuple[float, ...]:
+        return tuple(segment.v_mps for segment in self.segments)
+
+    @property
+    def omega_radps(self) -> tuple[float, ...]:
+        return tuple(segment.omega_radps for segment in self.segments)
+
+    @property
+    def duration_s(self) -> tuple[float, ...]:
+        return tuple(segment.duration_s for segment in self.segments)
 
 
 @dataclass(frozen=True, slots=True)

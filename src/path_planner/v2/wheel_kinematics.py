@@ -149,3 +149,27 @@ def wheel_relative_energy_v1(
     rotation = abs(omega) * dt * profile.rotation_energy_per_rad
     idle = dt * profile.idle_energy_per_s
     return (translation + rotation + idle) / profile.energy_normalization
+
+
+def wheel_segment_center_control_slew_v1(
+    left_v_mps: float,
+    left_omega_radps: float,
+    left_duration_s: float,
+    right_v_mps: float,
+    right_omega_radps: float,
+    right_duration_s: float,
+) -> tuple[float, float, float]:
+    left_v = _finite(left_v_mps, "left_v_mps")
+    left_omega = _finite(left_omega_radps, "left_omega_radps")
+    left_dt = _positive(left_duration_s, "left_duration_s")
+    right_v = _finite(right_v_mps, "right_v_mps")
+    right_omega = _finite(right_omega_radps, "right_omega_radps")
+    right_dt = _positive(right_duration_s, "right_duration_s")
+    tau = 0.5 * (left_dt + right_dt)
+    left_speed = abs(left_v)
+    right_speed = abs(right_v)
+    return (
+        max(0.0, right_speed - left_speed) / tau,
+        max(0.0, left_speed - right_speed) / tau,
+        abs(right_omega - left_omega) / tau,
+    )
