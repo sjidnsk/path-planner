@@ -1,4 +1,5 @@
 from dataclasses import dataclass, replace
+from hashlib import sha256
 import json
 from math import copysign, pi
 
@@ -130,8 +131,21 @@ def make_canonical_candidate(
     )
 
 
-def make_l2_public_route_fixture() -> WheelKinematicRouteV2:
-    candidate = make_canonical_candidate()
+def _single_control_candidate(v_mps: float, omega_radps: float) -> CanonicalWheelCandidateV1:
+    start = REQUEST.start_state
+    end = integrate_wheel_segment_v2(start, v_mps, omega_radps, 0.5)
+    return materialize_canonical_wheel_candidate_v2(
+        RawCandidate((RawSegment(start, end, v_mps, omega_radps, 0.5),)),
+        request=REQUEST,
+        profile=PROFILE,
+        terrain_snapshot_hash=SNAPSHOT_HASH,
+    )
+
+
+def make_l2_public_route_fixture(
+    candidate: CanonicalWheelCandidateV1 | None = None,
+) -> WheelKinematicRouteV2:
+    candidate = make_canonical_candidate() if candidate is None else candidate
     primitives = []
     for private in candidate.segments:
         public = WheelKinematicSegmentV2(
@@ -177,6 +191,53 @@ def _dump(payload: object, *, allow_nan: bool = False) -> bytes:
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
+
+
+def _digest_without(payload: dict[str, object], own_field: str) -> str:
+    return sha256(
+        canonical_json_bytes(
+            {key: value for key, value in payload.items() if key != own_field}
+        )
+    ).hexdigest()
+
+
+def _rehash_candidate_payload(payload: dict[str, object]) -> bytes:
+    segments = payload["segments"]
+    assert type(segments) is list
+    for segment in segments:
+        assert type(segment) is dict
+        segment["segment_hash"] = _digest_without(segment, "segment_hash")
+    payload["candidate_hash"] = _digest_without(payload, "candidate_hash")
+    return _dump(payload)
+
+
+def _rehash_route_payload(payload: dict[str, object]) -> bytes:
+    primitives = payload["primitives"]
+    assert type(primitives) is list
+    for primitive in primitives:
+        assert type(primitive) is dict
+        primitive["segment_hash"] = _digest_without(primitive, "segment_hash")
+    payload["route_hash"] = _digest_without(payload, "route_hash")
+    return _dump(payload)
+
+
+def _request_hash_for_test(request: PlanningRequestV2) -> str:
+    return sha256(
+        canonical_json_bytes(
+            {
+                "accelerator_policy": request.accelerator_policy,
+                "determinism_seed": request.determinism_seed,
+                "goal_state": request.goal_state,
+                "objective_profile": request.objective_profile,
+                "platform_profile_id": request.platform_profile_id,
+                "request_id": request.request_id,
+                "resource_budget": request.resource_budget,
+                "start_state": request.start_state,
+                "terrain_snapshot_hash": SNAPSHOT_HASH,
+                "timeout_s": request.timeout_s,
+            }
+        )
+    ).hexdigest()
 
 
 def test_canonicalization_is_half_even_decimal12_wrap_safe_and_zero_normalized() -> None:
@@ -273,6 +334,63 @@ def test_candidate_decoder_rederives_segment_totals_even_when_attacker_rehashes(
         decode_wheel_candidate_v2(_dump(json.loads(canonical_json_bytes(drifted))))
 
 
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "segment_v_negative_zero",
+        "segment_omega_negative_zero",
+        "segment_end_x_negative_zero",
+        "segment_sample_x_negative_zero",
+        "segment_distance_negative_zero",
+        "candidate_actual_x_negative_zero",
+        "candidate_total_distance_negative_zero",
+        "candidate_total_cost_negative_zero",
+        "candidate_total_cost_nondecimal12",
+        "segment_duration_nondecimal12",
+        "segment_energy_nondecimal12",
+        "candidate_total_duration_nondecimal12",
+    ],
+)
+def test_candidate_decoder_rejects_rehashed_noncanonical_scalars(attack: str) -> None:
+    candidate = _single_control_candidate(
+        0.4 if attack == "segment_omega_negative_zero" else 0.0,
+        0.0 if attack == "segment_omega_negative_zero" else 0.2,
+    )
+    payload = json.loads(canonical_json_bytes(candidate))
+    segment = payload["segments"][0]
+    if attack == "segment_v_negative_zero":
+        segment["v_mps"] = -0.0
+    elif attack == "segment_omega_negative_zero":
+        segment["omega_radps"] = -0.0
+    elif attack == "segment_end_x_negative_zero":
+        segment["end_state"]["x_m"] = -0.0
+        segment["samples"][-1]["x_m"] = -0.0
+        payload["actual_endpoint"]["x_m"] = -0.0
+    elif attack == "segment_sample_x_negative_zero":
+        segment["samples"][1]["x_m"] = -0.0
+    elif attack == "segment_distance_negative_zero":
+        segment["distance_m"] = -0.0
+    elif attack == "candidate_actual_x_negative_zero":
+        payload["actual_endpoint"]["x_m"] = -0.0
+    elif attack == "candidate_total_distance_negative_zero":
+        payload["total_distance_m"] = -0.0
+    elif attack == "candidate_total_cost_negative_zero":
+        payload["total_cost"] = -0.0
+    elif attack == "candidate_total_cost_nondecimal12":
+        payload["total_cost"] = 0.1234567890123
+    elif attack == "segment_duration_nondecimal12":
+        segment["duration_s"] = 0.5000000000001
+    elif attack == "segment_energy_nondecimal12":
+        segment["relative_energy"] += 1.0e-13
+    elif attack == "candidate_total_duration_nondecimal12":
+        payload["total_duration_s"] = 0.5000000000001
+    else:  # pragma: no cover - parameter list is closed above
+        raise AssertionError(attack)
+
+    with pytest.raises(WheelSQPCodecError, match="canonical"):
+        decode_wheel_candidate_v2(_rehash_candidate_payload(payload))
+
+
 def test_public_route_codec_is_byte_stable_and_accepts_only_exact_l2_route() -> None:
     route = make_l2_public_route_fixture()
     encoded = encode_wheel_route_v2(route)
@@ -289,6 +407,57 @@ def test_public_route_codec_is_byte_stable_and_accepts_only_exact_l2_route() -> 
     payload["primitives"][0]["validation_level"] = "L1"
     with pytest.raises(WheelSQPCodecError):
         decode_wheel_route_v2(_dump(payload))
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "segment_v_negative_zero",
+        "segment_omega_negative_zero",
+        "segment_end_x_negative_zero",
+        "segment_sample_x_negative_zero",
+        "segment_distance_negative_zero",
+        "observation_negative_zero",
+        "route_total_cost_negative_zero",
+        "route_total_cost_nondecimal12",
+        "segment_duration_nondecimal12",
+        "segment_energy_nondecimal12",
+    ],
+)
+def test_route_decoder_rejects_rehashed_noncanonical_scalars(attack: str) -> None:
+    candidate = _single_control_candidate(
+        0.4 if attack == "segment_omega_negative_zero" else 0.0,
+        0.0 if attack == "segment_omega_negative_zero" else 0.2,
+    )
+    payload = json.loads(canonical_json_bytes(make_l2_public_route_fixture(candidate)))
+    segment = payload["primitives"][0]
+    if attack == "segment_v_negative_zero":
+        segment["v_mps"] = -0.0
+    elif attack == "segment_omega_negative_zero":
+        segment["omega_radps"] = -0.0
+    elif attack == "segment_end_x_negative_zero":
+        segment["end_state"]["x_m"] = -0.0
+        segment["samples"][-1]["x_m"] = -0.0
+    elif attack == "segment_sample_x_negative_zero":
+        segment["samples"][1]["x_m"] = -0.0
+    elif attack == "segment_distance_negative_zero":
+        segment["distance_m"] = -0.0
+    elif attack == "observation_negative_zero":
+        segment["observation_contribution"] = -0.0
+    elif attack == "route_total_cost_negative_zero":
+        payload["total_cost"] = -0.0
+    elif attack == "route_total_cost_nondecimal12":
+        payload["total_cost"] = 0.1234567890123
+    elif attack == "segment_duration_nondecimal12":
+        segment["duration_s"] = 0.5000000000001
+    elif attack == "segment_energy_nondecimal12":
+        segment["relative_energy"] += 1.0e-13
+        segment["energy_cost"] += 1.0e-13
+    else:  # pragma: no cover - parameter list is closed above
+        raise AssertionError(attack)
+
+    with pytest.raises(WheelSQPCodecError, match="canonical"):
+        decode_wheel_route_v2(_rehash_route_payload(payload))
 
 
 def test_hashes_exclude_only_their_own_digest_and_bind_semantic_payloads() -> None:
@@ -351,3 +520,18 @@ def test_projection_rejects_public_route_semantic_drift_instead_of_granting_cand
     changed_route = replace(changed_route, route_hash=wheel_route_hash_v2(changed_route))
     with pytest.raises(WheelSQPCodecError, match="energy"):
         project_wheel_route_to_candidate_v1(changed_route, REQUEST, PROFILE, SNAPSHOT_HASH)
+
+
+def test_projection_rejects_self_consistent_request_profile_identity_mismatch() -> None:
+    request = replace(REQUEST, platform_profile_id="some-other-profile/v1")
+    candidate = make_canonical_candidate()
+    candidate = replace(
+        candidate,
+        request_hash=_request_hash_for_test(request),
+        candidate_hash="0" * 64,
+    )
+    candidate = replace(candidate, candidate_hash=wheel_candidate_hash_v2(candidate))
+    route = make_l2_public_route_fixture(candidate)
+
+    with pytest.raises(WheelSQPCodecError, match="profile identity"):
+        project_wheel_route_to_candidate_v1(route, request, PROFILE, SNAPSHOT_HASH)

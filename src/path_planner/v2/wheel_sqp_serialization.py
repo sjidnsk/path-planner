@@ -4,7 +4,7 @@ from dataclasses import dataclass, fields, replace
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from hashlib import sha256
 import json
-from math import isfinite, pi
+from math import copysign, isfinite, pi
 from numbers import Real
 from typing import Any
 
@@ -269,6 +269,27 @@ def canonicalize_wheel_scalar_v2(value: float) -> float:
     return 0.0 if result == 0.0 else result
 
 
+def _is_canonical_wheel_scalar_v2(value: object) -> bool:
+    if type(value) is not float or not isfinite(value):
+        return False
+    canonical = canonicalize_wheel_scalar_v2(value)
+    if value != canonical:
+        return False
+    return value != 0.0 or copysign(1.0, value) == copysign(1.0, canonical)
+
+
+def _require_canonical_scalar(value: object, name: str) -> None:
+    if not _is_canonical_wheel_scalar_v2(value):
+        raise ValueError(f"{name} is not canonical decimal12 positive-zero form")
+
+
+def _require_canonical_pose(value: PoseStateV2, name: str) -> None:
+    _exact_pose(value, name)
+    _require_canonical_scalar(value.x_m, f"{name}.x_m")
+    _require_canonical_scalar(value.y_m, f"{name}.y_m")
+    _require_canonical_scalar(value.heading_rad, f"{name}.heading_rad")
+
+
 def canonicalize_positive_duration_v2(value: float) -> float:
     result = canonicalize_wheel_scalar_v2(value)
     if result <= 0.0:
@@ -496,13 +517,26 @@ _CODEC_PROFILE = WheelKinematicSQPProfileV2(
 )
 
 
-def _validate_private_segment(segment: CanonicalWheelSegmentV1) -> None:
-    if canonicalize_wheel_scalar_v2(segment.v_mps) != segment.v_mps:
-        raise ValueError("v_mps is not canonical")
-    if canonicalize_wheel_scalar_v2(segment.omega_radps) != segment.omega_radps:
-        raise ValueError("omega_radps is not canonical")
-    if canonicalize_positive_duration_v2(segment.duration_s) != segment.duration_s:
-        raise ValueError("duration_s is not canonical")
+def _validate_private_segment(
+    segment: CanonicalWheelSegmentV1,
+    *,
+    exact_request_start: bool,
+) -> None:
+    if not exact_request_start:
+        _require_canonical_pose(segment.start_state, "segment.start_state")
+    _require_canonical_pose(segment.end_state, "segment.end_state")
+    for index, sample in enumerate(segment.samples):
+        if exact_request_start and index == 0:
+            continue
+        _require_canonical_pose(sample, f"segment.samples[{index}]")
+    for name in (
+        "v_mps",
+        "omega_radps",
+        "duration_s",
+        "distance_m",
+        "relative_energy",
+    ):
+        _require_canonical_scalar(getattr(segment, name), f"segment.{name}")
     replay = canonicalize_unwrapped_pose_v2(
         integrate_wheel_segment_v2(
             segment.start_state,
@@ -529,8 +563,16 @@ def _validate_private_segment(segment: CanonicalWheelSegmentV1) -> None:
 
 
 def _validate_candidate(candidate: CanonicalWheelCandidateV1) -> None:
-    for segment in candidate.segments:
-        _validate_private_segment(segment)
+    _require_canonical_pose(candidate.actual_endpoint, "candidate.actual_endpoint")
+    for name in (
+        "total_distance_m",
+        "total_relative_energy",
+        "total_duration_s",
+        "total_cost",
+    ):
+        _require_canonical_scalar(getattr(candidate, name), f"candidate.{name}")
+    for index, segment in enumerate(candidate.segments):
+        _validate_private_segment(segment, exact_request_start=index == 0)
     expected_totals = {
         "total_distance_m": canonicalize_wheel_scalar_v2(
             sum(segment.distance_m for segment in candidate.segments)
@@ -549,15 +591,30 @@ def _validate_candidate(candidate: CanonicalWheelCandidateV1) -> None:
         raise ValueError("candidate_hash does not match candidate payload")
 
 
-def _validate_public_segment(segment: WheelKinematicSegmentV2) -> None:
+def _validate_public_segment(
+    segment: WheelKinematicSegmentV2,
+    *,
+    exact_request_start: bool,
+) -> None:
     if segment.validation_level is not ValidationLevelV2.L2:
         raise ValueError("public wheel segment must already be exact L2")
-    if canonicalize_wheel_scalar_v2(segment.v_mps) != segment.v_mps:
-        raise ValueError("public v_mps is not canonical")
-    if canonicalize_wheel_scalar_v2(segment.omega_radps) != segment.omega_radps:
-        raise ValueError("public omega_radps is not canonical")
-    if canonicalize_positive_duration_v2(segment.duration_s) != segment.duration_s:
-        raise ValueError("public duration_s is not canonical")
+    if not exact_request_start:
+        _require_canonical_pose(segment.start_state, "public_segment.start_state")
+    _require_canonical_pose(segment.end_state, "public_segment.end_state")
+    for index, sample in enumerate(segment.samples):
+        if exact_request_start and index == 0:
+            continue
+        _require_canonical_pose(sample, f"public_segment.samples[{index}]")
+    for name in (
+        "v_mps",
+        "omega_radps",
+        "duration_s",
+        "distance_m",
+        "energy_cost",
+        "observation_contribution",
+        "relative_energy",
+    ):
+        _require_canonical_scalar(getattr(segment, name), f"public_segment.{name}")
     end = canonicalize_unwrapped_pose_v2(
         integrate_wheel_segment_v2(
             segment.start_state,
@@ -592,8 +649,9 @@ def _validate_public_segment(segment: WheelKinematicSegmentV2) -> None:
 def _validate_route(route: WheelKinematicRouteV2) -> None:
     if route.is_complete is not True:
         raise ValueError("public wheel route must be complete")
-    for segment in route.primitives:
-        _validate_public_segment(segment)
+    _require_canonical_scalar(route.total_cost, "route.total_cost")
+    for index, segment in enumerate(route.primitives):
+        _validate_public_segment(segment, exact_request_start=index == 0)
     if route.route_hash != wheel_route_hash_v2(route):
         raise ValueError("route_hash does not match route payload")
 
@@ -870,6 +928,8 @@ def project_wheel_route_to_candidate_v1(
             raise TypeError("request must be exact PlanningRequestV2")
         if type(profile) is not WheelKinematicSQPProfileV2:
             raise TypeError("profile must be exact WheelKinematicSQPProfileV2")
+        if request.platform_profile_id != profile.profile.profile_id:
+            raise ValueError("request and wheel SQP profile identity mismatch")
         snapshot_hash = _exact_hash(terrain_snapshot_hash, "terrain_snapshot_hash")
         _validate_route(route)
         expected_identities = {
