@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-from math import cos, inf, isfinite, pi, remainder, sin
+from math import ceil, cos, hypot, inf, isfinite, pi, remainder, sin
 from numbers import Real
 from struct import pack as struct_pack
 from typing import Callable, NamedTuple
@@ -13,7 +13,11 @@ from path_planner.v2.contracts import PlanningRequestV2, PoseStateV2
 from path_planner.v2.profiles import WheelKinematicSQPProfileV2
 from path_planner.v2.runtime import PlanningDeadlineV2
 from path_planner.v2.terrain import snapshot_hash
-from path_planner.v2.wheel_corridors import wheel_corridor_path_hash_v1
+from path_planner.v2.wheel_corridors import (
+    WheelSQPTerrainGuideV1,
+    wheel_corridor_path_hash_v1,
+    wheel_sqp_corridor_broadphase_cell_bound_v1,
+)
 from path_planner.v2.wheel_kinematics import (
     integrate_wheel_segment_v2,
     wheel_relative_energy_jacobian_v1,
@@ -27,9 +31,13 @@ from path_planner.v2.wheel_sqp_contracts import (
     WheelSQPInitialGuessV2,
     WheelSQPModeV2,
     WheelSQPOptimizationResultV2,
+    WheelSQPResourceEstimateV1,
     WheelSQPResourceLedgerV1,
     WheelSQPStatusV2,
     WheelSQPWorkLedgerV1,
+    WheelSQPWorkLimitError,
+    L2ReserveModelV1,
+    _make_wheel_sqp_resource_estimate_v1,
     _WheelSQPExactSegmentV1,
 )
 from path_planner.v2.wheel_sqp_initialization import (
@@ -43,6 +51,8 @@ _POSITION_TOLERANCE_M = 0.25
 _HEADING_TOLERANCE_RAD = 0.08726646259971647
 _STATE_SCALES = np.array((1.0, 1.0, pi), dtype=np.float64)
 _VARIABLE_SCALES = np.array((1.0, 1.0, pi, 1.0, pi / 4.0, 1.0), dtype=np.float64)
+_TERRAIN_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
+_U63_MAX = (1 << 63) - 1
 
 
 def _finite_float(value: object, name: str, *, nonnegative: bool = False) -> float:
@@ -266,6 +276,27 @@ def _controls_contract_reason(
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class WheelSQPTerrainConstraintBlockV1:
+    values: np.ndarray
+    jacobian: np.ndarray
+    tie_count: int
+
+    def __post_init__(self) -> None:
+        for value, name in ((self.values, "values"), (self.jacobian, "jacobian")):
+            if type(value) is not np.ndarray or value.dtype != np.dtype(np.float64):
+                raise TypeError(f"{name} must be an exact float64 ndarray")
+            if not value.flags.c_contiguous or value.flags.writeable:
+                raise ValueError(f"{name} must be contiguous and read-only")
+            if not bool(np.isfinite(value).all()):
+                raise ValueError(f"{name} must be finite")
+        if self.values.ndim != 1 or self.jacobian.ndim != 2:
+            raise ValueError("terrain constraint block ranks are fixed")
+        if self.jacobian.shape[0] != self.values.shape[0]:
+            raise ValueError("terrain value/Jacobian row mismatch")
+        _exact_nonnegative_int(self.tie_count, "tie_count")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class WheelSQPProblemV1:
     corridor: WheelCorridorV2
@@ -273,6 +304,7 @@ class WheelSQPProblemV1:
     request: PlanningRequestV2
     profile: WheelKinematicSQPProfileV2
     post_solver_reserve: WheelSQPResourceLedgerV1
+    terrain_guide: WheelSQPTerrainGuideV1
 
     def __post_init__(self) -> None:
         if type(self.corridor) is not WheelCorridorV2:
@@ -285,10 +317,22 @@ class WheelSQPProblemV1:
             raise TypeError("profile must be exact WheelKinematicSQPProfileV2")
         if type(self.post_solver_reserve) is not WheelSQPResourceLedgerV1:
             raise TypeError("post_solver_reserve must be exact WheelSQPResourceLedgerV1")
+        if type(self.terrain_guide) is not WheelSQPTerrainGuideV1:
+            raise TypeError("terrain_guide must be exact WheelSQPTerrainGuideV1")
         if not self.post_solver_reserve.accepted or self.post_solver_reserve.reason_code is not None:
             raise ValueError("post_solver_reserve must be an accepted typed receipt")
         if self.request.platform_profile_id != self.profile.profile.profile_id:
             raise ValueError("request and wheel SQP profile identity mismatch")
+        if self.terrain_guide.snapshot is not self.request.terrain_snapshot:
+            raise ValueError("terrain guide must bind the exact request snapshot")
+        if self.terrain_guide.terrain_snapshot_hash != snapshot_hash(
+            self.request.terrain_snapshot
+        ):
+            raise ValueError("terrain guide snapshot identity mismatch")
+        if self.terrain_guide.geometry != self.request.terrain_snapshot.geometry:
+            raise ValueError("terrain guide geometry identity mismatch")
+        if self.terrain_guide.max_slope_deg != self.profile.profile.max_traversable_slope_deg:
+            raise ValueError("terrain guide slope authority mismatch")
         if self.corridor.corridor_hash != self.initial_guess.corridor_hash:
             raise ValueError("corridor and initial guess hash mismatch")
         expected_corridor_hash = wheel_corridor_path_hash_v1(
@@ -430,6 +474,29 @@ class WheelSQPProblemV1:
             dtype=np.float64,
         )
 
+    def terrain_inequalities(self, vector: object) -> np.ndarray:
+        values = np.empty(5 * self.layout.segment_count, dtype=np.float64)
+        _fill_wheel_sqp_terrain_constraints_v2(
+            self,
+            vector,
+            values=values,
+            jacobian=None,
+        )
+        return values
+
+    def terrain_jacobian(self, vector: object) -> np.ndarray:
+        jacobian = np.zeros(
+            (5 * self.layout.segment_count, self.layout.variable_count),
+            dtype=np.float64,
+        )
+        _fill_wheel_sqp_terrain_constraints_v2(
+            self,
+            vector,
+            values=None,
+            jacobian=jacobian,
+        )
+        return jacobian
+
     def inequalities(self, vector: object) -> np.ndarray:
         unpacked = self.layout.unpack(vector)
         values = list(self.terminal_inequalities(vector))
@@ -450,11 +517,12 @@ class WheelSQPProblemV1:
                     self.profile.max_angular_accel_radps2 - angular,
                 )
             )
+        values.extend(self.terrain_inequalities(vector))
         return np.asarray(values, dtype=np.float64)
 
     def inequality_jacobian(self, vector: object) -> np.ndarray:
         unpacked = self.layout.unpack(vector)
-        row_count = 2 + self.layout.segment_count + 3 * (self.layout.segment_count - 1)
+        row_count = 9 * self.layout.segment_count - 1
         result = np.zeros((row_count, self.layout.variable_count), dtype=np.float64)
         goal = self.request.goal_state
         final = unpacked.states[-1]
@@ -503,6 +571,13 @@ class WheelSQPProblemV1:
                 result[row, left_offset + 5] = duration_derivative
                 result[row, right_offset + 5] = duration_derivative
             row += 1
+        _fill_wheel_sqp_terrain_constraints_v2(
+            self,
+            vector,
+            values=None,
+            jacobian=result,
+            row_offset=row,
+        )
         return result
 
     def objective(self, vector: object) -> float:
@@ -597,6 +672,352 @@ class WheelSQPProblemV1:
         return gradient
 
 
+def _fill_wheel_sqp_terrain_constraints_v2(
+    problem: WheelSQPProblemV1,
+    vector: object,
+    *,
+    values: np.ndarray | None,
+    jacobian: np.ndarray | None,
+    row_offset: int = 0,
+) -> int:
+    if type(problem) is not WheelSQPProblemV1:
+        raise TypeError("problem must be exact WheelSQPProblemV1")
+    unpacked = problem.layout.unpack(vector)
+    row_count = 5 * problem.layout.segment_count
+    _exact_nonnegative_int(row_offset, "row_offset")
+    if values is not None:
+        if (
+            type(values) is not np.ndarray
+            or values.dtype != np.dtype(np.float64)
+            or values.ndim != 1
+            or values.shape[0] < row_offset + row_count
+        ):
+            raise ValueError("terrain values output has the wrong fixed shape")
+    if jacobian is not None:
+        if (
+            type(jacobian) is not np.ndarray
+            or jacobian.dtype != np.dtype(np.float64)
+            or jacobian.ndim != 2
+            or jacobian.shape[0] < row_offset + row_count
+            or jacobian.shape[1] != problem.layout.variable_count
+        ):
+            raise ValueError("terrain Jacobian output has the wrong fixed shape")
+    radius = hypot(
+        problem.profile.body_length_m / 2.0
+        + problem.profile.footprint_safety_margin_m,
+        problem.profile.body_width_m / 2.0
+        + problem.profile.footprint_safety_margin_m,
+    )
+    tie_count = 0
+    row = row_offset
+    for segment_index, control in enumerate(unpacked.controls):
+        start = (
+            problem.request.start_state
+            if segment_index == 0
+            else unpacked.states[segment_index - 1]
+        )
+        v_mps, omega_radps, duration_s = control
+        for rho in _TERRAIN_FRACTIONS:
+            if rho == 0.0:
+                sample = start
+                replay_jacobian = None
+            else:
+                sampled_duration = rho * duration_s
+                sample = integrate_wheel_segment_v2(
+                    start,
+                    v_mps,
+                    omega_radps,
+                    sampled_duration,
+                )
+                replay_jacobian = (
+                    wheel_segment_jacobian_v2(
+                        start,
+                        v_mps,
+                        omega_radps,
+                        sampled_duration,
+                    )
+                    if jacobian is not None
+                    else None
+                )
+            clearance = problem.terrain_guide.nearest_signed_clearance(
+                sample.x_m,
+                sample.y_m,
+            )
+            if values is not None:
+                values[row] = clearance.signed_distance_m - radius
+            tie_count += clearance.tie_count
+            gx = clearance.gradient_x
+            gy = clearance.gradient_y
+            if jacobian is None:
+                row += 1
+                continue
+            if rho == 0.0:
+                if segment_index > 0:
+                    previous = 6 * (segment_index - 1)
+                    jacobian[row, previous] = gx
+                    jacobian[row, previous + 1] = gy
+            else:
+                assert replay_jacobian is not None
+                if segment_index > 0:
+                    previous = 6 * (segment_index - 1)
+                    for column in range(3):
+                        jacobian[row, previous + column] = (
+                            gx * replay_jacobian[0][column]
+                            + gy * replay_jacobian[1][column]
+                        )
+                current = 6 * segment_index
+                jacobian[row, current + 3] = (
+                    gx * replay_jacobian[0][3]
+                    + gy * replay_jacobian[1][3]
+                )
+                jacobian[row, current + 4] = (
+                    gx * replay_jacobian[0][4]
+                    + gy * replay_jacobian[1][4]
+                )
+                jacobian[row, current + 5] = rho * (
+                    gx * replay_jacobian[0][5]
+                    + gy * replay_jacobian[1][5]
+                )
+            row += 1
+    return tie_count
+
+
+def build_wheel_sqp_terrain_constraints_v2(
+    problem: WheelSQPProblemV1,
+    vector: object,
+) -> WheelSQPTerrainConstraintBlockV1:
+    if type(problem) is not WheelSQPProblemV1:
+        raise TypeError("problem must be exact WheelSQPProblemV1")
+    values = np.empty(5 * problem.layout.segment_count, dtype=np.float64)
+    jacobian = np.zeros(
+        (5 * problem.layout.segment_count, problem.layout.variable_count),
+        dtype=np.float64,
+    )
+    tie_count = _fill_wheel_sqp_terrain_constraints_v2(
+        problem,
+        vector,
+        values=values,
+        jacobian=jacobian,
+    )
+    values.setflags(write=False)
+    jacobian.setflags(write=False)
+    return WheelSQPTerrainConstraintBlockV1(values, jacobian, tie_count)
+
+
+def _checked_u63(value: object, name: str) -> int:
+    exact = _exact_nonnegative_int(value, name)
+    if exact > _U63_MAX:
+        raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+    return exact
+
+
+def _checked_u63_add(left: int, right: int) -> int:
+    left = _checked_u63(left, "left")
+    right = _checked_u63(right, "right")
+    if left > _U63_MAX - right:
+        raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+    return left + right
+
+
+def _checked_u63_mul(left: int, right: int) -> int:
+    left = _checked_u63(left, "left")
+    right = _checked_u63(right, "right")
+    if left != 0 and right > _U63_MAX // left:
+        raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+    return left * right
+
+
+def _ceil_sampling_intervals_v1(maximum: float, spacing: float) -> int:
+    maximum = _finite_float(maximum, "maximum", nonnegative=True)
+    spacing = _finite_float(spacing, "spacing")
+    if spacing <= 0.0:
+        raise ValueError("spacing must be positive")
+    return _checked_u63(ceil(maximum / spacing), "sampling intervals")
+
+
+def _interval_record_bound_v1(broadphase_cell_bound: int, cap: int) -> int:
+    broadphase = _checked_u63(broadphase_cell_bound, "broadphase_cell_bound")
+    cap = _checked_u63(cap, "interval cap")
+    factor = (1 << 25) - 1
+    if broadphase > cap // factor:
+        return cap
+    return _checked_u63_mul(broadphase, factor)
+
+
+def _reserve_receipt_v1(
+    problem: WheelSQPProblemV1,
+    deadline: PlanningDeadlineV2,
+    *,
+    segment_count: int,
+    broadphase_cell_bound: int,
+    interval_record_bound: int,
+    encoded_state_bound: int,
+    encoded_scalar_bound: int,
+) -> WheelSQPResourceLedgerV1:
+    receipt = L2ReserveModelV1().assess(
+        deadline,
+        segment_count=segment_count,
+        broadphase_cell_bound=broadphase_cell_bound,
+        interval_record_bound=interval_record_bound,
+        encoded_state_bound=encoded_state_bound,
+        encoded_scalar_bound=encoded_scalar_bound,
+        max_segments=problem.profile.max_segments,
+        max_l2_candidate_cells=problem.profile.max_l2_candidate_cells,
+        max_l2_interval_records=problem.profile.max_l2_interval_records,
+        max_encoded_state_bound=encoded_state_bound,
+        max_encoded_scalar_bound=encoded_scalar_bound,
+    )
+    if not receipt.accepted:
+        assert receipt.reason_code is not None
+        raise WheelSQPWorkLimitError(receipt.reason_code)
+    return receipt
+
+
+def estimate_wheel_sqp_attempt_resources_v2(
+    problem: WheelSQPProblemV1,
+    deadline: PlanningDeadlineV2,
+    ledger: WheelSQPWorkLedgerV1,
+) -> WheelSQPResourceEstimateV1:
+    if type(problem) is not WheelSQPProblemV1:
+        raise TypeError("problem must be exact WheelSQPProblemV1")
+    if type(deadline) is not PlanningDeadlineV2:
+        raise TypeError("deadline must be exact PlanningDeadlineV2")
+    if type(ledger) is not WheelSQPWorkLedgerV1:
+        raise TypeError("ledger must be exact WheelSQPWorkLedgerV1")
+    if ledger.deadline is not deadline or ledger.resource_budget != problem.request.resource_budget:
+        raise ValueError("wheel SQP resource authority identity mismatch")
+    ledger.check_deadline()
+
+    segment_count = _checked_u63(len(problem.initial_guess.segments), "segment_count")
+    if not 1 <= segment_count <= problem.profile.max_segments:
+        raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+    variable_count = _checked_u63_mul(6, segment_count)
+    equality_count = _checked_u63_mul(3, segment_count)
+    base_inequality_count = _checked_u63(
+        4 * segment_count - 1,
+        "base_inequality_count",
+    )
+    terrain_inequality_count = _checked_u63_mul(5, segment_count)
+    total_constraint_count = _checked_u63(12 * segment_count - 1, "total_constraint_count")
+    ledger.check_deadline()
+
+    radius = hypot(
+        problem.profile.body_length_m / 2.0
+        + problem.profile.footprint_safety_margin_m,
+        problem.profile.body_width_m / 2.0
+        + problem.profile.footprint_safety_margin_m,
+    )
+    broadphase_cell_bound = wheel_sqp_corridor_broadphase_cell_bound_v1(
+        problem.corridor,
+        problem.terrain_guide.geometry,
+        radius,
+        ledger=ledger,
+        cap=problem.profile.max_l2_candidate_cells,
+    )
+    interval_record_bound = _interval_record_bound_v1(
+        broadphase_cell_bound,
+        problem.profile.max_l2_interval_records,
+    )
+    ledger.check_deadline()
+
+    rotation_intervals = _ceil_sampling_intervals_v1(
+        problem.profile.max_segment_heading_change_rad,
+        problem.profile.observation_sample_heading_rad,
+    )
+    sample_count = 0
+    for mode in problem.initial_guess.modes:
+        ledger.check_deadline()
+        maximum_speed = (
+            problem.profile.max_speed_mps
+            if mode in (WheelSQPModeV2.FORWARD, WheelSQPModeV2.REVERSE)
+            else 0.0
+        )
+        translation_intervals = _ceil_sampling_intervals_v1(
+            maximum_speed * problem.profile.max_segment_duration_s,
+            problem.profile.observation_sample_translation_m,
+        )
+        intervals = max(1, translation_intervals, rotation_intervals)
+        sample_count = _checked_u63_add(sample_count, intervals + 1)
+    encoded_state_bound = _checked_u63_add(
+        _checked_u63_add(3, _checked_u63_mul(4, segment_count)),
+        _checked_u63_mul(2, sample_count),
+    )
+    encoded_scalar_bound = _checked_u63_add(
+        _checked_u63_add(14, _checked_u63_mul(24, segment_count)),
+        _checked_u63_mul(6, sample_count),
+    )
+    if ledger.route_states + encoded_state_bound > problem.request.resource_budget.max_route_states:
+        raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+    ledger.check_deadline()
+
+    decision_bytes = _checked_u63_mul(8, variable_count)
+    jacobian_bytes = _checked_u63_mul(
+        _checked_u63_mul(8, total_constraint_count),
+        variable_count,
+    )
+    solver_bytes = _checked_u63(
+        problem.profile.solver_memory_reservation_bytes,
+        "solver_bytes",
+    )
+    l2_queue_bytes = _checked_u63_mul(96, interval_record_bound)
+    codec_bytes = _checked_u63_add(
+        _checked_u63_mul(64, encoded_state_bound),
+        _checked_u63_mul(16, encoded_scalar_bound),
+    )
+    required_bytes = 0
+    for component in (
+        decision_bytes,
+        jacobian_bytes,
+        solver_bytes,
+        l2_queue_bytes,
+        codec_bytes,
+    ):
+        required_bytes = _checked_u63_add(required_bytes, component)
+    ledger.check_deadline()
+
+    _reserve_receipt_v1(
+        problem,
+        deadline,
+        segment_count=segment_count,
+        broadphase_cell_bound=broadphase_cell_bound,
+        interval_record_bound=interval_record_bound,
+        encoded_state_bound=encoded_state_bound,
+        encoded_scalar_bound=encoded_scalar_bound,
+    )
+    ledger.check_deadline()
+    ledger.reserve_attempt(required_bytes, encoded_state_bound)
+    ledger.check_deadline()
+    receipt = _reserve_receipt_v1(
+        problem,
+        deadline,
+        segment_count=segment_count,
+        broadphase_cell_bound=broadphase_cell_bound,
+        interval_record_bound=interval_record_bound,
+        encoded_state_bound=encoded_state_bound,
+        encoded_scalar_bound=encoded_scalar_bound,
+    )
+    ledger.check_deadline()
+    return _make_wheel_sqp_resource_estimate_v1(
+        segment_count=segment_count,
+        variable_count=variable_count,
+        equality_count=equality_count,
+        base_inequality_count=base_inequality_count,
+        terrain_inequality_count=terrain_inequality_count,
+        total_constraint_count=total_constraint_count,
+        broadphase_cell_bound=broadphase_cell_bound,
+        interval_record_bound=interval_record_bound,
+        encoded_state_bound=encoded_state_bound,
+        encoded_scalar_bound=encoded_scalar_bound,
+        decision_bytes=decision_bytes,
+        jacobian_bytes=jacobian_bytes,
+        solver_bytes=solver_bytes,
+        l2_queue_bytes=l2_queue_bytes,
+        codec_bytes=codec_bytes,
+        required_bytes=required_bytes,
+        post_solver_reserve=receipt,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class WheelSQPConstraintAuditV1:
     passed: bool
@@ -605,6 +1026,7 @@ class WheelSQPConstraintAuditV1:
     min_inequality_margin: float | None
     objective_value: float | None
     mode_and_slew_passed: bool
+    terminal_only_failure: bool
 
     def __post_init__(self) -> None:
         if type(self.passed) is not bool:
@@ -623,6 +1045,8 @@ class WheelSQPConstraintAuditV1:
                     raise ValueError(f"{name} must be nonnegative")
         if type(self.mode_and_slew_passed) is not bool:
             raise TypeError("mode_and_slew_passed must be exact bool")
+        if type(self.terminal_only_failure) is not bool:
+            raise TypeError("terminal_only_failure must be exact bool")
         if self.passed and self.reason_code is not None:
             raise ValueError("passing audit must not have a reason_code")
         if not self.passed and self.reason_code is None:
@@ -639,6 +1063,10 @@ class WheelSQPConstraintAuditV1:
                 raise ValueError("passing audit requires all numeric metrics")
             if not self.mode_and_slew_passed:
                 raise ValueError("passing audit requires mode and slew approval")
+            if self.terminal_only_failure:
+                raise ValueError("passing audit cannot be a terminal-only failure")
+        elif self.terminal_only_failure and self.reason_code != "wheel_sqp_infeasible":
+            raise ValueError("terminal-only failure must use wheel_sqp_infeasible")
 
 
 def _failed_audit(
@@ -648,6 +1076,7 @@ def _failed_audit(
     margin: float | None = None,
     objective: float | None = None,
     mode_and_slew_passed: bool = False,
+    terminal_only_failure: bool = False,
 ) -> WheelSQPConstraintAuditV1:
     return WheelSQPConstraintAuditV1(
         passed=False,
@@ -656,6 +1085,7 @@ def _failed_audit(
         min_inequality_margin=margin,
         objective_value=objective,
         mode_and_slew_passed=mode_and_slew_passed,
+        terminal_only_failure=terminal_only_failure,
     )
 
 
@@ -721,6 +1151,23 @@ def audit_wheel_sqp_candidate_v2(
                 margin=minimum_margin,
                 objective=objective_value,
             )
+        terrain = problem.terrain_inequalities(copied)
+        if not bool(np.isfinite(terrain).all()):
+            return _failed_audit(
+                "wheel_sqp_numeric_contract_failed",
+                dynamics=maximum_dynamics,
+                margin=minimum_margin,
+                objective=objective_value,
+                mode_and_slew_passed=True,
+            )
+        if bool(np.any(terrain < 0.0)):
+            return _failed_audit(
+                "wheel_sqp_infeasible",
+                dynamics=maximum_dynamics,
+                margin=minimum_margin,
+                objective=objective_value,
+                mode_and_slew_passed=True,
+            )
         terminal = problem.terminal_inequalities(copied)
         exact_heading_error = _absolute_wrapped_heading_error(
             unpacked.states[-1].heading_rad,
@@ -736,6 +1183,7 @@ def audit_wheel_sqp_candidate_v2(
                 margin=minimum_margin,
                 objective=objective_value,
                 mode_and_slew_passed=True,
+                terminal_only_failure=True,
             )
         # All remaining Task 5 inequality rows are exact mode/slew rows already
         # checked above.  Task 6 may add explicitly tolerance-authorized rows.
@@ -754,6 +1202,7 @@ def audit_wheel_sqp_candidate_v2(
             min_inequality_margin=minimum_margin,
             objective_value=objective_value,
             mode_and_slew_passed=True,
+            terminal_only_failure=False,
         )
     except (TypeError, ValueError, OverflowError, FloatingPointError):
         return _failed_audit("wheel_sqp_numeric_contract_failed")
@@ -790,6 +1239,7 @@ class _AttemptGuardV1:
     problem: WheelSQPProblemV1
     deadline: PlanningDeadlineV2
     ledger: WheelSQPWorkLedgerV1
+    post_solver_reserve: WheelSQPResourceLedgerV1 | None = None
     function_evaluation_count: int = 0
 
     def check(self, vector: object, *, charge_function_evaluation: bool) -> np.ndarray:
@@ -808,7 +1258,8 @@ class _AttemptGuardV1:
             ):
                 raise _WheelSQPAbort("wheel_sqp_resource_budget_exceeded")
         remaining_s = self.deadline.remaining_s
-        if remaining_s <= self.problem.post_solver_reserve.reserve_s:
+        reserve = self.post_solver_reserve or self.problem.post_solver_reserve
+        if remaining_s <= reserve.reserve_s:
             if remaining_s == 0.0 or self.deadline.expired:
                 raise _WheelSQPAbort("planning_deadline_expired")
             raise _WheelSQPAbort("wheel_sqp_resource_budget_exceeded")
@@ -979,10 +1430,17 @@ def solve_wheel_sqp_v2(
     guard = _AttemptGuardV1(problem, deadline, ledger)
     iteration_count = 0
     try:
-        initial_vector = problem.initial_vector
-        guard.check(initial_vector, charge_function_evaluation=False)
+        ledger.check_deadline()
         if problem.request.objective_profile.risk_weight != 0.0:
             return _failure_result("wheel_sqp_objective_unsupported")
+        resource_estimate = estimate_wheel_sqp_attempt_resources_v2(
+            problem,
+            deadline,
+            ledger,
+        )
+        guard.post_solver_reserve = resource_estimate.post_solver_reserve
+        initial_vector = problem.initial_vector
+        guard.check(initial_vector, charge_function_evaluation=False)
         initial_audit = audit_wheel_sqp_candidate_v2(problem, initial_vector)
         initial_incumbent = (
             initial_vector.copy(order="C") if initial_audit.passed else None
@@ -1068,6 +1526,7 @@ def solve_wheel_sqp_v2(
             assert audit.reason_code is not None
             if (
                 audit.reason_code == "wheel_sqp_infeasible"
+                and audit.terminal_only_failure
                 and initial_incumbent is not None
             ):
                 guard.check(initial_incumbent, charge_function_evaluation=False)
@@ -1110,6 +1569,12 @@ def solve_wheel_sqp_v2(
             reason_code=None,
         )
     except _WheelSQPAbort as exc:
+        return _failure_result(
+            exc.reason_code,
+            iteration_count=iteration_count,
+            function_evaluation_count=guard.function_evaluation_count,
+        )
+    except WheelSQPWorkLimitError as exc:
         return _failure_result(
             exc.reason_code,
             iteration_count=iteration_count,

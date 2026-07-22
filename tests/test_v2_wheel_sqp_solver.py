@@ -28,7 +28,10 @@ from path_planner.v2.terrain import (
     TerrainSnapshotV2,
     snapshot_hash,
 )
-from path_planner.v2.wheel_corridors import wheel_corridor_path_hash_v1
+from path_planner.v2.wheel_corridors import (
+    WheelSQPTerrainGuideV1,
+    wheel_corridor_path_hash_v1,
+)
 from path_planner.v2.wheel_kinematics import (
     integrate_wheel_segment_v2,
     wheel_relative_energy_jacobian_v1,
@@ -78,7 +81,7 @@ class _Clock:
 
 
 def _snapshot() -> TerrainSnapshotV2:
-    geometry = FineGridGeometryV2(5, 3)
+    geometry = FineGridGeometryV2(8, 6, origin=(-1.0, -1.0))
     return TerrainSnapshotV2(
         geometry=geometry,
         elevation_m=np.zeros(geometry.shape, dtype=np.float64),
@@ -127,6 +130,14 @@ def _problem(
 ) -> tuple[WheelSQPProblemV1, PlanningDeadlineV2, WheelSQPWorkLedgerV1, _Clock]:
     terrain = _snapshot()
     budget = ResourceBudgetV2(100_000, 100_000, 0)
+    clock = _Clock()
+    deadline = PlanningDeadlineV2(0.0, 5.0, clock)
+    ledger = WheelSQPWorkLedgerV1(budget, deadline)
+    terrain_guide = WheelSQPTerrainGuideV1.from_snapshot(
+        terrain,
+        30.0,
+        ledger=ledger,
+    )
     start = PoseStateV2(0.0, 0.0, 0.0)
     segments: list[_WheelSQPInitialSegmentV1] = []
     current = start
@@ -185,10 +196,8 @@ def _problem(
         request=request,
         profile=PROFILE,
         post_solver_reserve=reserve,
+        terrain_guide=terrain_guide,
     )
-    clock = _Clock()
-    deadline = PlanningDeadlineV2(0.0, 5.0, clock)
-    ledger = WheelSQPWorkLedgerV1(budget, deadline)
     return problem, deadline, ledger, clock
 
 

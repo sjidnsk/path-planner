@@ -5,12 +5,14 @@ from dataclasses import dataclass
 from hashlib import sha256
 import heapq
 import json
-from math import hypot, sqrt
+from math import ceil, floor, hypot, isfinite, sqrt
+from numbers import Real
+from struct import Struct
 
 from path_planner.core import Cell
 from path_planner.v2.contracts import ResourceBudgetV2
 from path_planner.v2.runtime import PlanningDeadlineV2
-from path_planner.v2.terrain import TerrainSnapshotV2, snapshot_hash
+from path_planner.v2.terrain import FineGridGeometryV2, TerrainSnapshotV2, snapshot_hash
 from path_planner.v2.wheel_sqp_contracts import (
     WHEEL_KINEMATIC_CORRIDOR_SOURCE_V2,
     WheelCorridorV2,
@@ -30,6 +32,17 @@ _DIAGONAL_LENGTH_M = 0.5 * sqrt(2.0)
 _GRAPH_CELL_BYTES = 48
 _SEARCH_RECORD_BYTES = 128
 _PATH_CELL_BYTES = 16
+_TERRAIN_RECORD = Struct("<IIB")
+_TERRAIN_RECORD_PEAK_BYTES = 2 * _TERRAIN_RECORD.size
+_U63_MAX = (1 << 63) - 1
+_WHEEL_SQP_TERRAIN_GUIDE_AUTHORITY = object()
+
+_TERRAIN_REASON_BY_RANK = {
+    1: "terrain_unknown",
+    2: "terrain_hard_obstacle",
+    3: "terrain_not_traversable",
+    4: "terrain_slope_exceeded",
+}
 
 # N, E, S, W, NE, SE, SW, NW.  The rank is part of the stable A* authority.
 _NEIGHBOR_STEPS = (
@@ -73,6 +86,342 @@ def _canonical_sha256(payload: object) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _finite_coordinate(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite real number")
+    normalized = float(value)
+    if not isfinite(normalized):
+        raise ValueError(f"{name} must be finite")
+    return normalized
+
+
+def _invalid_reason_rank(snapshot: TerrainSnapshotV2, row: int, column: int) -> int:
+    if not bool(snapshot.observed_mask[row, column]):
+        return 1
+    if bool(snapshot.hard_obstacle_mask[row, column]):
+        return 2
+    if not bool(snapshot.traversable_mask[row, column]):
+        return 3
+    if float(snapshot.slope_deg[row, column]) > WHEEL_CORRIDOR_MAX_SLOPE_DEG_V1:
+        return 4
+    return 0
+
+
+@dataclass(frozen=True, slots=True)
+class WheelSQPInvalidTerrainRecordV1:
+    row: int
+    column: int
+    reason_rank: int
+    reason_code: str
+
+    @property
+    def cell(self) -> Cell:
+        return Cell(self.column, self.row)
+
+
+@dataclass(frozen=True, slots=True)
+class WheelSQPTerrainClearanceV1:
+    signed_distance_m: float
+    gradient_x: float
+    gradient_y: float
+    reason_code: str
+    cell: Cell | None
+    tie_count: int
+
+
+def _signed_invalid_rectangle_clearance(
+    x: float,
+    y: float,
+    xmin: float,
+    xmax: float,
+    ymin: float,
+    ymax: float,
+) -> tuple[float, float, float, int]:
+    dx = xmin - x if x < xmin else x - xmax if x > xmax else 0.0
+    dy = ymin - y if y < ymin else y - ymax if y > ymax else 0.0
+    if dx != 0.0 or dy != 0.0:
+        distance = hypot(dx, dy)
+        gradient_x = (
+            -dx / distance if x < xmin else dx / distance if x > xmax else 0.0
+        )
+        gradient_y = (
+            -dy / distance if y < ymin else dy / distance if y > ymax else 0.0
+        )
+        return distance, gradient_x, gradient_y, 0
+    faces = (
+        (x - xmin, -1.0, 0.0, 0),
+        (xmax - x, 1.0, 0.0, 1),
+        (y - ymin, 0.0, -1.0, 2),
+        (ymax - y, 0.0, 1.0, 3),
+    )
+    depth, gradient_x, gradient_y, face_rank = min(faces, key=lambda item: (item[0], item[3]))
+    signed = 0.0 if depth == 0.0 else -depth
+    return signed, gradient_x, gradient_y, face_rank
+
+
+def _signed_map_interior_clearance(
+    x: float,
+    y: float,
+    xmin: float,
+    xmax: float,
+    ymin: float,
+    ymax: float,
+) -> tuple[float, float, float, int]:
+    outside_x = xmin - x if x < xmin else x - xmax if x > xmax else 0.0
+    outside_y = ymin - y if y < ymin else y - ymax if y > ymax else 0.0
+    if outside_x != 0.0 or outside_y != 0.0:
+        distance = hypot(outside_x, outside_y)
+        gradient_x = (
+            outside_x / distance
+            if x < xmin
+            else -outside_x / distance
+            if x > xmax
+            else 0.0
+        )
+        gradient_y = (
+            outside_y / distance
+            if y < ymin
+            else -outside_y / distance
+            if y > ymax
+            else 0.0
+        )
+        return -distance, gradient_x, gradient_y, 0
+    faces = (
+        (x - xmin, 1.0, 0.0, 0),
+        (xmax - x, -1.0, 0.0, 1),
+        (y - ymin, 0.0, 1.0, 2),
+        (ymax - y, 0.0, -1.0, 3),
+    )
+    return min(faces, key=lambda item: (item[0], item[3]))
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WheelSQPTerrainGuideV1:
+    terrain_snapshot_hash: str
+    snapshot: TerrainSnapshotV2
+    invalid_count: int
+    _records: bytes
+    max_slope_deg: float = WHEEL_CORRIDOR_MAX_SLOPE_DEG_V1
+
+    def __init__(
+        self,
+        *,
+        _authority: object,
+        terrain_snapshot_hash: str,
+        snapshot: TerrainSnapshotV2,
+        invalid_count: int,
+        _records: bytes,
+        max_slope_deg: float = WHEEL_CORRIDOR_MAX_SLOPE_DEG_V1,
+    ) -> None:
+        if _authority is not _WHEEL_SQP_TERRAIN_GUIDE_AUTHORITY:
+            raise TypeError("WheelSQPTerrainGuideV1 is factory-only")
+        object.__setattr__(self, "terrain_snapshot_hash", terrain_snapshot_hash)
+        object.__setattr__(self, "snapshot", snapshot)
+        object.__setattr__(self, "invalid_count", invalid_count)
+        object.__setattr__(self, "_records", _records)
+        object.__setattr__(self, "max_slope_deg", max_slope_deg)
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.terrain_snapshot_hash) is not str
+            or len(self.terrain_snapshot_hash) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.terrain_snapshot_hash
+            )
+        ):
+            raise ValueError("terrain_snapshot_hash must be a SHA-256 digest")
+        if type(self.snapshot) is not TerrainSnapshotV2:
+            raise TypeError("snapshot must be exact TerrainSnapshotV2")
+        if type(self.invalid_count) is not int or self.invalid_count < 0:
+            raise TypeError("invalid_count must be an exact nonnegative int")
+        if type(self._records) is not bytes:
+            raise TypeError("terrain records must be immutable bytes")
+        if len(self._records) != self.invalid_count * _TERRAIN_RECORD.size:
+            raise ValueError("terrain record byte length mismatch")
+        _exact_slope_threshold(self.max_slope_deg)
+
+    @property
+    def geometry(self) -> FineGridGeometryV2:
+        return self.snapshot.geometry
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: TerrainSnapshotV2,
+        max_slope_deg: float,
+        *,
+        ledger: WheelSQPWorkLedgerV1,
+    ) -> WheelSQPTerrainGuideV1:
+        if type(snapshot) is not TerrainSnapshotV2:
+            raise TypeError("snapshot must be exact TerrainSnapshotV2")
+        _exact_slope_threshold(max_slope_deg)
+        if type(ledger) is not WheelSQPWorkLedgerV1:
+            raise TypeError("ledger must be exact WheelSQPWorkLedgerV1")
+        ledger.check_deadline()
+        if snapshot.geometry.width > 0xFFFFFFFF or snapshot.geometry.height > 0xFFFFFFFF:
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        count = 0
+        for row in range(snapshot.geometry.height):
+            ledger.check_deadline()
+            for column in range(snapshot.geometry.width):
+                if _invalid_reason_rank(snapshot, row, column) != 0:
+                    count += 1
+        if count > _U63_MAX // _TERRAIN_RECORD_PEAK_BYTES:
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        ledger.check_deadline()
+        ledger.charge_memory(count * _TERRAIN_RECORD_PEAK_BYTES)
+        ledger.check_deadline()
+        mutable = bytearray(count * _TERRAIN_RECORD.size)
+        offset = 0
+        for row in range(snapshot.geometry.height):
+            ledger.check_deadline()
+            for column in range(snapshot.geometry.width):
+                rank = _invalid_reason_rank(snapshot, row, column)
+                if rank == 0:
+                    continue
+                _TERRAIN_RECORD.pack_into(mutable, offset, row, column, rank)
+                offset += _TERRAIN_RECORD.size
+        ledger.check_deadline()
+        records = bytes(mutable)
+        ledger.check_deadline()
+        identity = snapshot_hash(snapshot)
+        ledger.check_deadline()
+        result = cls(
+            _authority=_WHEEL_SQP_TERRAIN_GUIDE_AUTHORITY,
+            terrain_snapshot_hash=identity,
+            snapshot=snapshot,
+            invalid_count=count,
+            _records=records,
+            max_slope_deg=max_slope_deg,
+        )
+        ledger.check_deadline()
+        return result
+
+    def _iter_record_values(self):
+        for offset in range(0, len(self._records), _TERRAIN_RECORD.size):
+            yield _TERRAIN_RECORD.unpack_from(self._records, offset)
+
+    @property
+    def invalid_records(self) -> tuple[WheelSQPInvalidTerrainRecordV1, ...]:
+        return tuple(
+            WheelSQPInvalidTerrainRecordV1(
+                row=row,
+                column=column,
+                reason_rank=rank,
+                reason_code=_TERRAIN_REASON_BY_RANK[rank],
+            )
+            for row, column, rank in self._iter_record_values()
+        )
+
+    @property
+    def invalid_cells(self) -> tuple[Cell, ...]:
+        return tuple(Cell(column, row) for row, column, _ in self._iter_record_values())
+
+    def nearest_signed_clearance(self, x_m: float, y_m: float) -> WheelSQPTerrainClearanceV1:
+        x = _finite_coordinate(x_m, "x_m")
+        y = _finite_coordinate(y_m, "y_m")
+        origin_x, origin_y = self.geometry.origin
+        resolution = self.geometry.resolution_m
+        upper_x = origin_x + self.geometry.width * resolution
+        upper_y = origin_y + self.geometry.height * resolution
+        distance, gradient_x, gradient_y, face_rank = _signed_map_interior_clearance(
+            x, y, origin_x, upper_x, origin_y, upper_y
+        )
+        best_key = (0, -1, -1, face_rank)
+        best_reason = "terrain_out_of_bounds"
+        best_cell: Cell | None = None
+        tie_count = 0
+        for row, column, rank in self._iter_record_values():
+            xmin = origin_x + column * resolution
+            xmax = xmin + resolution
+            ymin = origin_y + row * resolution
+            ymax = ymin + resolution
+            candidate = _signed_invalid_rectangle_clearance(x, y, xmin, xmax, ymin, ymax)
+            candidate_distance, candidate_gx, candidate_gy, candidate_face = candidate
+            candidate_key = (rank, row, column, candidate_face)
+            if candidate_distance < distance:
+                distance = candidate_distance
+                gradient_x = candidate_gx
+                gradient_y = candidate_gy
+                best_key = candidate_key
+                best_reason = _TERRAIN_REASON_BY_RANK[rank]
+                best_cell = Cell(column, row)
+                tie_count = 0
+            elif candidate_distance == distance:
+                tie_count += 1
+                if candidate_key < best_key:
+                    gradient_x = candidate_gx
+                    gradient_y = candidate_gy
+                    best_key = candidate_key
+                    best_reason = _TERRAIN_REASON_BY_RANK[rank]
+                    best_cell = Cell(column, row)
+        return WheelSQPTerrainClearanceV1(
+            signed_distance_m=float(distance),
+            gradient_x=float(gradient_x),
+            gradient_y=float(gradient_y),
+            reason_code=best_reason,
+            cell=best_cell,
+            tie_count=tie_count,
+        )
+
+
+def wheel_sqp_corridor_broadphase_cell_bound_v1(
+    corridor: WheelCorridorV2,
+    geometry: FineGridGeometryV2,
+    footprint_radius_m: float,
+    *,
+    ledger: WheelSQPWorkLedgerV1,
+    cap: int = 1_000_000,
+) -> int:
+    if type(corridor) is not WheelCorridorV2:
+        raise TypeError("corridor must be exact WheelCorridorV2")
+    if type(geometry) is not FineGridGeometryV2:
+        raise TypeError("geometry must be exact FineGridGeometryV2")
+    radius = _finite_coordinate(footprint_radius_m, "footprint_radius_m")
+    if radius < 0.0:
+        raise ValueError("footprint_radius_m must be nonnegative")
+    if type(ledger) is not WheelSQPWorkLedgerV1:
+        raise TypeError("ledger must be exact WheelSQPWorkLedgerV1")
+    if type(cap) is not int or cap < 0:
+        raise TypeError("cap must be an exact nonnegative int")
+    total = 0
+    leg_count = max(1, len(corridor.cells) - 1)
+    for index in range(leg_count):
+        ledger.check_deadline()
+        left = corridor.cells[index]
+        right = corridor.cells[index if len(corridor.cells) == 1 else index + 1]
+        left_center = geometry.cell_center(left)
+        right_center = geometry.cell_center(right)
+        min_x = min(left_center.x, right_center.x) - radius
+        max_x = max(left_center.x, right_center.x) + radius
+        min_y = min(left_center.y, right_center.y) - radius
+        max_y = max(left_center.y, right_center.y) + radius
+        x0 = max(
+            0,
+            ceil((min_x - geometry.origin[0]) / geometry.resolution_m) - 1,
+        )
+        x1 = min(
+            geometry.width - 1,
+            floor((max_x - geometry.origin[0]) / geometry.resolution_m),
+        )
+        y0 = max(
+            0,
+            ceil((min_y - geometry.origin[1]) / geometry.resolution_m) - 1,
+        )
+        y1 = min(
+            geometry.height - 1,
+            floor((max_y - geometry.origin[1]) / geometry.resolution_m),
+        )
+        leg_cells = 0 if x1 < x0 or y1 < y0 else (x1 - x0 + 1) * (y1 - y0 + 1)
+        if leg_cells > cap - total:
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        total += leg_cells
+    ledger.check_deadline()
+    return total
 
 
 @dataclass(frozen=True, slots=True)

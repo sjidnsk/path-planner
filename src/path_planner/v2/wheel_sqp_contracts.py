@@ -30,8 +30,11 @@ WHEEL_KINEMATIC_L2_RESERVE_MODEL_V2 = "wheel_l2_reserve_model/v1"
 WHEEL_KINEMATIC_CONTROL_SLEW_V2 = "wheel_segment_center_control_slew/v1"
 WHEEL_KINEMATIC_OBSERVATION_SOURCE_V2 = "wheel_kinematic_derived_samples/v1"
 WHEEL_SQP_WORK_LEDGER_V1 = "wheel_sqp_shared_work_ledger/v1"
+WHEEL_SQP_ATTEMPT_RESOURCE_ESTIMATE_V1 = "wheel_sqp_attempt_resource_estimate/v1"
 
 _WHEEL_SQP_HARD_MEMORY_LIMIT_BYTES_V1 = 64 * 1024 * 1024
+_WHEEL_SQP_U63_MAX_V1 = (1 << 63) - 1
+_WHEEL_SQP_RESOURCE_ESTIMATE_AUTHORITY = object()
 
 
 class WheelSQPModeV2(str, Enum):
@@ -155,6 +158,30 @@ class WheelSQPWorkLedgerV1:
         if attempted > self.resource_budget.max_route_states:
             raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
         self._route_states = attempted
+
+    def reserve_attempt(self, memory_bytes: int, route_states: int) -> None:
+        """Atomically reserve one SQP attempt's memory and route-state tail."""
+
+        self.check_deadline()
+        _exact_nonnegative_int(memory_bytes, "memory_bytes")
+        _exact_nonnegative_int(route_states, "route_states")
+        if memory_bytes > _WHEEL_SQP_U63_MAX_V1 or route_states > _WHEEL_SQP_U63_MAX_V1:
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        if (
+            self.accounted_bytes > _WHEEL_SQP_U63_MAX_V1 - memory_bytes
+            or self.route_states > _WHEEL_SQP_U63_MAX_V1 - route_states
+        ):
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        prospective_memory = self.accounted_bytes + memory_bytes
+        prospective_states = self.route_states + route_states
+        if (
+            prospective_memory > self.effective_memory_limit_bytes
+            or prospective_states > self.resource_budget.max_route_states
+        ):
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        self.check_deadline()
+        self._accounted_bytes = prospective_memory
+        self._route_states = prospective_states
 
 
 def _exact_hash(value: object, name: str) -> str:
@@ -677,6 +704,175 @@ class WheelSQPResourceLedgerV1:
             raise ValueError("resource ledger reason_code must match accepted and remaining_s")
         if self.accepted is not (reserve < remaining):
             raise ValueError("resource ledger accepted must match strict reserve comparison")
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class WheelSQPResourceEstimateV1:
+    segment_count: int
+    variable_count: int
+    equality_count: int
+    base_inequality_count: int
+    terrain_inequality_count: int
+    total_constraint_count: int
+    broadphase_cell_bound: int
+    interval_record_bound: int
+    encoded_state_bound: int
+    encoded_scalar_bound: int
+    decision_bytes: int
+    jacobian_bytes: int
+    solver_bytes: int
+    l2_queue_bytes: int
+    codec_bytes: int
+    required_bytes: int
+    post_solver_reserve: WheelSQPResourceLedgerV1
+    estimate_id: str = WHEEL_SQP_ATTEMPT_RESOURCE_ESTIMATE_V1
+
+    def __init__(self, *, _authority: object, **values: object) -> None:
+        if _authority is not _WHEEL_SQP_RESOURCE_ESTIMATE_AUTHORITY:
+            raise TypeError("WheelSQPResourceEstimateV1 is estimator-only")
+        field_names = (
+            "segment_count",
+            "variable_count",
+            "equality_count",
+            "base_inequality_count",
+            "terrain_inequality_count",
+            "total_constraint_count",
+            "broadphase_cell_bound",
+            "interval_record_bound",
+            "encoded_state_bound",
+            "encoded_scalar_bound",
+            "decision_bytes",
+            "jacobian_bytes",
+            "solver_bytes",
+            "l2_queue_bytes",
+            "codec_bytes",
+            "required_bytes",
+            "post_solver_reserve",
+        )
+        unexpected = set(values) - set(field_names) - {"estimate_id"}
+        missing = set(field_names) - set(values)
+        if unexpected or missing:
+            raise TypeError("resource estimate fields must match the frozen schema")
+        for name in field_names:
+            object.__setattr__(self, name, values[name])
+        object.__setattr__(
+            self,
+            "estimate_id",
+            values.get("estimate_id", WHEEL_SQP_ATTEMPT_RESOURCE_ESTIMATE_V1),
+        )
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        integer_fields = (
+            "segment_count",
+            "variable_count",
+            "equality_count",
+            "base_inequality_count",
+            "terrain_inequality_count",
+            "total_constraint_count",
+            "broadphase_cell_bound",
+            "interval_record_bound",
+            "encoded_state_bound",
+            "encoded_scalar_bound",
+            "decision_bytes",
+            "jacobian_bytes",
+            "solver_bytes",
+            "l2_queue_bytes",
+            "codec_bytes",
+            "required_bytes",
+        )
+        for name in integer_fields:
+            _exact_nonnegative_int(getattr(self, name), name)
+        if not 1 <= self.segment_count <= 48:
+            raise ValueError("segment_count must be within the v1 SQP bound")
+        if self.variable_count != 6 * self.segment_count:
+            raise ValueError("variable_count must equal 6N")
+        if self.equality_count != 3 * self.segment_count:
+            raise ValueError("equality_count must equal 3N")
+        if self.base_inequality_count != 4 * self.segment_count - 1:
+            raise ValueError("base_inequality_count must equal 4N-1")
+        if self.terrain_inequality_count != 5 * self.segment_count:
+            raise ValueError("terrain_inequality_count must equal 5N")
+        if self.total_constraint_count != 12 * self.segment_count - 1:
+            raise ValueError("total_constraint_count must equal 12N-1")
+        if self.required_bytes != (
+            self.decision_bytes
+            + self.jacobian_bytes
+            + self.solver_bytes
+            + self.l2_queue_bytes
+            + self.codec_bytes
+        ):
+            raise ValueError("required_bytes must equal the frozen component sum")
+        if self.broadphase_cell_bound > 1_000_000:
+            raise ValueError("broadphase_cell_bound exceeds the frozen cap")
+        if self.interval_record_bound > 262_144:
+            raise ValueError("interval_record_bound exceeds the frozen cap")
+        interval_factor = (1 << 25) - 1
+        expected_interval_bound = (
+            262_144
+            if self.broadphase_cell_bound > 262_144 // interval_factor
+            else self.broadphase_cell_bound * interval_factor
+        )
+        if self.interval_record_bound != expected_interval_bound:
+            raise ValueError("interval_record_bound does not match broadphase saturation")
+        encoded_state_base = 3 + 4 * self.segment_count
+        encoded_state_delta = self.encoded_state_bound - encoded_state_base
+        if encoded_state_delta < 0 or encoded_state_delta % 2 != 0:
+            raise ValueError("encoded_state_bound does not encode an exact sample count")
+        sample_count = encoded_state_delta // 2
+        if self.encoded_scalar_bound != (
+            14 + 24 * self.segment_count + 6 * sample_count
+        ):
+            raise ValueError("encoded_scalar_bound does not match encoded_state_bound")
+        if self.decision_bytes != 8 * self.variable_count:
+            raise ValueError("decision_bytes does not match the frozen formula")
+        if self.jacobian_bytes != (
+            8 * self.total_constraint_count * self.variable_count
+        ):
+            raise ValueError("jacobian_bytes does not match the frozen formula")
+        if self.solver_bytes != 16_777_216:
+            raise ValueError("solver_bytes does not match the frozen reservation")
+        if self.l2_queue_bytes != 96 * self.interval_record_bound:
+            raise ValueError("l2_queue_bytes does not match the frozen formula")
+        if self.codec_bytes != (
+            64 * self.encoded_state_bound + 16 * self.encoded_scalar_bound
+        ):
+            raise ValueError("codec_bytes does not match the frozen formula")
+        if type(self.post_solver_reserve) is not WheelSQPResourceLedgerV1:
+            raise TypeError("post_solver_reserve must be exact WheelSQPResourceLedgerV1")
+        if (
+            not self.post_solver_reserve.accepted
+            or self.post_solver_reserve.reason_code is not None
+        ):
+            raise ValueError("post_solver_reserve must be accepted")
+        expected_reserve = L2ReserveModelV1().reserve_s(
+            segment_count=self.segment_count,
+            broadphase_cell_bound=self.broadphase_cell_bound,
+            interval_record_bound=self.interval_record_bound,
+            encoded_state_bound=self.encoded_state_bound,
+            encoded_scalar_bound=self.encoded_scalar_bound,
+            max_segments=48,
+            max_l2_candidate_cells=1_000_000,
+            max_l2_interval_records=262_144,
+            max_encoded_state_bound=self.encoded_state_bound,
+            max_encoded_scalar_bound=self.encoded_scalar_bound,
+        )
+        if self.post_solver_reserve.reserve_s != expected_reserve:
+            raise ValueError("post_solver_reserve does not bind the estimate bounds")
+        _exact_id(
+            self.estimate_id,
+            "estimate_id",
+            WHEEL_SQP_ATTEMPT_RESOURCE_ESTIMATE_V1,
+        )
+
+
+def _make_wheel_sqp_resource_estimate_v1(
+    **values: object,
+) -> WheelSQPResourceEstimateV1:
+    return WheelSQPResourceEstimateV1(
+        _authority=_WHEEL_SQP_RESOURCE_ESTIMATE_AUTHORITY,
+        **values,
+    )
 
 
 @dataclass(frozen=True, slots=True)
