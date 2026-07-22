@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 import path_planner.v2 as v2
+from path_planner.core import Cell
 from path_planner.v2.contracts import (
     PlatformKindV2,
     PoseStateV2,
@@ -31,6 +32,7 @@ from path_planner.v2.wheel_sqp_contracts import (
     WheelSQPValidationEvidenceV2,
     WheelSQPWorkLedgerV1,
     WheelSQPWorkLimitError,
+    WheelTopologySignatureV1,
     WheelTrajectoryL2ResultV2,
 )
 from path_planner.v2.wheel_sqp_serialization import (
@@ -379,3 +381,16 @@ def test_work_ledger_raises_typed_stable_limit_reasons(ledger, charge, reason) -
         charge(ledger)
 
     assert caught.value.reason_code == reason
+
+
+@pytest.mark.parametrize("bad_cell", [Cell(True, 0), Cell(1.5, 0)])
+def test_wheel_corridor_contract_rejects_nonexact_cell_coordinates(bad_cell) -> None:
+    with pytest.raises(TypeError, match="coordinates"):
+        WheelCorridorV2(
+            corridor_index=0,
+            cells=(bad_cell,),
+            corridor_hash="a" * 64,
+            guide_cost=0.0,
+            path_length_m=0.0,
+            topology_signature=WheelTopologySignatureV1(()),
+        )

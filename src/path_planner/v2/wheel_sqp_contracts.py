@@ -180,6 +180,14 @@ def _exact_nonnegative_int(value: object, name: str) -> int:
     return value
 
 
+def _exact_cell(value: object, name: str) -> Cell:
+    if type(value) is not Cell:
+        raise TypeError(f"{name} must be exact Cell")
+    if type(value.x) is not int or type(value.y) is not int:
+        raise TypeError(f"{name} coordinates must be exact ints")
+    return value
+
+
 def _exact_finite_float(value: object, name: str, *, nonnegative: bool = False) -> float:
     if type(value) is not float:
         raise TypeError(f"{name} must be exact float")
@@ -313,8 +321,8 @@ class WheelCorridorV2:
         _exact_nonnegative_int(self.corridor_index, "corridor_index")
         if type(self.cells) is not tuple or not self.cells:
             raise TypeError("cells must be a nonempty exact tuple")
-        if any(type(cell) is not Cell for cell in self.cells):
-            raise TypeError("cells must contain exact Cell values")
+        for cell in self.cells:
+            _exact_cell(cell, "cells")
         _exact_hash(self.corridor_hash, "corridor_hash")
         _exact_finite_float(self.guide_cost, "guide_cost", nonnegative=True)
         _exact_finite_float(self.path_length_m, "path_length_m", nonnegative=True)

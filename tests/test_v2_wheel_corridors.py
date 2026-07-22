@@ -35,6 +35,7 @@ from path_planner.v2.wheel_corridors import (
 from path_planner.v2.wheel_sqp_contracts import (
     WHEEL_KINEMATIC_CORRIDOR_SOURCE_V2,
     WheelSQPWorkLedgerV1,
+    WheelSQPWorkLimitError,
     WheelTopologySignatureV1,
 )
 
@@ -155,19 +156,20 @@ def test_corridor_graph_rejects_any_nonexact_frozen_slope_threshold(
         (True, "planning_deadline_expired"),
     ],
 )
-def test_resource_preflight_stops_before_graph_factory(
+def test_graph_factory_resource_preflight_stops_before_graph_work(
     monkeypatch: pytest.MonkeyPatch,
     expired: bool,
     reason: str,
 ) -> None:
-    def forbidden_factory(*args: object, **kwargs: object) -> None:
-        raise AssertionError("graph factory ran before resource preflight")
+    def forbidden_graph_work(*args: object, **kwargs: object) -> None:
+        raise AssertionError("graph work ran before graph factory resource preflight")
 
     monkeypatch.setattr(
         WheelCorridorGraphV1,
-        "from_snapshot",
-        classmethod(forbidden_factory),
+        "_clearance_pass",
+        staticmethod(forbidden_graph_work),
     )
+    monkeypatch.setattr(wheel_corridors, "snapshot_hash", forbidden_graph_work)
 
     result = generate_wheel_corridors_v2(
         _snapshot(5, 3),
@@ -1072,3 +1074,91 @@ def test_public_path_hash_authority_matches_existing_corridor_identity() -> None
         snapshot_hash(snapshot),
         corridor.cells,
     )
+
+
+@pytest.mark.parametrize("bad_cell", [Cell(True, 0), Cell(1.5, 0)])
+def test_hash_and_topology_reject_nonexact_cell_coordinates_before_work(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_cell: Cell,
+) -> None:
+    budget = _budget()
+    deadline = _deadline()
+    ledger = WheelSQPWorkLedgerV1(budget, deadline)
+    ledger.charge_memory(13)
+    before = (
+        ledger.expanded_states,
+        ledger.accounted_bytes,
+        ledger.route_states,
+    )
+
+    def forbidden_hash(*args: object, **kwargs: object) -> None:
+        raise AssertionError("hash payload allocated for invalid Cell coordinates")
+
+    monkeypatch.setattr(wheel_corridors, "_canonical_sha256", forbidden_hash)
+    with pytest.raises(TypeError, match="coordinates"):
+        wheel_corridor_path_hash_v1("a" * 64, (bad_cell,), ledger=ledger)
+    assert (
+        ledger.expanded_states,
+        ledger.accounted_bytes,
+        ledger.route_states,
+    ) == before
+
+    with pytest.raises(TypeError, match="coordinates"):
+        topology_signature_v1((bad_cell,), (), ledger=ledger)
+    assert (
+        ledger.expanded_states,
+        ledger.accounted_bytes,
+        ledger.route_states,
+    ) == before
+
+
+def test_graph_factory_charges_exact_full_graph_memory_before_allocation() -> None:
+    snapshot = _snapshot(5, 3)
+    graph_bytes = 5 * 3 * 48
+    budget = _budget(max_memory_bytes=graph_bytes)
+    deadline = _deadline()
+    ledger = WheelSQPWorkLedgerV1(budget, deadline)
+
+    graph = WheelCorridorGraphV1.from_snapshot(snapshot, 30.0, ledger=ledger)
+
+    assert type(graph) is WheelCorridorGraphV1
+    assert ledger.accounted_bytes == graph_bytes
+    assert ledger.expanded_states == 0
+    assert ledger.route_states == 0
+
+
+@pytest.mark.parametrize(
+    ("expired", "reason"),
+    [
+        (False, "wheel_sqp_resource_budget_exceeded"),
+        (True, "planning_deadline_expired"),
+    ],
+)
+def test_graph_factory_admission_is_atomic_and_timeout_has_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    expired: bool,
+    reason: str,
+) -> None:
+    snapshot = _snapshot(5, 3)
+    graph_bytes = 5 * 3 * 48
+    budget = _budget(max_memory_bytes=graph_bytes - 1)
+    deadline = _deadline(expired=expired)
+    ledger = WheelSQPWorkLedgerV1(budget, deadline)
+
+    def forbidden_graph_work(*args: object, **kwargs: object) -> None:
+        raise AssertionError("graph work ran after graph-memory admission failure")
+
+    monkeypatch.setattr(
+        WheelCorridorGraphV1,
+        "_clearance_pass",
+        staticmethod(forbidden_graph_work),
+    )
+    monkeypatch.setattr(wheel_corridors, "snapshot_hash", forbidden_graph_work)
+
+    with pytest.raises(WheelSQPWorkLimitError) as caught:
+        WheelCorridorGraphV1.from_snapshot(snapshot, 30.0, ledger=ledger)
+
+    assert caught.value.reason_code == reason
+    assert ledger.accounted_bytes == 0
+    assert ledger.expanded_states == 0
+    assert ledger.route_states == 0

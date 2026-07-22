@@ -99,7 +99,7 @@ class WheelCorridorGraphV1:
             raise TypeError("ledger must be exact WheelSQPWorkLedgerV1 or None")
         geometry = snapshot.geometry
         if ledger is not None:
-            ledger.check_deadline()
+            ledger.charge_memory(geometry.width * geometry.height * _GRAPH_CELL_BYTES)
         passable_cells: set[Cell] = set()
         invalid_cells: list[Cell] = []
         for y in range(geometry.height):
@@ -496,8 +496,8 @@ def topology_signature_v1(
 ) -> WheelTopologySignatureV1:
     if type(cells) is not tuple or not cells:
         raise TypeError("cells must be a nonempty exact tuple")
-    if any(type(cell) is not Cell for cell in cells):
-        raise TypeError("cells must contain exact Cell values")
+    for cell in cells:
+        _exact_cell(cell, "cells")
     if type(components) is not tuple or any(
         type(component) is not WheelBlockedComponentV1 for component in components
     ):
@@ -767,8 +767,8 @@ def wheel_corridor_path_hash_v1(
         raise ValueError("snapshot_identity must be a lowercase SHA-256 digest")
     if type(cells) is not tuple or not cells:
         raise TypeError("cells must be a nonempty exact tuple")
-    if any(type(cell) is not Cell for cell in cells):
-        raise TypeError("cells must contain exact Cell values")
+    for cell in cells:
+        _exact_cell(cell, "cells")
     if ledger is not None and type(ledger) is not WheelSQPWorkLedgerV1:
         raise TypeError("ledger must be exact WheelSQPWorkLedgerV1 or None")
     if ledger is not None:
@@ -844,8 +844,6 @@ def generate_wheel_corridors_v2(
             if work_ledger.deadline is not deadline:
                 raise ValueError("ledger deadline must be the exact shared deadline object")
         work_ledger.check_deadline()
-        geometry = snapshot.geometry
-        work_ledger.charge_memory(geometry.width * geometry.height * _GRAPH_CELL_BYTES)
         graph = WheelCorridorGraphV1.from_snapshot(
             snapshot,
             max_slope_deg=WHEEL_CORRIDOR_MAX_SLOPE_DEG_V1,
