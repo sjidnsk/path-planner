@@ -219,6 +219,12 @@ def _case(
     return corridor, request, ledger, deadline, clock
 
 
+def _leave_memory_bytes(ledger: WheelSQPWorkLedgerV1, remaining: int) -> None:
+    amount = ledger.effective_memory_limit_bytes - ledger.accounted_bytes - remaining
+    assert amount >= 0
+    ledger.charge_memory(amount)
+
+
 def _line_cells(last_x: int, *, y: int = 0) -> tuple[Cell, ...]:
     return tuple(Cell(x, y) for x in range(last_x + 1))
 
@@ -649,6 +655,36 @@ def test_supercover_includes_cell_touched_only_at_exact_grid_vertex() -> None:
     assert points[-1] == (goal.x_m, goal.y_m)
 
 
+def test_exact_outer_boundary_touch_fails_closed_for_single_cell_corridor() -> None:
+    snapshot = _snapshot(1, 1)
+    corridor, request, ledger, deadline, _ = _case(
+        snapshot,
+        (Cell(0, 0),),
+        PoseStateV2(0.0, 0.25, 0.0),
+        PoseStateV2(0.25, 0.25, 0.0),
+    )
+
+    with pytest.raises(WheelSQPInitializationError) as caught:
+        simplify_wheel_corridor_v2(corridor, request, PROFILE, ledger, deadline)
+
+    assert caught.value.reason_code == "wheel_sqp_initialization_failed"
+
+
+def test_nextafter_inside_outer_boundary_remains_initializable() -> None:
+    snapshot = _snapshot(1, 1)
+    start_x = nextafter(0.0, inf)
+    corridor, request, ledger, deadline, _ = _case(
+        snapshot,
+        (Cell(0, 0),),
+        PoseStateV2(start_x, 0.25, 0.0),
+        PoseStateV2(0.25, 0.25, 0.0),
+    )
+
+    points = simplify_wheel_corridor_v2(corridor, request, PROFILE, ledger, deadline)
+
+    assert points == ((start_x, 0.25), (0.25, 0.25))
+
+
 def test_nominal_long_leg_split_is_exactly_sixty_meters() -> None:
     snapshot = _snapshot(242, 1)
     cells = _line_cells(241)
@@ -939,6 +975,222 @@ def test_deadline_flip_at_digest_boundary_returns_no_guess(
             deadline,
         )
     assert caught.value.reason_code == "planning_deadline_expired"
+
+
+def test_deadline_flip_after_split_return_returns_no_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(5, 1)
+    corridor, request, ledger, deadline, clock = _case(
+        snapshot,
+        _line_cells(4),
+        PoseStateV2(0.25, 0.25, 0.0),
+        PoseStateV2(2.25, 0.25, 0.0),
+    )
+    original_split = wheel_initialization._split_long_legs
+
+    def expiring_split(*args: object, **kwargs: object) -> object:
+        result = original_split(*args, **kwargs)
+        clock.now = 1.0
+        return result
+
+    monkeypatch.setattr(wheel_initialization, "_split_long_legs", expiring_split)
+    with pytest.raises(WheelSQPInitializationError) as caught:
+        simplify_wheel_corridor_v2(corridor, request, PROFILE, ledger, deadline)
+
+    assert caught.value.reason_code == "planning_deadline_expired"
+
+
+def test_deadline_flip_during_last_terminal_energy_returns_no_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(5, 1)
+    _, request, ledger, deadline, clock = _case(
+        snapshot,
+        _line_cells(4),
+        PoseStateV2(0.25, 0.25, 0.0),
+        PoseStateV2(2.25, 0.25, 0.0),
+    )
+    original_energy = wheel_initialization.wheel_relative_energy_v1
+    authority_calls = 0
+
+    def expiring_energy(*args: object, **kwargs: object) -> float:
+        nonlocal authority_calls
+        authority_calls += 1
+        result = original_energy(*args, **kwargs)
+        if authority_calls == 6:
+            clock.now = 1.0
+        return result
+
+    monkeypatch.setattr(wheel_initialization, "wheel_relative_energy_v1", expiring_energy)
+    with pytest.raises(WheelSQPInitializationError) as caught:
+        select_wheel_modes_v2(
+            ((0.25, 0.25), (2.25, 0.25)),
+            request,
+            PROFILE,
+            ledger,
+            deadline,
+        )
+
+    assert authority_calls == 6
+    assert caught.value.reason_code == "planning_deadline_expired"
+
+
+def test_deadline_flip_during_final_guess_construction_returns_no_guess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(5, 1)
+    corridor, request, ledger, deadline, clock = _case(
+        snapshot,
+        _line_cells(4),
+        PoseStateV2(0.25, 0.25, 0.0),
+        PoseStateV2(2.25, 0.25, 0.0),
+    )
+    original_guess_type = wheel_initialization.WheelSQPInitialGuessV2
+
+    def expiring_guess(**kwargs: object) -> WheelSQPInitialGuessV2:
+        clock.now = 1.0
+        return original_guess_type(**kwargs)
+
+    monkeypatch.setattr(wheel_initialization, "WheelSQPInitialGuessV2", expiring_guess)
+    with pytest.raises(WheelSQPInitializationError) as caught:
+        initialize_wheel_trajectory_v2(corridor, request, PROFILE, ledger, deadline)
+
+    assert caught.value.reason_code == "planning_deadline_expired"
+
+
+def test_slew_bisection_checks_deadline_before_next_authority_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock()
+    deadline = PlanningDeadlineV2(0.0, 1.0, clock)
+    ledger = WheelSQPWorkLedgerV1(_budget(), deadline)
+    controls = (
+        wheel_initialization._Control(0.0, 0.0, 0.05, 0.0, 0.0),
+        wheel_initialization._Control(0.5, 0.0, 0.05, 0.025, 0.0),
+    )
+    original_authority = wheel_initialization.wheel_segment_center_control_slew_v1
+    authority_calls = 0
+
+    def expiring_authority(*args: object, **kwargs: object) -> tuple[float, float, float]:
+        nonlocal authority_calls
+        authority_calls += 1
+        if authority_calls == 7:
+            raise AssertionError("slew authority called after deadline expiry")
+        result = original_authority(*args, **kwargs)
+        if authority_calls == 6:
+            clock.now = 1.0
+        return result
+
+    monkeypatch.setattr(
+        wheel_initialization,
+        "wheel_segment_center_control_slew_v1",
+        expiring_authority,
+    )
+    with pytest.raises(WheelSQPInitializationError) as caught:
+        wheel_initialization._repair_control_slew(controls, PROFILE, ledger)
+
+    assert authority_calls == 6
+    assert caught.value.reason_code == "planning_deadline_expired"
+
+
+def test_raw_points_are_admitted_before_builder_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(1, 1)
+    corridor, request, ledger, deadline, _ = _case(
+        snapshot,
+        (Cell(0, 0),),
+        PoseStateV2(0.1, 0.25, 0.0),
+        PoseStateV2(0.25, 0.25, 0.0),
+    )
+    graph = WheelCorridorGraphV1.from_snapshot(snapshot, 30.0, ledger=ledger)
+    components = build_blocked_components_v1(graph, ledger=ledger)
+    monkeypatch.setattr(
+        wheel_initialization,
+        "_rebuild_corridor_authorities",
+        lambda *args, **kwargs: (graph, components),
+    )
+
+    def forbidden_raw_builder(*args: object, **kwargs: object) -> object:
+        raise AssertionError("raw point builder ran before memory admission")
+
+    monkeypatch.setattr(
+        wheel_initialization,
+        "_raw_corridor_points",
+        forbidden_raw_builder,
+    )
+    _leave_memory_bytes(ledger, 1)
+    with pytest.raises(WheelSQPInitializationError) as caught:
+        simplify_wheel_corridor_v2(corridor, request, PROFILE, ledger, deadline)
+
+    assert caught.value.reason_code == "wheel_sqp_resource_budget_exceeded"
+
+
+def test_controls_are_admitted_before_control_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(5, 1)
+    _, request, ledger, _, _ = _case(
+        snapshot,
+        _line_cells(4),
+        PoseStateV2(0.25, 0.25, 0.0),
+        PoseStateV2(2.25, 0.25, 0.0),
+    )
+
+    def forbidden_control(*args: object, **kwargs: object) -> object:
+        raise AssertionError("control constructed before memory admission")
+
+    monkeypatch.setattr(wheel_initialization, "_Control", forbidden_control)
+    _leave_memory_bytes(ledger, 1)
+    with pytest.raises(WheelSQPInitializationError) as caught:
+        wheel_initialization._schedule(
+            ((0.25, 0.25), (2.25, 0.25)),
+            (WheelSQPModeV2.FORWARD,),
+            request,
+            PROFILE,
+            ledger,
+        )
+
+    assert caught.value.reason_code == "wheel_sqp_resource_budget_exceeded"
+
+
+def test_digest_bytes_are_admitted_before_canonical_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(5, 1)
+    corridor, request, ledger, deadline, _ = _case(
+        snapshot,
+        _line_cells(4),
+        PoseStateV2(0.25, 0.25, 0.0),
+        PoseStateV2(2.25, 0.25, 0.0),
+    )
+    guess = initialize_wheel_trajectory_v2(corridor, request, PROFILE, ledger, deadline)
+
+    def forbidden_payload(*args: object, **kwargs: object) -> object:
+        raise AssertionError("digest payload was built before memory admission")
+
+    def forbidden_encoder(*args: object, **kwargs: object) -> object:
+        raise AssertionError("canonical encoder ran before memory admission")
+
+    monkeypatch.setattr(
+        wheel_initialization,
+        "_initial_guess_payload",
+        forbidden_payload,
+        raising=False,
+    )
+    monkeypatch.setattr(wheel_initialization, "canonical_json_bytes", forbidden_encoder)
+    _leave_memory_bytes(ledger, 1)
+    with pytest.raises(WheelSQPInitializationError) as caught:
+        wheel_initialization._initial_guess_digest(
+            corridor,
+            request,
+            PROFILE,
+            guess.segments,
+            ledger,
+        )
+
+    assert caught.value.reason_code == "wheel_sqp_resource_budget_exceeded"
 
 
 def test_initializer_calls_the_single_task2_relative_energy_authority(

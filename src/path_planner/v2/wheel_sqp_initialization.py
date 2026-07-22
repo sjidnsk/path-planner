@@ -44,6 +44,10 @@ _POINT_BYTES = 32
 _COVER_CELL_BYTES = 16
 _SEGMENT_BYTES = 192
 _DP_RECORD_BYTES = 128
+_DIGEST_BASE_ADMISSION_BYTES = 32_768
+_DIGEST_CELL_ADMISSION_BYTES = 512
+_DIGEST_TOPOLOGY_ENTRY_ADMISSION_BYTES = 512
+_DIGEST_SEGMENT_ADMISSION_BYTES = 2_048
 _NOMINAL_TRANSLATION_SPEED_MPS = 0.5
 
 _INITIALIZATION_REASONS = frozenset(
@@ -223,6 +227,19 @@ def _raw_corridor_points(
     return (start, *internal, goal)
 
 
+def _raw_corridor_point_count(
+    corridor: WheelCorridorV2,
+    request: PlanningRequestV2,
+) -> int:
+    if len(corridor.cells) != 1:
+        return len(corridor.cells)
+    same_position = (
+        request.start_state.x_m == request.goal_state.x_m
+        and request.start_state.y_m == request.goal_state.y_m
+    )
+    return 1 if same_position else 2
+
+
 def _closed_segment_cell_entry(
     start: tuple[float, float],
     end: tuple[float, float],
@@ -379,18 +396,15 @@ def _simplify_points(
     if len(raw_points) <= 1:
         return raw_points
     if len(corridor.cells) == 1:
-        associations = (corridor.cells[0],) * len(raw_points)
         forced = frozenset((0, len(raw_points) - 1))
     else:
-        associations = corridor.cells
         forced = _forced_cut_indices(corridor, components, ledger)
     kept_indices = [0]
     kept_leg_cells: list[tuple[Cell, ...]] = []
     current = 0
     while current < len(raw_points) - 1:
         _check_deadline(ledger)
-        selected_index = current + 1
-        selected_cells = (associations[current], associations[selected_index])
+        accepted: tuple[int, tuple[Cell, ...]] | None = None
         for candidate_index in range(len(raw_points) - 1, current, -1):
             if any(current < index < candidate_index for index in forced):
                 continue
@@ -406,8 +420,6 @@ def _simplify_points(
             )
             if candidate_index > current + 1 and ambiguous:
                 continue
-            if candidate_index == current + 1 and ambiguous:
-                cover = original_cells
             if not cover or any(not graph.passable(cell) for cell in cover):
                 continue
             if not _subpath_signature_matches(
@@ -417,9 +429,12 @@ def _simplify_points(
                 ledger,
             ):
                 continue
-            selected_index = candidate_index
-            selected_cells = cover
+            accepted = (candidate_index, cover)
             break
+        if accepted is None:
+            _check_deadline(ledger)
+            _fail("wheel_sqp_initialization_failed")
+        selected_index, selected_cells = accepted
         kept_indices.append(selected_index)
         kept_leg_cells.append(selected_cells)
         current = selected_index
@@ -661,6 +676,7 @@ def _select_modes_dp(
             _control_cost(v, omega, duration, request, profile)
             for v, omega, duration in _turn_values(final_turn, profile)
         )
+        _check_deadline(ledger)
         terminal_key = (
             record.weighted_cost + final_cost,
             record.reverse_count,
@@ -668,7 +684,9 @@ def _select_modes_dp(
             record.rank_sequence,
         )
         terminal_records.append((terminal_key, record))
-    return min(terminal_records, key=lambda item: item[0])[1].modes
+    result = min(terminal_records, key=lambda item: item[0])[1].modes
+    _check_deadline(ledger)
+    return result
 
 
 def simplify_wheel_corridor_v2(
@@ -680,8 +698,11 @@ def simplify_wheel_corridor_v2(
 ) -> tuple[tuple[float, float], ...]:
     request, profile, ledger = _validate_common(request, profile, ledger, deadline)
     graph, components = _rebuild_corridor_authorities(corridor, request, ledger)
+    raw_point_count = _raw_corridor_point_count(corridor, request)
+    _charge_memory(ledger, raw_point_count * _POINT_BYTES)
     raw_points = _raw_corridor_points(corridor, request)
-    _charge_memory(ledger, len(raw_points) * _POINT_BYTES)
+    if len(raw_points) != raw_point_count:
+        _fail("wheel_sqp_initialization_failed")
     points = _simplify_points(
         corridor,
         raw_points,
@@ -689,7 +710,9 @@ def simplify_wheel_corridor_v2(
         components,
         ledger,
     )
-    return _split_long_legs(points, profile, ledger)
+    result = _split_long_legs(points, profile, ledger)
+    _check_deadline(ledger)
+    return result
 
 
 def select_wheel_modes_v2(
@@ -705,7 +728,9 @@ def select_wheel_modes_v2(
         _fail("wheel_sqp_identity_mismatch")
     if points[-1] != (request.goal_state.x_m, request.goal_state.y_m):
         _fail("wheel_sqp_identity_mismatch")
-    return _select_modes_dp(points, request, profile, ledger)
+    result = _select_modes_dp(points, request, profile, ledger)
+    _check_deadline(ledger)
+    return result
 
 
 @dataclass(slots=True)
@@ -729,6 +754,15 @@ def _turn_controls(
         _Control(v_mps, omega, duration, 0.0, omega * duration)
         for v_mps, omega, duration in _turn_values(angle, profile)
     )
+
+
+def _turn_segment_count(
+    angle: float,
+    profile: WheelKinematicSQPProfileV2,
+) -> int:
+    if angle == 0.0:
+        return 0
+    return ceil(abs(angle) / profile.max_segment_heading_change_rad)
 
 
 def _translation_control(
@@ -810,8 +844,13 @@ def _maximum_control_duration(
     return min(profile.max_segment_duration_s, lower_bound_limit)
 
 
-def _slew_rates(left: _Control, right: _Control) -> tuple[float, float, float]:
-    return wheel_segment_center_control_slew_v1(
+def _slew_rates(
+    left: _Control,
+    right: _Control,
+    ledger: WheelSQPWorkLedgerV1,
+) -> tuple[float, float, float]:
+    _check_deadline(ledger)
+    result = wheel_segment_center_control_slew_v1(
         left.v_mps,
         left.omega_radps,
         left.duration_s,
@@ -819,14 +858,17 @@ def _slew_rates(left: _Control, right: _Control) -> tuple[float, float, float]:
         right.omega_radps,
         right.duration_s,
     )
+    _check_deadline(ledger)
+    return result
 
 
 def _slew_passes(
     left: _Control,
     right: _Control,
     profile: WheelKinematicSQPProfileV2,
+    ledger: WheelSQPWorkLedgerV1,
 ) -> bool:
-    speed_up, slow_down, angular = _slew_rates(left, right)
+    speed_up, slow_down, angular = _slew_rates(left, right, ledger)
     return (
         speed_up <= profile.max_linear_accel_mps2
         and slow_down <= profile.max_linear_decel_mps2
@@ -838,8 +880,9 @@ def _slew_violation_ratio(
     left: _Control,
     right: _Control,
     profile: WheelKinematicSQPProfileV2,
+    ledger: WheelSQPWorkLedgerV1,
 ) -> float:
-    speed_up, slow_down, angular = _slew_rates(left, right)
+    speed_up, slow_down, angular = _slew_rates(left, right, ledger)
     return max(
         speed_up / profile.max_linear_accel_mps2,
         slow_down / profile.max_linear_decel_mps2,
@@ -851,10 +894,11 @@ def _repair_slew_pair(
     controls: list[_Control],
     pair_index: int,
     profile: WheelKinematicSQPProfileV2,
+    ledger: WheelSQPWorkLedgerV1,
 ) -> bool:
     left = controls[pair_index]
     right = controls[pair_index + 1]
-    speed_up, slow_down, angular = _slew_rates(left, right)
+    speed_up, slow_down, angular = _slew_rates(left, right, ledger)
     candidate_indices: list[int] = []
     if speed_up > profile.max_linear_accel_mps2:
         candidate_indices.extend((pair_index + 1, pair_index))
@@ -867,7 +911,7 @@ def _repair_slew_pair(
             candidate_indices.extend((pair_index, pair_index + 1))
     ordered_indices = tuple(dict.fromkeys(candidate_indices))
     fallback: tuple[float, int, _Control] | None = None
-    prior_ratio = _slew_violation_ratio(left, right, profile)
+    prior_ratio = _slew_violation_ratio(left, right, profile, ledger)
     for control_index in ordered_indices:
         control = controls[control_index]
         if _control_mode(control.v_mps, control.omega_radps) is WheelSQPModeV2.STOP:
@@ -879,30 +923,41 @@ def _repair_slew_pair(
         upper_control = _control_with_duration(control, upper)
         candidate_left = upper_control if control_index == pair_index else left
         candidate_right = upper_control if control_index == pair_index + 1 else right
-        upper_ratio = _slew_violation_ratio(candidate_left, candidate_right, profile)
+        upper_ratio = _slew_violation_ratio(
+            candidate_left,
+            candidate_right,
+            profile,
+            ledger,
+        )
         if upper_ratio < prior_ratio and (
             fallback is None or (upper_ratio, control_index) < (fallback[0], fallback[1])
         ):
             fallback = (upper_ratio, control_index, upper_control)
-        if not _slew_passes(candidate_left, candidate_right, profile):
+        if not _slew_passes(candidate_left, candidate_right, profile, ledger):
             continue
         for _ in range(80):
+            _check_deadline(ledger)
             midpoint = 0.5 * (lower + upper)
             midpoint_control = _control_with_duration(control, midpoint)
             candidate_left = midpoint_control if control_index == pair_index else left
             candidate_right = midpoint_control if control_index == pair_index + 1 else right
-            if _slew_passes(candidate_left, candidate_right, profile):
+            if _slew_passes(candidate_left, candidate_right, profile, ledger):
                 upper = midpoint
                 upper_control = midpoint_control
             else:
                 lower = midpoint
         controls[control_index] = upper_control
+        _check_deadline(ledger)
         _audit_control(upper_control, profile)
+        _check_deadline(ledger)
         return True
     if fallback is not None:
         controls[fallback[1]] = fallback[2]
+        _check_deadline(ledger)
         _audit_control(fallback[2], profile)
+        _check_deadline(ledger)
         return True
+    _check_deadline(ledger)
     return False
 
 
@@ -911,27 +966,80 @@ def _repair_control_slew(
     profile: WheelKinematicSQPProfileV2,
     ledger: WheelSQPWorkLedgerV1,
 ) -> tuple[_Control, ...]:
+    _check_deadline(ledger)
     repaired = list(controls)
+    _check_deadline(ledger)
     for control in repaired:
+        _check_deadline(ledger)
         _audit_control(control, profile)
     maximum_passes = profile.max_segments * 16
     for _ in range(maximum_passes):
         changed = False
         for pair_index in range(len(repaired) - 1):
             _check_deadline(ledger)
-            if _slew_passes(repaired[pair_index], repaired[pair_index + 1], profile):
+            if _slew_passes(
+                repaired[pair_index],
+                repaired[pair_index + 1],
+                profile,
+                ledger,
+            ):
                 continue
-            if not _repair_slew_pair(repaired, pair_index, profile):
+            if not _repair_slew_pair(repaired, pair_index, profile, ledger):
+                _check_deadline(ledger)
                 _fail("wheel_sqp_initialization_failed")
             changed = True
         if all(
-            _slew_passes(left, right, profile)
+            _slew_passes(left, right, profile, ledger)
             for left, right in zip(repaired, repaired[1:])
         ):
-            return tuple(repaired)
+            result = tuple(repaired)
+            _check_deadline(ledger)
+            return result
         if not changed:
             break
+    _check_deadline(ledger)
     _fail("wheel_sqp_initialization_failed")
+
+
+def _schedule_segment_count(
+    points: tuple[tuple[float, float], ...],
+    modes: tuple[WheelSQPModeV2, ...],
+    request: PlanningRequestV2,
+    profile: WheelKinematicSQPProfileV2,
+    ledger: WheelSQPWorkLedgerV1,
+) -> int:
+    count = 0
+    mode_index = 0
+    current_heading = request.start_state.heading_rad
+    previous_mode: WheelSQPModeV2 | None = None
+    for left, right in zip(points, points[1:]):
+        _check_deadline(ledger)
+        if left == right:
+            continue
+        if mode_index >= len(modes):
+            _fail("wheel_sqp_numeric_contract_failed")
+        mode = modes[mode_index]
+        if mode not in (WheelSQPModeV2.FORWARD, WheelSQPModeV2.REVERSE):
+            _fail("wheel_sqp_numeric_contract_failed")
+        if previous_mode is not None and previous_mode is not mode:
+            count += 1
+        dx = right[0] - left[0]
+        dy = right[1] - left[1]
+        line_heading = atan2(dy, dx)
+        body_heading = line_heading + (pi if mode is WheelSQPModeV2.REVERSE else 0.0)
+        turn = _shortest_angle(body_heading, current_heading)
+        count += _turn_segment_count(turn, profile) + 1
+        current_heading += turn
+        previous_mode = mode
+        mode_index += 1
+    if mode_index != len(modes):
+        _fail("wheel_sqp_numeric_contract_failed")
+    final_turn = _shortest_angle(request.goal_state.heading_rad, current_heading)
+    count += _turn_segment_count(final_turn, profile)
+    if count == 0:
+        count = 1
+    _check_deadline(ledger)
+    return count
 
 
 def _schedule(
@@ -941,18 +1049,27 @@ def _schedule(
     profile: WheelKinematicSQPProfileV2,
     ledger: WheelSQPWorkLedgerV1,
 ) -> tuple[_Control, ...]:
-    translations = [
-        (left, right)
-        for left, right in zip(points, points[1:])
-        if left != right
-    ]
-    if len(translations) != len(modes):
-        _fail("wheel_sqp_numeric_contract_failed")
+    segment_count = _schedule_segment_count(
+        points,
+        modes,
+        request,
+        profile,
+        ledger,
+    )
+    _charge_memory(ledger, segment_count * _SEGMENT_BYTES)
+    _check_deadline(ledger)
+    if segment_count > profile.max_segments:
+        _fail("wheel_sqp_initialization_failed")
     controls: list[_Control] = []
+    mode_index = 0
     current_heading = request.start_state.heading_rad
     previous_mode: WheelSQPModeV2 | None = None
-    for (left, right), mode in zip(translations, modes):
+    for left, right in zip(points, points[1:]):
         _check_deadline(ledger)
+        if left == right:
+            continue
+        mode = modes[mode_index]
+        mode_index += 1
         dx = right[0] - left[0]
         dy = right[1] - left[1]
         length = hypot(dx, dy)
@@ -971,10 +1088,11 @@ def _schedule(
     if not controls:
         controls.append(_stop_control(profile))
     _check_deadline(ledger)
-    _charge_memory(ledger, len(controls) * _SEGMENT_BYTES)
-    if len(controls) > profile.max_segments:
+    if len(controls) != segment_count:
         _fail("wheel_sqp_initialization_failed")
-    return _repair_control_slew(tuple(controls), profile, ledger)
+    result = _repair_control_slew(tuple(controls), profile, ledger)
+    _check_deadline(ledger)
+    return result
 
 
 def _replay(
@@ -1011,20 +1129,62 @@ def _replay(
             )
         )
         current = end
-    return tuple(segments)
+    result = tuple(segments)
+    _check_deadline(ledger)
+    return result
 
 
-def _initial_guess_digest(
+def _integer_admission_width(value: int) -> int:
+    return max(1, value.bit_length()) + (1 if value < 0 else 0)
+
+
+def _string_admission_width(value: str) -> int:
+    # A JSON string uses at most six UTF-8 bytes per Python code point
+    # (the longest form is a control-character ``\uXXXX`` escape).
+    return 2 + 6 * len(value)
+
+
+def _initial_guess_digest_admission_bytes(
     corridor: WheelCorridorV2,
     request: PlanningRequestV2,
     profile: WheelKinematicSQPProfileV2,
     segments: tuple[_WheelSQPInitialSegmentV1, ...],
-    ledger: WheelSQPWorkLedgerV1,
-) -> str:
-    _check_deadline(ledger)
-    terrain_identity = snapshot_hash(request.terrain_snapshot)
-    _check_deadline(ledger)
-    payload = {
+) -> int:
+    amount = _DIGEST_BASE_ADMISSION_BYTES
+    amount += _string_admission_width(corridor.corridor_hash)
+    amount += _string_admission_width(corridor.source_id)
+    amount += _string_admission_width(request.request_id)
+    amount += _string_admission_width(request.platform_profile_id)
+    amount += _string_admission_width(request.accelerator_policy.value)
+    amount += _string_admission_width(profile.profile.profile_id)
+    amount += _string_admission_width(profile.profile.capability_revision)
+    amount += _string_admission_width(profile.profile.schema_version)
+    amount += _string_admission_width(profile.steering_model)
+    amount += _string_admission_width(profile.relative_energy_proxy_id)
+    amount += _integer_admission_width(request.determinism_seed)
+    amount += _integer_admission_width(request.resource_budget.max_expanded_states)
+    amount += _integer_admission_width(request.resource_budget.max_route_states)
+    amount += _integer_admission_width(request.resource_budget.max_memory_bytes)
+    for cell in corridor.cells:
+        amount += _DIGEST_CELL_ADMISSION_BYTES
+        amount += _integer_admission_width(cell.x)
+        amount += _integer_admission_width(cell.y)
+    for component_hash, crossing_count in corridor.topology_signature.entries:
+        amount += _DIGEST_TOPOLOGY_ENTRY_ADMISSION_BYTES
+        amount += _string_admission_width(component_hash)
+        amount += _integer_admission_width(crossing_count)
+    amount += len(segments) * _DIGEST_SEGMENT_ADMISSION_BYTES
+    return amount
+
+
+def _initial_guess_payload(
+    corridor: WheelCorridorV2,
+    request: PlanningRequestV2,
+    profile: WheelKinematicSQPProfileV2,
+    segments: tuple[_WheelSQPInitialSegmentV1, ...],
+    terrain_identity: str,
+) -> dict[str, object]:
+    return {
         "domain": WHEEL_SQP_INITIAL_GUESS_DIGEST_V1,
         "initializer_id": WHEEL_KINEMATIC_INITIALIZER_V2,
         "corridor": {
@@ -1048,8 +1208,37 @@ def _initial_guess_digest(
         "profile": profile,
         "segments": segments,
     }
+
+
+def _initial_guess_digest(
+    corridor: WheelCorridorV2,
+    request: PlanningRequestV2,
+    profile: WheelKinematicSQPProfileV2,
+    segments: tuple[_WheelSQPInitialSegmentV1, ...],
+    ledger: WheelSQPWorkLedgerV1,
+) -> str:
+    _check_deadline(ledger)
+    admission_bytes = _initial_guess_digest_admission_bytes(
+        corridor,
+        request,
+        profile,
+        segments,
+    )
+    _charge_memory(ledger, admission_bytes)
+    terrain_identity = snapshot_hash(request.terrain_snapshot)
+    _check_deadline(ledger)
+    payload = _initial_guess_payload(
+        corridor,
+        request,
+        profile,
+        segments,
+        terrain_identity,
+    )
+    _check_deadline(ledger)
     encoded = canonical_json_bytes(payload)
-    _charge_memory(ledger, len(encoded))
+    _check_deadline(ledger)
+    if len(encoded) > admission_bytes:
+        _fail("wheel_sqp_initialization_failed")
     digest = sha256(encoded).hexdigest()
     _check_deadline(ledger)
     return digest
@@ -1069,7 +1258,7 @@ def initialize_wheel_trajectory_v2(
     _charge_route_states(ledger, len(controls))
     segments = _replay(controls, request, profile, ledger)
     digest = _initial_guess_digest(corridor, request, profile, segments, ledger)
-    return WheelSQPInitialGuessV2(
+    result = WheelSQPInitialGuessV2(
         corridor_hash=corridor.corridor_hash,
         start_state=request.start_state,
         requested_goal=request.goal_state,
@@ -1077,3 +1266,5 @@ def initialize_wheel_trajectory_v2(
         actual_endpoint=segments[-1].end_state,
         initial_guess_hash=digest,
     )
+    _check_deadline(ledger)
+    return result
