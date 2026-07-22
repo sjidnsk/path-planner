@@ -291,8 +291,13 @@ class WheelTrajectoryL2ResultV2:
             raise TypeError("evidence must be exact WheelSQPValidationEvidenceV2 or None")
         if self.counterexample is not None and type(self.counterexample) is not WheelL2CounterexampleV2:
             raise TypeError("counterexample must be exact WheelL2CounterexampleV2 or None")
-        if self.passed is (self.counterexample is not None):
-            raise ValueError("L2 result passed/counterexample contract is inconsistent")
+        if self.passed:
+            if self.evidence is None or self.evidence.passed is not True:
+                raise ValueError("passed L2 result requires passing wheel evidence")
+            if self.counterexample is not None:
+                raise ValueError("passed L2 result must not have a counterexample")
+        elif self.counterexample is None:
+            raise ValueError("failed L2 result requires a counterexample")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -403,6 +408,8 @@ class L2ReserveModelV1:
         max_segments: int,
         max_l2_candidate_cells: int,
         max_l2_interval_records: int,
+        max_encoded_state_bound: int,
+        max_encoded_scalar_bound: int,
     ) -> float:
         values = {
             "segment_count": segment_count,
@@ -413,6 +420,8 @@ class L2ReserveModelV1:
             "max_segments": max_segments,
             "max_l2_candidate_cells": max_l2_candidate_cells,
             "max_l2_interval_records": max_l2_interval_records,
+            "max_encoded_state_bound": max_encoded_state_bound,
+            "max_encoded_scalar_bound": max_encoded_scalar_bound,
         }
         for name, value in values.items():
             _exact_nonnegative_int(value, name)
@@ -421,8 +430,8 @@ class L2ReserveModelV1:
             + 0.00025 * min(segment_count, max_segments)
             + 0.000002 * min(broadphase_cell_bound, max_l2_candidate_cells)
             + 0.000001 * min(interval_record_bound, max_l2_interval_records)
-            + 0.000002 * encoded_state_bound
-            + 0.000001 * encoded_scalar_bound
+            + 0.000002 * min(encoded_state_bound, max_encoded_state_bound)
+            + 0.000001 * min(encoded_scalar_bound, max_encoded_scalar_bound)
         )
         if not isfinite(reserve) or reserve < 0.0:
             raise ValueError("wheel_sqp_resource_budget_exceeded")
@@ -441,7 +450,12 @@ class L2ReserveModelV1:
         try:
             reserve = self.reserve_s(**reserve_kwargs)
         except (TypeError, ValueError, OverflowError):
-            return WheelSQPResourceLedgerV1(0.0, remaining, False, "wheel_sqp_resource_budget_exceeded")
+            return WheelSQPResourceLedgerV1(
+                remaining,
+                remaining,
+                False,
+                "wheel_sqp_resource_budget_exceeded",
+            )
         if reserve >= remaining:
             return WheelSQPResourceLedgerV1(
                 reserve,

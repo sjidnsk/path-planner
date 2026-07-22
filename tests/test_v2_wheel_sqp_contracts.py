@@ -13,6 +13,7 @@ from path_planner.v2.contracts import (
     ValidationLevelV2,
 )
 from path_planner.v2.serialization import canonical_json_bytes
+from path_planner.v2.runtime import PlanningDeadlineV2
 from path_planner.v2.wheel_sqp_contracts import (
     L2ReserveModelV1,
     WheelCorridorV2,
@@ -169,3 +170,118 @@ def test_wheel_sqp_contract_surface_is_opt_in_v2_only() -> None:
             WheelSQPResourceLedgerV1,
         )
     )
+
+
+def _deadline(remaining_s: float = 1.0) -> PlanningDeadlineV2:
+    return PlanningDeadlineV2(0.0, remaining_s, lambda: 0.0)
+
+
+def _l2_evidence(*, passed: bool = True) -> WheelSQPValidationEvidenceV2:
+    return WheelSQPValidationEvidenceV2(
+        validator_id="wheel_kinematic_continuous_rectangle_sweep_l2/v1",
+        level=ValidationLevelV2.L2,
+        passed=passed,
+        checks=("checked",),
+        route_hash="a" * 64,
+        candidate_hash="b" * 64,
+        request_hash=REQUEST_HASH,
+        profile_hash=PROFILE_HASH,
+        terrain_snapshot_hash=SNAPSHOT_HASH,
+        solver_contract_id="wheel_kinematic_direct_multiple_shooting_sqp/v1",
+        checked_interval_count=1,
+        checked_cell_count=1,
+        repair_applied=False,
+    )
+
+
+def _reserve_kwargs(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "segment_count": 1,
+        "broadphase_cell_bound": 2,
+        "interval_record_bound": 3,
+        "encoded_state_bound": 4,
+        "encoded_scalar_bound": 5,
+        "max_segments": 10,
+        "max_l2_candidate_cells": 20,
+        "max_l2_interval_records": 30,
+        "max_encoded_state_bound": 40,
+        "max_encoded_scalar_bound": 50,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_l2_reserve_uses_all_caller_supplied_caps_before_formula() -> None:
+    reserve = L2ReserveModelV1().reserve_s(
+        **_reserve_kwargs(
+            segment_count=99,
+            broadphase_cell_bound=98,
+            interval_record_bound=97,
+            encoded_state_bound=96,
+            encoded_scalar_bound=95,
+            max_segments=2,
+            max_l2_candidate_cells=3,
+            max_l2_interval_records=4,
+            max_encoded_state_bound=5,
+            max_encoded_scalar_bound=6,
+        )
+    )
+
+    assert reserve == (
+        0.015
+        + 0.00025 * 2
+        + 0.000002 * 3
+        + 0.000001 * 4
+        + 0.000002 * 5
+        + 0.000001 * 6
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"segment_count": -1},
+        {"max_encoded_state_bound": True},
+        {"encoded_scalar_bound": float("inf")},
+        {"encoded_state_bound": 10**400, "max_encoded_state_bound": 10**400},
+    ],
+)
+def test_l2_reserve_assess_fails_closed_for_invalid_or_overflow_bounds(overrides) -> None:
+    ledger = L2ReserveModelV1().assess(_deadline(), **_reserve_kwargs(**overrides))
+
+    assert type(ledger) is WheelSQPResourceLedgerV1
+    assert ledger.accepted is False
+    assert ledger.reserve_s == 1.0
+    assert ledger.remaining_s == 1.0
+    assert ledger.reason_code == "wheel_sqp_resource_budget_exceeded"
+
+
+def test_l2_reserve_assess_rejects_the_strict_deadline_boundary() -> None:
+    ledger = L2ReserveModelV1().assess(
+        _deadline(0.015),
+        **_reserve_kwargs(
+            segment_count=0,
+            broadphase_cell_bound=0,
+            interval_record_bound=0,
+            encoded_state_bound=0,
+            encoded_scalar_bound=0,
+        ),
+    )
+
+    assert ledger.accepted is False
+    assert ledger.reserve_s == ledger.remaining_s == 0.015
+    assert ledger.reason_code == "wheel_sqp_resource_budget_exceeded"
+
+
+def test_passed_l2_result_requires_passing_exact_wheel_evidence() -> None:
+    with pytest.raises(ValueError, match="evidence"):
+        WheelTrajectoryL2ResultV2(True, None, None)
+    with pytest.raises(ValueError, match="evidence"):
+        WheelTrajectoryL2ResultV2(True, _l2_evidence(passed=False), None)
+    with pytest.raises(ValueError, match="counterexample"):
+        WheelTrajectoryL2ResultV2(False, None, None)
+
+    result = WheelTrajectoryL2ResultV2(True, _l2_evidence(), None)
+
+    assert result.passed is True
+    assert result.evidence is not None
