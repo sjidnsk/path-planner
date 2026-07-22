@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-from math import cos, inf, isfinite, pi, sin
+from math import cos, inf, isfinite, pi, remainder, sin
 from numbers import Real
 from struct import pack as struct_pack
 from typing import Callable, NamedTuple
@@ -31,6 +31,9 @@ from path_planner.v2.wheel_sqp_contracts import (
     WheelSQPStatusV2,
     WheelSQPWorkLedgerV1,
     _WheelSQPExactSegmentV1,
+)
+from path_planner.v2.wheel_sqp_initialization import (
+    wheel_sqp_initial_guess_hash_v1,
 )
 
 
@@ -69,6 +72,13 @@ def _sign(value: float) -> float:
     return 0.0
 
 
+def _absolute_wrapped_heading_error(value: float, target: float) -> float:
+    raw_difference = value - target
+    if -pi <= raw_difference <= pi:
+        return abs(raw_difference)
+    return abs(remainder(raw_difference, 2.0 * pi))
+
+
 @dataclass(frozen=True, slots=True)
 class _WheelSQPLayoutValuesV1:
     states: tuple[PoseStateV2, ...]
@@ -84,6 +94,8 @@ class WheelSQPLayoutV1:
         count = _exact_nonnegative_int(self.segment_count, "segment_count")
         if count == 0:
             raise ValueError("segment_count must be positive")
+        if count > 48:
+            raise ValueError("segment_count must not exceed the v1 limit of 48")
         if type(self.start_state) is not PoseStateV2:
             raise TypeError("start_state must be exact PoseStateV2")
 
@@ -289,6 +301,14 @@ class WheelSQPProblemV1:
             raise ValueError("initial guess must use the exact request start value")
         if self.initial_guess.requested_goal != self.request.goal_state:
             raise ValueError("initial guess must preserve the request goal")
+        expected_initial_hash = wheel_sqp_initial_guess_hash_v1(
+            self.corridor,
+            self.request,
+            self.profile,
+            self.initial_guess.segments,
+        )
+        if self.initial_guess.initial_guess_hash != expected_initial_hash:
+            raise ValueError("initial guess hash does not match its semantic payload")
         count = len(self.initial_guess.segments)
         if count > self.profile.max_segments:
             raise ValueError("initial guess exceeds max_segments")
@@ -598,11 +618,27 @@ class WheelSQPConstraintAuditV1:
         ):
             value = getattr(self, name)
             if value is not None:
-                _finite_float(value, name)
+                normalized = _finite_float(value, name)
+                if name != "min_inequality_margin" and normalized < 0.0:
+                    raise ValueError(f"{name} must be nonnegative")
         if type(self.mode_and_slew_passed) is not bool:
             raise TypeError("mode_and_slew_passed must be exact bool")
         if self.passed and self.reason_code is not None:
             raise ValueError("passing audit must not have a reason_code")
+        if not self.passed and self.reason_code is None:
+            raise ValueError("failed audit requires a reason_code")
+        if self.passed:
+            if any(
+                getattr(self, name) is None
+                for name in (
+                    "max_abs_scaled_dynamics_residual",
+                    "min_inequality_margin",
+                    "objective_value",
+                )
+            ):
+                raise ValueError("passing audit requires all numeric metrics")
+            if not self.mode_and_slew_passed:
+                raise ValueError("passing audit requires mode and slew approval")
 
 
 def _failed_audit(
@@ -686,7 +722,14 @@ def audit_wheel_sqp_candidate_v2(
                 objective=objective_value,
             )
         terminal = problem.terminal_inequalities(copied)
-        if terminal[0] < 0.0 or terminal[1] < 0.0:
+        exact_heading_error = _absolute_wrapped_heading_error(
+            unpacked.states[-1].heading_rad,
+            problem.request.goal_state.heading_rad,
+        )
+        if (
+            terminal[0] < 0.0
+            or exact_heading_error > _HEADING_TOLERANCE_RAD
+        ):
             return _failed_audit(
                 "wheel_sqp_infeasible",
                 dynamics=maximum_dynamics,
@@ -940,7 +983,13 @@ def solve_wheel_sqp_v2(
         guard.check(initial_vector, charge_function_evaluation=False)
         if problem.request.objective_profile.risk_weight != 0.0:
             return _failure_result("wheel_sqp_objective_unsupported")
+        initial_audit = audit_wheel_sqp_candidate_v2(problem, initial_vector)
+        initial_incumbent = (
+            initial_vector.copy(order="C") if initial_audit.passed else None
+        )
+        guard.check(initial_vector, charge_function_evaluation=False)
         backend = _load_scipy_optimize_v1()
+        guard.check(initial_vector, charge_function_evaluation=False)
         if backend is None:
             return _failure_result("wheel_sqp_backend_unavailable")
         lower_bounds, upper_bounds = problem.bounds_arrays()
@@ -978,13 +1027,7 @@ def solve_wheel_sqp_v2(
             value = problem.inequalities(checked)
             if not bool(np.isfinite(value).all()):
                 raise _WheelSQPAbort("wheel_sqp_numeric_contract_failed")
-            # Semantic terminal bounds remain exact in the independent audit.
-            # SLSQP is asked for a fixed 1e-9 interior buffer so its normal
-            # feasibility residual cannot turn a boundary optimum into a
-            # one-ULP semantic violation.
-            buffered = value.copy()
-            buffered[:2] -= problem.profile.hard_constraint_tolerance
-            return buffered
+            return value
 
         def inequality_jacobian(vector: np.ndarray) -> np.ndarray:
             checked = guard.check(vector, charge_function_evaluation=False)
@@ -996,9 +1039,9 @@ def solve_wheel_sqp_v2(
         def iteration_callback(vector: np.ndarray) -> None:
             nonlocal iteration_count
             guard.check(vector, charge_function_evaluation=False)
-            iteration_count += 1
-            if iteration_count > problem.profile.max_sqp_iterations:
+            if iteration_count >= problem.profile.max_sqp_iterations:
                 raise _WheelSQPAbort("wheel_sqp_resource_budget_exceeded")
+            iteration_count += 1
 
         raw = _run_slsqp_v1(
             backend=backend,
@@ -1016,12 +1059,6 @@ def solve_wheel_sqp_v2(
         )
         raw_vector = getattr(raw, "x", None)
         checked_raw = guard.check(raw_vector, charge_function_evaluation=False)
-        raw_iterations = getattr(raw, "nit", iteration_count)
-        if type(raw_iterations) is not int or raw_iterations < 0:
-            raise _WheelSQPAbort("wheel_sqp_numeric_contract_failed")
-        if raw_iterations > problem.profile.max_sqp_iterations:
-            raise _WheelSQPAbort("wheel_sqp_resource_budget_exceeded")
-        iteration_count = raw_iterations
         audit = audit_wheel_sqp_candidate_v2(
             problem,
             checked_raw,
@@ -1029,6 +1066,33 @@ def solve_wheel_sqp_v2(
         )
         if not audit.passed:
             assert audit.reason_code is not None
+            if (
+                audit.reason_code == "wheel_sqp_infeasible"
+                and initial_incumbent is not None
+            ):
+                guard.check(initial_incumbent, charge_function_evaluation=False)
+                incumbent_audit = audit_wheel_sqp_candidate_v2(
+                    problem,
+                    initial_incumbent,
+                    function_evaluation_count=guard.function_evaluation_count,
+                )
+                if incumbent_audit.passed:
+                    incumbent = _candidate_from_audit(
+                        problem,
+                        initial_incumbent,
+                        incumbent_audit,
+                    )
+                    guard.check(
+                        initial_incumbent,
+                        charge_function_evaluation=False,
+                    )
+                    return WheelSQPOptimizationResultV2(
+                        status=WheelSQPStatusV2.FEASIBLE,
+                        candidate=incumbent,
+                        iteration_count=iteration_count,
+                        function_evaluation_count=guard.function_evaluation_count,
+                        reason_code=None,
+                    )
             return _failure_result(
                 audit.reason_code,
                 iteration_count=iteration_count,
@@ -1054,6 +1118,18 @@ def solve_wheel_sqp_v2(
     except MemoryError:
         raise
     except Exception:
+        try:
+            expired_after_exception = deadline.expired
+        except MemoryError:
+            raise
+        except Exception:
+            expired_after_exception = False
+        if expired_after_exception:
+            return _failure_result(
+                "planning_deadline_expired",
+                iteration_count=iteration_count,
+                function_evaluation_count=guard.function_evaluation_count,
+            )
         return _failure_result(
             "wheel_sqp_internal_error",
             iteration_count=iteration_count,

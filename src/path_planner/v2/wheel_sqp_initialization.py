@@ -1210,23 +1210,39 @@ def _initial_guess_payload(
     }
 
 
-def _initial_guess_digest(
+def wheel_sqp_initial_guess_hash_v1(
     corridor: WheelCorridorV2,
     request: PlanningRequestV2,
     profile: WheelKinematicSQPProfileV2,
     segments: tuple[_WheelSQPInitialSegmentV1, ...],
-    ledger: WheelSQPWorkLedgerV1,
+    *,
+    ledger: WheelSQPWorkLedgerV1 | None = None,
 ) -> str:
-    _check_deadline(ledger)
-    admission_bytes = _initial_guess_digest_admission_bytes(
-        corridor,
-        request,
-        profile,
-        segments,
-    )
-    _charge_memory(ledger, admission_bytes)
+    if type(corridor) is not WheelCorridorV2:
+        raise TypeError("corridor must be exact WheelCorridorV2")
+    if type(request) is not PlanningRequestV2:
+        raise TypeError("request must be exact PlanningRequestV2")
+    if type(profile) is not WheelKinematicSQPProfileV2:
+        raise TypeError("profile must be exact WheelKinematicSQPProfileV2")
+    if type(segments) is not tuple or not segments:
+        raise TypeError("segments must be a nonempty exact tuple")
+    if any(type(segment) is not _WheelSQPInitialSegmentV1 for segment in segments):
+        raise TypeError("segments must contain exact internal initial segments")
+    if ledger is not None and type(ledger) is not WheelSQPWorkLedgerV1:
+        raise TypeError("ledger must be exact WheelSQPWorkLedgerV1 or None")
+    admission_bytes: int | None = None
+    if ledger is not None:
+        _check_deadline(ledger)
+        admission_bytes = _initial_guess_digest_admission_bytes(
+            corridor,
+            request,
+            profile,
+            segments,
+        )
+        _charge_memory(ledger, admission_bytes)
     terrain_identity = snapshot_hash(request.terrain_snapshot)
-    _check_deadline(ledger)
+    if ledger is not None:
+        _check_deadline(ledger)
     payload = _initial_guess_payload(
         corridor,
         request,
@@ -1234,14 +1250,34 @@ def _initial_guess_digest(
         segments,
         terrain_identity,
     )
-    _check_deadline(ledger)
+    if ledger is not None:
+        _check_deadline(ledger)
     encoded = canonical_json_bytes(payload)
-    _check_deadline(ledger)
-    if len(encoded) > admission_bytes:
-        _fail("wheel_sqp_initialization_failed")
+    if ledger is not None:
+        _check_deadline(ledger)
+        assert admission_bytes is not None
+        if len(encoded) > admission_bytes:
+            _fail("wheel_sqp_initialization_failed")
     digest = sha256(encoded).hexdigest()
-    _check_deadline(ledger)
+    if ledger is not None:
+        _check_deadline(ledger)
     return digest
+
+
+def _initial_guess_digest(
+    corridor: WheelCorridorV2,
+    request: PlanningRequestV2,
+    profile: WheelKinematicSQPProfileV2,
+    segments: tuple[_WheelSQPInitialSegmentV1, ...],
+    ledger: WheelSQPWorkLedgerV1,
+) -> str:
+    return wheel_sqp_initial_guess_hash_v1(
+        corridor,
+        request,
+        profile,
+        segments,
+        ledger=ledger,
+    )
 
 
 def initialize_wheel_trajectory_v2(

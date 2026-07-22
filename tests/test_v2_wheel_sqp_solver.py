@@ -218,6 +218,14 @@ def test_layout_has_six_physical_values_per_segment_and_excludes_fixed_start() -
     assert layout.residual_scales.tolist() == [1.0, 1.0, pi, 1.0, 1.0, pi]
 
 
+def test_layout_rejects_more_than_48_segments_before_any_array_allocation() -> None:
+    start = PoseStateV2(0.0, 0.0, 0.0)
+    with pytest.raises(ValueError, match="48"):
+        WheelSQPLayoutV1(segment_count=49, start_state=start)
+    with pytest.raises(ValueError, match="48"):
+        WheelSQPLayoutV1(segment_count=10**100, start_state=start)
+
+
 def test_audit_accepts_exact_terminal_boundary_and_rejects_one_ulp_outside() -> None:
     base, _, _, _ = _problem(goal=PoseStateV2(1.25, 0.0, 0.0))
     vector = base.initial_vector
@@ -229,6 +237,48 @@ def test_audit_accepts_exact_terminal_boundary_and_rejects_one_ulp_outside() -> 
     audit = audit_wheel_sqp_candidate_v2(outside, outside.initial_vector)
     assert not audit.passed
     assert audit.reason_code == "wheel_sqp_infeasible"
+
+
+def test_heading_terminal_boundary_preserves_one_ulp_and_wrap_semantics() -> None:
+    boundary, _, _, _ = _problem(
+        controls=(
+            (
+                0.0,
+                PROFILE.profile.goal_heading_tolerance_rad,
+                1.0,
+                WheelSQPModeV2.TURN_LEFT,
+            ),
+        ),
+        goal=PoseStateV2(0.0, 0.0, 0.0),
+    )
+    assert audit_wheel_sqp_candidate_v2(boundary, boundary.initial_vector).passed
+
+    outside = boundary.initial_vector
+    outside_omega = nextafter(PROFILE.profile.goal_heading_tolerance_rad, inf)
+    replay = integrate_wheel_segment_v2(
+        boundary.request.start_state,
+        0.0,
+        outside_omega,
+        1.0,
+    )
+    outside[:3] = (replay.x_m, replay.y_m, replay.heading_rad)
+    outside[4] = outside_omega
+    audit = audit_wheel_sqp_candidate_v2(boundary, outside)
+    assert not audit.passed
+    assert audit.reason_code == "wheel_sqp_infeasible"
+
+    wrapped, _, _, _ = _problem(
+        controls=(
+            (
+                0.0,
+                PROFILE.profile.goal_heading_tolerance_rad,
+                1.0,
+                WheelSQPModeV2.TURN_LEFT,
+            ),
+        ),
+        goal=PoseStateV2(0.0, 0.0, 2.0 * pi),
+    )
+    assert audit_wheel_sqp_candidate_v2(wrapped, wrapped.initial_vector).passed
 
 
 def test_dynamics_and_objective_jacobians_match_central_difference() -> None:
@@ -284,6 +334,27 @@ def test_problem_rejects_translation_sign_flip_across_turns_without_stop() -> No
         )
 
 
+def test_problem_reseals_initial_guess_hash_before_solver_identity() -> None:
+    problem, _, _, _ = _problem()
+    arbitrary_hash = replace(
+        problem.initial_guess,
+        initial_guess_hash="f" * 64,
+    )
+    with pytest.raises(ValueError, match="initial guess hash"):
+        replace(problem, initial_guess=arbitrary_hash)
+
+    changed_segment = replace(
+        problem.initial_guess.segments[0],
+        relative_energy=problem.initial_guess.segments[0].relative_energy + 1.0,
+    )
+    stale_hash = replace(
+        problem.initial_guess,
+        segments=(changed_segment,),
+    )
+    with pytest.raises(ValueError, match="initial guess hash"):
+        replace(problem, initial_guess=stale_hash)
+
+
 def test_risk_is_rejected_before_lazy_backend_load(monkeypatch: pytest.MonkeyPatch) -> None:
     problem, deadline, ledger, _ = _problem(
         objective=ObjectiveProfileV2(risk_weight=1.0)
@@ -305,6 +376,25 @@ def test_missing_backend_is_typed_and_has_no_partial_candidate(
     monkeypatch.setattr(solver, "_load_scipy_optimize_v1", lambda: None)
     result = solve_wheel_sqp_v2(problem, deadline, ledger)
     assert result.reason_code == "wheel_sqp_backend_unavailable"
+    assert result.candidate is None
+
+
+@pytest.mark.parametrize("loader_result", ("missing", "throw"))
+def test_deadline_expiry_during_backend_load_wins_over_backend_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    loader_result: str,
+) -> None:
+    problem, deadline, ledger, clock = _problem()
+
+    def slow_loader() -> object | None:
+        clock.now = 5.0
+        if loader_result == "throw":
+            raise RuntimeError("late loader failure")
+        return None
+
+    monkeypatch.setattr(solver, "_load_scipy_optimize_v1", slow_loader)
+    result = solve_wheel_sqp_v2(problem, deadline, ledger)
+    assert result.reason_code == "planning_deadline_expired"
     assert result.candidate is None
 
 
@@ -350,6 +440,34 @@ def test_raw_success_true_cannot_bypass_independent_dynamics_audit(
 
     assert result.reason_code == "wheel_sqp_numeric_contract_failed"
     assert result.candidate is None
+
+
+def test_terminal_infeasible_raw_uses_only_the_independently_audited_incumbent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    problem, deadline, ledger, _ = _problem()
+    raw = problem.layout.pack(
+        states=(integrate_wheel_segment_v2(problem.request.start_state, 0.7, 0.0, 1.0),),
+        controls=((0.7, 0.0, 1.0),),
+    )
+    assert audit_wheel_sqp_candidate_v2(problem, raw).reason_code == "wheel_sqp_infeasible"
+    monkeypatch.setattr(solver, "_load_scipy_optimize_v1", lambda: object())
+    monkeypatch.setattr(
+        solver,
+        "_run_slsqp_v1",
+        lambda **kwargs: SimpleNamespace(x=raw, success=True, nit=1),
+    )
+    result = solve_wheel_sqp_v2(problem, deadline, ledger)
+    assert result.candidate is not None
+    incumbent_vector = problem.layout.pack(
+        tuple(segment.end_state for segment in result.candidate.segments),
+        tuple(
+            (segment.v_mps, segment.omega_radps, segment.duration_s)
+            for segment in result.candidate.segments
+        ),
+    )
+    assert audit_wheel_sqp_candidate_v2(problem, incumbent_vector).passed
+    assert np.array_equal(incumbent_vector, problem.initial_vector)
 
 
 def test_late_backend_return_is_deadline_expired_even_with_feasible_vector(
@@ -539,6 +657,67 @@ def test_raw_status_does_not_enter_solver_audit_hash(
     assert hashes[0] == hashes[1]
 
 
+@pytest.mark.parametrize("raw_nit", (-1, 0, 41, 10**100, None))
+def test_raw_iteration_fields_have_no_decision_or_telemetry_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_nit: object,
+) -> None:
+    problem, deadline, ledger, _ = _problem()
+    monkeypatch.setattr(solver, "_load_scipy_optimize_v1", lambda: object())
+    monkeypatch.setattr(
+        solver,
+        "_run_slsqp_v1",
+        lambda **kwargs: SimpleNamespace(
+            x=problem.initial_vector,
+            nit=raw_nit,
+            nfev=10**100,
+            njev=-1,
+            success=True,
+        ),
+    )
+    result = solve_wheel_sqp_v2(problem, deadline, ledger)
+    assert result.status is WheelSQPStatusV2.FEASIBLE
+    assert result.iteration_count == 0
+    assert result.candidate is not None
+
+
+def test_callback_iteration_cap_is_the_only_iteration_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    problem, deadline, ledger, _ = _problem()
+    monkeypatch.setattr(solver, "_load_scipy_optimize_v1", lambda: object())
+
+    def exhaust(**kwargs: object) -> None:
+        callback = kwargs["callback"]
+        vector = problem.initial_vector
+        for _ in range(problem.profile.max_sqp_iterations + 1):
+            callback(vector)
+
+    monkeypatch.setattr(solver, "_run_slsqp_v1", exhaust)
+    result = solve_wheel_sqp_v2(problem, deadline, ledger)
+    assert result.reason_code == "wheel_sqp_resource_budget_exceeded"
+    assert result.iteration_count == 40
+    assert result.candidate is None
+
+
+def test_backend_receives_exact_unbuffered_terminal_margins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    problem, deadline, ledger, _ = _problem(goal=PoseStateV2(1.25, 0.0, 0.0))
+    captured: list[np.ndarray] = []
+    monkeypatch.setattr(solver, "_load_scipy_optimize_v1", lambda: object())
+
+    def inspect(**kwargs: object) -> SimpleNamespace:
+        captured.append(kwargs["inequality_fn"](problem.initial_vector))
+        return SimpleNamespace(x=problem.initial_vector, success=True, nit=999)
+
+    monkeypatch.setattr(solver, "_run_slsqp_v1", inspect)
+    result = solve_wheel_sqp_v2(problem, deadline, ledger)
+    assert result.candidate is not None
+    assert captured[0][0] == 0.0
+    assert captured[0][1] > 0.0
+
+
 def test_private_solver_candidate_materializes_only_into_task2_canonical_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -572,3 +751,11 @@ def test_real_scipy_backend_returns_an_independently_audited_candidate() -> None
     assert result.status is WheelSQPStatusV2.FEASIBLE
     assert result.reason_code is None
     assert result.candidate is not None
+    vector = problem.layout.pack(
+        tuple(segment.end_state for segment in result.candidate.segments),
+        tuple(
+            (segment.v_mps, segment.omega_radps, segment.duration_s)
+            for segment in result.candidate.segments
+        ),
+    )
+    assert audit_wheel_sqp_candidate_v2(problem, vector).passed
