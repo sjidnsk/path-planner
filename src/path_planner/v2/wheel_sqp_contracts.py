@@ -314,6 +314,11 @@ class WheelSQPValidationEvidenceV2(ValidationEvidenceV2):
 
     def __post_init__(self) -> None:
         ValidationEvidenceV2.__post_init__(self)
+        _exact_id(
+            self.validator_id,
+            "validator_id",
+            WHEEL_KINEMATIC_L2_VALIDATOR_V2,
+        )
         if self.level is not ValidationLevelV2.L2:
             raise ValueError("wheel SQP validation evidence must be L2")
         for name in (

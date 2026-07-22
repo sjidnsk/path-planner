@@ -285,3 +285,8 @@ def test_passed_l2_result_requires_passing_exact_wheel_evidence() -> None:
 
     assert result.passed is True
     assert result.evidence is not None
+
+
+def test_wheel_sqp_validation_evidence_rejects_noncontract_validator() -> None:
+    with pytest.raises(ValueError, match="validator_id"):
+        replace(_l2_evidence(), validator_id="fake/v1")
