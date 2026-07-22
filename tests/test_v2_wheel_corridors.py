@@ -30,9 +30,11 @@ from path_planner.v2.wheel_corridors import (
     generate_wheel_corridors_v2,
     stable_astar_v1,
     topology_signature_v1,
+    wheel_corridor_path_hash_v1,
 )
 from path_planner.v2.wheel_sqp_contracts import (
     WHEEL_KINEMATIC_CORRIDOR_SOURCE_V2,
+    WheelSQPWorkLedgerV1,
     WheelTopologySignatureV1,
 )
 
@@ -289,7 +291,11 @@ def test_deadline_flip_during_topology_stops_before_path_hash(
         raise AssertionError("path hash ran after topology deadline")
 
     monkeypatch.setattr(wheel_corridors, "topology_signature_v1", staged_topology)
-    monkeypatch.setattr(wheel_corridors, "_path_hash", forbidden_path_hash)
+    monkeypatch.setattr(
+        wheel_corridors,
+        "wheel_corridor_path_hash_v1",
+        forbidden_path_hash,
+    )
     result = generate_wheel_corridors_v2(
         _snapshot(5, 3),
         Cell(0, 1),
@@ -306,7 +312,7 @@ def test_deadline_flip_before_path_hash_payload_returns_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clock = _StageClock("path_hash")
-    original_path_hash = wheel_corridors._path_hash
+    original_path_hash = wheel_corridors.wheel_corridor_path_hash_v1
     original_canonical_sha256 = wheel_corridors._canonical_sha256
 
     def staged_path_hash(*args: object, **kwargs: object):
@@ -318,7 +324,11 @@ def test_deadline_flip_before_path_hash_payload_returns_timeout(
             raise AssertionError("path hash payload allocated after deadline")
         return original_canonical_sha256(payload)
 
-    monkeypatch.setattr(wheel_corridors, "_path_hash", staged_path_hash)
+    monkeypatch.setattr(
+        wheel_corridors,
+        "wheel_corridor_path_hash_v1",
+        staged_path_hash,
+    )
     monkeypatch.setattr(
         wheel_corridors,
         "_canonical_sha256",
@@ -871,3 +881,194 @@ print(json.dumps([[
         outputs.append(completed.stdout.strip())
 
     assert outputs[0] == outputs[1]
+
+
+def test_shared_work_ledger_preserves_prior_charges_and_accumulates_corridor_work() -> None:
+    snapshot = _snapshot(5, 3)
+    budget = _budget()
+    deadline = _deadline()
+    ledger = WheelSQPWorkLedgerV1(budget, deadline)
+    ledger.charge_memory(7)
+    ledger.charge_route_states(1)
+
+    result = generate_wheel_corridors_v2(
+        snapshot,
+        Cell(0, 1),
+        Cell(4, 1),
+        budget,
+        deadline,
+        ledger=ledger,
+    )
+
+    assert result.reason_code == "wheel_sqp_corridors_ready"
+    assert ledger.accounted_bytes > 7
+    assert ledger.route_states > 1
+    assert ledger.expanded_states == result.expanded_states
+
+
+def test_shared_ledger_accepts_copy_equal_budget_and_rejects_value_drift_before_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(5, 3)
+    original = _budget()
+    copied = ResourceBudgetV2(
+        original.max_expanded_states,
+        original.max_route_states,
+        original.max_memory_bytes,
+    )
+    deadline = _deadline()
+    ledger = WheelSQPWorkLedgerV1(original, deadline)
+
+    accepted = generate_wheel_corridors_v2(
+        snapshot,
+        Cell(0, 1),
+        Cell(4, 1),
+        copied,
+        deadline,
+        ledger=ledger,
+    )
+    assert accepted.reason_code == "wheel_sqp_corridors_ready"
+
+    def forbidden_factory(*args: object, **kwargs: object) -> None:
+        raise AssertionError("graph work ran after shared-ledger budget mismatch")
+
+    monkeypatch.setattr(
+        WheelCorridorGraphV1,
+        "from_snapshot",
+        classmethod(forbidden_factory),
+    )
+    drifted = ResourceBudgetV2(
+        original.max_expanded_states - 1,
+        original.max_route_states,
+        original.max_memory_bytes,
+    )
+    with pytest.raises(ValueError, match="resource_budget"):
+        generate_wheel_corridors_v2(
+            snapshot,
+            Cell(0, 1),
+            Cell(4, 1),
+            drifted,
+            deadline,
+            ledger=ledger,
+        )
+
+
+def test_shared_ledger_rejects_equal_distinct_deadline_before_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(5, 3)
+    budget = _budget()
+    ledger_deadline = _deadline()
+    equal_but_distinct = _deadline()
+    assert ledger_deadline == equal_but_distinct
+    assert ledger_deadline is not equal_but_distinct
+    ledger = WheelSQPWorkLedgerV1(budget, ledger_deadline)
+
+    def forbidden_factory(*args: object, **kwargs: object) -> None:
+        raise AssertionError("graph work ran after shared-ledger deadline mismatch")
+
+    monkeypatch.setattr(
+        WheelCorridorGraphV1,
+        "from_snapshot",
+        classmethod(forbidden_factory),
+    )
+    with pytest.raises(ValueError, match="deadline"):
+        generate_wheel_corridors_v2(
+            snapshot,
+            Cell(0, 1),
+            Cell(4, 1),
+            budget,
+            equal_but_distinct,
+            ledger=ledger,
+        )
+
+
+def test_foreign_expired_ledger_cannot_impersonate_current_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(5, 3)
+    budget = _budget()
+    foreign_expired = _deadline(expired=True)
+    current_deadline = _deadline()
+    ledger = WheelSQPWorkLedgerV1(budget, foreign_expired)
+
+    def forbidden_factory(*args: object, **kwargs: object) -> None:
+        raise AssertionError("graph work ran after foreign-ledger deadline mismatch")
+
+    monkeypatch.setattr(
+        WheelCorridorGraphV1,
+        "from_snapshot",
+        classmethod(forbidden_factory),
+    )
+    with pytest.raises(ValueError, match="deadline"):
+        generate_wheel_corridors_v2(
+            snapshot,
+            Cell(0, 1),
+            Cell(4, 1),
+            budget,
+            current_deadline,
+            ledger=ledger,
+        )
+
+
+def test_expired_shared_ledger_uses_existing_timeout_result_taxonomy() -> None:
+    snapshot = _snapshot(5, 3)
+    budget = _budget(max_memory_bytes=1)
+    deadline = _deadline(expired=True)
+    ledger = WheelSQPWorkLedgerV1(budget, deadline)
+
+    result = generate_wheel_corridors_v2(
+        snapshot,
+        Cell(0, 1),
+        Cell(4, 1),
+        budget,
+        deadline,
+        ledger=ledger,
+    )
+
+    assert result.reason_code == "planning_deadline_expired"
+    assert result.corridors == ()
+    assert result.expanded_states == 0
+    assert result.terrain_snapshot_hash is None
+
+
+def test_public_corridor_helpers_reuse_one_exact_shared_ledger() -> None:
+    snapshot = _snapshot(5, 3, not_traversable={Cell(2, 0)})
+    budget = _budget()
+    deadline = _deadline()
+    ledger = WheelSQPWorkLedgerV1(budget, deadline)
+    ledger.charge_memory(11)
+    ledger.charge_route_states(1)
+
+    graph = WheelCorridorGraphV1.from_snapshot(snapshot, 30.0, ledger=ledger)
+    components = build_blocked_components_v1(graph, ledger=ledger)
+    cells = (Cell(0, 1), Cell(1, 1), Cell(2, 1), Cell(3, 1), Cell(4, 1))
+    signature = topology_signature_v1(cells, components, ledger=ledger)
+    digest = wheel_corridor_path_hash_v1(graph.snapshot_identity, cells, ledger=ledger)
+
+    assert type(signature) is WheelTopologySignatureV1
+    assert len(digest) == 64
+    assert ledger.accounted_bytes > 11
+    assert ledger.route_states == 1
+    assert ledger.expanded_states == 0
+
+
+def test_public_path_hash_authority_matches_existing_corridor_identity() -> None:
+    snapshot = _snapshot(5, 3)
+    result = generate_wheel_corridors_v2(
+        snapshot,
+        Cell(0, 1),
+        Cell(4, 1),
+        _budget(),
+        _deadline(),
+    )
+    corridor = result.corridors[0]
+
+    assert wheel_corridor_path_hash_v1(snapshot_hash(snapshot), corridor.cells) == _path_hash(
+        snapshot,
+        corridor.cells,
+    )
+    assert corridor.path_hash == wheel_corridor_path_hash_v1(
+        snapshot_hash(snapshot),
+        corridor.cells,
+    )

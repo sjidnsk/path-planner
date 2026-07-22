@@ -10,6 +10,7 @@ from path_planner.v2.contracts import (
     PlatformKindV2,
     PoseStateV2,
     PrimitiveKindV2,
+    ResourceBudgetV2,
     RoutePrimitiveV2,
     SearchTelemetryV2,
     TypedRouteV2,
@@ -28,6 +29,9 @@ WHEEL_KINEMATIC_INITIALIZER_V2 = "wheel_forward_reverse_turn_dp_initializer/v1"
 WHEEL_KINEMATIC_L2_RESERVE_MODEL_V2 = "wheel_l2_reserve_model/v1"
 WHEEL_KINEMATIC_CONTROL_SLEW_V2 = "wheel_segment_center_control_slew/v1"
 WHEEL_KINEMATIC_OBSERVATION_SOURCE_V2 = "wheel_kinematic_derived_samples/v1"
+WHEEL_SQP_WORK_LEDGER_V1 = "wheel_sqp_shared_work_ledger/v1"
+
+_WHEEL_SQP_HARD_MEMORY_LIMIT_BYTES_V1 = 64 * 1024 * 1024
 
 
 class WheelSQPModeV2(str, Enum):
@@ -46,6 +50,102 @@ class WheelSQPStatusV2(str, Enum):
     RESOURCE_BUDGET_EXCEEDED = "resource_budget_exceeded"
     DEADLINE_EXPIRED = "deadline_expired"
     L2_REJECTED = "l2_rejected"
+
+
+class WheelSQPWorkLimitError(RuntimeError):
+    __slots__ = ("reason_code",)
+
+    def __init__(self, reason_code: str) -> None:
+        if type(reason_code) is not str:
+            raise TypeError("reason_code must be exact str")
+        if reason_code not in (
+            "planning_deadline_expired",
+            "wheel_sqp_corridor_budget_exceeded",
+            "wheel_sqp_resource_budget_exceeded",
+        ):
+            raise ValueError("reason_code must be a shared work-limit reason")
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+class WheelSQPWorkLedgerV1:
+    __slots__ = (
+        "_accounted_bytes",
+        "_deadline",
+        "_expanded_states",
+        "_resource_budget",
+        "_route_states",
+    )
+
+    authority_id = WHEEL_SQP_WORK_LEDGER_V1
+
+    def __init__(
+        self,
+        resource_budget: ResourceBudgetV2,
+        deadline: PlanningDeadlineV2,
+    ) -> None:
+        if type(resource_budget) is not ResourceBudgetV2:
+            raise TypeError("resource_budget must be exact ResourceBudgetV2")
+        if type(deadline) is not PlanningDeadlineV2:
+            raise TypeError("deadline must be exact PlanningDeadlineV2")
+        self._resource_budget = resource_budget
+        self._deadline = deadline
+        self._expanded_states = 0
+        self._accounted_bytes = 0
+        self._route_states = 0
+
+    @property
+    def resource_budget(self) -> ResourceBudgetV2:
+        return self._resource_budget
+
+    @property
+    def deadline(self) -> PlanningDeadlineV2:
+        return self._deadline
+
+    @property
+    def expanded_states(self) -> int:
+        return self._expanded_states
+
+    @property
+    def accounted_bytes(self) -> int:
+        return self._accounted_bytes
+
+    @property
+    def route_states(self) -> int:
+        return self._route_states
+
+    @property
+    def effective_memory_limit_bytes(self) -> int:
+        requested = self.resource_budget.max_memory_bytes
+        if requested == 0:
+            return _WHEEL_SQP_HARD_MEMORY_LIMIT_BYTES_V1
+        return min(requested, _WHEEL_SQP_HARD_MEMORY_LIMIT_BYTES_V1)
+
+    def check_deadline(self) -> None:
+        if self.deadline.expired:
+            raise WheelSQPWorkLimitError("planning_deadline_expired")
+
+    def charge_expansion(self) -> None:
+        self.check_deadline()
+        if self.expanded_states >= self.resource_budget.max_expanded_states:
+            raise WheelSQPWorkLimitError("wheel_sqp_corridor_budget_exceeded")
+        self._expanded_states += 1
+
+    def charge_memory(self, amount: int) -> None:
+        self.check_deadline()
+        _exact_nonnegative_int(amount, "amount")
+        attempted = self.accounted_bytes + amount
+        if attempted > self.effective_memory_limit_bytes:
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        self._accounted_bytes = attempted
+
+    def charge_route_states(self, amount: int) -> None:
+        self.check_deadline()
+        _exact_nonnegative_int(amount, "amount")
+        attempted = self.route_states + amount
+        if attempted > self.resource_budget.max_route_states:
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        self._route_states = attempted
 
 
 def _exact_hash(value: object, name: str) -> str:

@@ -7,6 +7,7 @@ from path_planner.v2.contracts import (
     PlatformKindV2,
     PoseStateV2,
     PrimitiveKindV2,
+    ResourceBudgetV2,
     SearchTelemetryV2,
     TypedRouteV2,
     ValidationEvidenceV2,
@@ -28,6 +29,8 @@ from path_planner.v2.wheel_sqp_contracts import (
     WheelSQPSearchTelemetryV2,
     WheelSQPStatusV2,
     WheelSQPValidationEvidenceV2,
+    WheelSQPWorkLedgerV1,
+    WheelSQPWorkLimitError,
     WheelTrajectoryL2ResultV2,
 )
 from path_planner.v2.wheel_sqp_serialization import (
@@ -297,3 +300,82 @@ def test_passed_l2_result_requires_passing_exact_wheel_evidence() -> None:
 def test_wheel_sqp_validation_evidence_rejects_noncontract_validator() -> None:
     with pytest.raises(ValueError, match="validator_id"):
         replace(_l2_evidence(), validator_id="fake/v1")
+
+
+def test_shared_work_ledger_exposes_read_only_cumulative_counters() -> None:
+    budget = ResourceBudgetV2(
+        max_expanded_states=3,
+        max_route_states=4,
+        max_memory_bytes=128,
+    )
+    deadline = _deadline()
+    ledger = WheelSQPWorkLedgerV1(budget, deadline)
+
+    ledger.charge_expansion()
+    ledger.charge_memory(17)
+    ledger.charge_route_states(2)
+
+    assert ledger.resource_budget is budget
+    assert ledger.deadline is deadline
+    assert ledger.expanded_states == 1
+    assert ledger.accounted_bytes == 17
+    assert ledger.route_states == 2
+    with pytest.raises(AttributeError):
+        ledger.expanded_states = 0
+    with pytest.raises(AttributeError):
+        ledger.accounted_bytes = 0
+    with pytest.raises(AttributeError):
+        ledger.route_states = 0
+
+
+@pytest.mark.parametrize(
+    ("charge", "reason"),
+    [
+        (lambda ledger: ledger.charge_expansion(), "planning_deadline_expired"),
+        (lambda ledger: ledger.charge_memory(1), "planning_deadline_expired"),
+        (lambda ledger: ledger.charge_route_states(1), "planning_deadline_expired"),
+    ],
+)
+def test_work_ledger_deadline_precedes_every_resource_limit(charge, reason) -> None:
+    budget = ResourceBudgetV2(
+        max_expanded_states=0,
+        max_route_states=0,
+        max_memory_bytes=1,
+    )
+    expired = PlanningDeadlineV2(0.0, 1.0, lambda: 1.0)
+    ledger = WheelSQPWorkLedgerV1(budget, expired)
+
+    with pytest.raises(WheelSQPWorkLimitError) as caught:
+        charge(ledger)
+
+    assert caught.value.reason_code == reason
+    assert ledger.expanded_states == 0
+    assert ledger.accounted_bytes == 0
+    assert ledger.route_states == 0
+
+
+@pytest.mark.parametrize(
+    ("ledger", "charge", "reason"),
+    [
+        (
+            WheelSQPWorkLedgerV1(ResourceBudgetV2(0, 1, 1), _deadline()),
+            lambda item: item.charge_expansion(),
+            "wheel_sqp_corridor_budget_exceeded",
+        ),
+        (
+            WheelSQPWorkLedgerV1(ResourceBudgetV2(1, 1, 1), _deadline()),
+            lambda item: item.charge_memory(2),
+            "wheel_sqp_resource_budget_exceeded",
+        ),
+        (
+            WheelSQPWorkLedgerV1(ResourceBudgetV2(1, 0, 1), _deadline()),
+            lambda item: item.charge_route_states(1),
+            "wheel_sqp_resource_budget_exceeded",
+        ),
+    ],
+)
+def test_work_ledger_raises_typed_stable_limit_reasons(ledger, charge, reason) -> None:
+    with pytest.raises(WheelSQPWorkLimitError) as caught:
+        charge(ledger)
+
+    assert caught.value.reason_code == reason
