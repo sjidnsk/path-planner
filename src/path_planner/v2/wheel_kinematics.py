@@ -69,6 +69,25 @@ def integrate_wheel_segment_v2(
     )
 
 
+def wheel_pose_at_elapsed_v2(
+    start: PoseStateV2,
+    v_mps: float,
+    omega_radps: float,
+    duration_s: float,
+    elapsed_s: float,
+) -> PoseStateV2:
+    start = _exact_start(start)
+    v = _finite(v_mps, "v_mps")
+    omega = _finite(omega_radps, "omega_radps")
+    duration = _positive(duration_s, "duration_s")
+    elapsed = _finite(elapsed_s, "elapsed_s")
+    if elapsed < 0.0 or elapsed > duration:
+        raise ValueError("elapsed_s must be within the closed segment interval")
+    if elapsed == 0.0:
+        return start
+    return integrate_wheel_segment_v2(start, v, omega, elapsed)
+
+
 def wheel_segment_jacobian_v2(
     start: PoseStateV2,
     v_mps: float,

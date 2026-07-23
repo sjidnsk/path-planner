@@ -319,6 +319,45 @@ def test_resource_admission_atomically_charges_memory_and_route_states() -> None
     assert ledger.route_states == before[1] + estimate.encoded_state_bound
 
 
+def test_latest_attempt_receipt_is_exactly_bound_and_validation_delta_is_idempotent() -> None:
+    problem, deadline, ledger, _ = _problem(_snapshot())
+    estimate = estimate_wheel_sqp_attempt_resources_v2(problem, deadline, ledger)
+
+    assert ledger.latest_attempt_estimate(problem.request, problem.profile) is estimate
+    with pytest.raises(ValueError, match="identity"):
+        ledger.latest_attempt_estimate(replace(problem.request, request_id="other"), problem.profile)
+
+    before = (ledger.accounted_bytes, ledger.route_states)
+    candidate_hash = "a" * 64
+    ledger.admit_validation_delta(
+        estimate,
+        candidate_hash,
+        memory_bytes=64,
+        route_states=2,
+    )
+    first = (ledger.accounted_bytes, ledger.route_states)
+    assert first == (before[0] + 64, before[1] + 2)
+
+    ledger.admit_validation_delta(
+        estimate,
+        candidate_hash,
+        memory_bytes=64,
+        route_states=2,
+    )
+    assert (ledger.accounted_bytes, ledger.route_states) == first
+
+    ledger.admit_validation_delta(
+        estimate,
+        candidate_hash,
+        memory_bytes=96,
+        route_states=3,
+    )
+    assert (ledger.accounted_bytes, ledger.route_states) == (
+        before[0] + 96,
+        before[1] + 3,
+    )
+
+
 def test_strict_reserve_rejects_before_backend_load(monkeypatch: pytest.MonkeyPatch) -> None:
     problem, deadline, ledger, clock = _problem(_snapshot(), deadline_end=1.0)
     clock.now = nextafter(1.0, 0.0)

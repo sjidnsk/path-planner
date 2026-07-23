@@ -8,6 +8,7 @@ from numbers import Real
 from path_planner.core import Cell
 from path_planner.v2.contracts import (
     PlatformKindV2,
+    PlanningRequestV2,
     PoseStateV2,
     PrimitiveKindV2,
     ResourceBudgetV2,
@@ -18,6 +19,7 @@ from path_planner.v2.contracts import (
     ValidationLevelV2,
 )
 from path_planner.v2.runtime import PlanningDeadlineV2
+from path_planner.v2.profiles import WheelKinematicSQPProfileV2
 
 
 WHEEL_KINEMATIC_SEGMENT_SCHEMA_V2 = "wheel_kinematic_segment/v1"
@@ -35,6 +37,7 @@ WHEEL_SQP_ATTEMPT_RESOURCE_ESTIMATE_V1 = "wheel_sqp_attempt_resource_estimate/v1
 _WHEEL_SQP_HARD_MEMORY_LIMIT_BYTES_V1 = 64 * 1024 * 1024
 _WHEEL_SQP_U63_MAX_V1 = (1 << 63) - 1
 _WHEEL_SQP_RESOURCE_ESTIMATE_AUTHORITY = object()
+_WHEEL_SQP_L2_RESULT_AUTHORITY = object()
 
 
 class WheelSQPModeV2(str, Enum):
@@ -76,8 +79,14 @@ class WheelSQPWorkLedgerV1:
         "_accounted_bytes",
         "_deadline",
         "_expanded_states",
+        "_latest_attempt_estimate",
+        "_latest_attempt_profile",
+        "_latest_attempt_request",
         "_resource_budget",
         "_route_states",
+        "_validation_candidate_hash",
+        "_validation_delta_memory_bytes",
+        "_validation_delta_route_states",
     )
 
     authority_id = WHEEL_SQP_WORK_LEDGER_V1
@@ -96,6 +105,12 @@ class WheelSQPWorkLedgerV1:
         self._expanded_states = 0
         self._accounted_bytes = 0
         self._route_states = 0
+        self._latest_attempt_estimate = None
+        self._latest_attempt_request = None
+        self._latest_attempt_profile = None
+        self._validation_candidate_hash = None
+        self._validation_delta_memory_bytes = 0
+        self._validation_delta_route_states = 0
 
     @property
     def resource_budget(self) -> ResourceBudgetV2:
@@ -182,6 +197,100 @@ class WheelSQPWorkLedgerV1:
         self.check_deadline()
         self._accounted_bytes = prospective_memory
         self._route_states = prospective_states
+
+    def _bind_latest_attempt_estimate(
+        self,
+        estimate: WheelSQPResourceEstimateV1,
+        request: object,
+        profile: object,
+    ) -> None:
+        from path_planner.v2.contracts import PlanningRequestV2
+        from path_planner.v2.profiles import WheelKinematicSQPProfileV2
+
+        self.check_deadline()
+        if type(estimate) is not WheelSQPResourceEstimateV1:
+            raise TypeError("estimate must be exact WheelSQPResourceEstimateV1")
+        if type(request) is not PlanningRequestV2:
+            raise TypeError("request must be exact PlanningRequestV2")
+        if type(profile) is not WheelKinematicSQPProfileV2:
+            raise TypeError("profile must be exact WheelKinematicSQPProfileV2")
+        self._latest_attempt_estimate = estimate
+        self._latest_attempt_request = request
+        self._latest_attempt_profile = profile
+        self._validation_candidate_hash = None
+        self._validation_delta_memory_bytes = 0
+        self._validation_delta_route_states = 0
+
+    def latest_attempt_estimate(
+        self,
+        request: object,
+        profile: object,
+    ) -> WheelSQPResourceEstimateV1:
+        from path_planner.v2.contracts import PlanningRequestV2
+        from path_planner.v2.profiles import WheelKinematicSQPProfileV2
+
+        self.check_deadline()
+        if type(request) is not PlanningRequestV2:
+            raise TypeError("request must be exact PlanningRequestV2")
+        if type(profile) is not WheelKinematicSQPProfileV2:
+            raise TypeError("profile must be exact WheelKinematicSQPProfileV2")
+        if (
+            self._latest_attempt_estimate is None
+            or self._latest_attempt_request is not request
+            or self._latest_attempt_profile is not profile
+        ):
+            raise ValueError("wheel SQP latest attempt identity mismatch")
+        return self._latest_attempt_estimate
+
+    def admit_validation_delta(
+        self,
+        estimate: WheelSQPResourceEstimateV1,
+        candidate_hash: str,
+        *,
+        memory_bytes: int,
+        route_states: int,
+    ) -> None:
+        self.check_deadline()
+        if type(estimate) is not WheelSQPResourceEstimateV1:
+            raise TypeError("estimate must be exact WheelSQPResourceEstimateV1")
+        _exact_hash(candidate_hash, "candidate_hash")
+        desired_memory = _exact_nonnegative_int(memory_bytes, "memory_bytes")
+        desired_states = _exact_nonnegative_int(route_states, "route_states")
+        if estimate is not self._latest_attempt_estimate:
+            raise ValueError("wheel SQP validation attempt identity mismatch")
+        if (
+            self._validation_candidate_hash is not None
+            and self._validation_candidate_hash != candidate_hash
+        ):
+            raise ValueError("wheel SQP validation candidate identity mismatch")
+        memory_delta = max(0, desired_memory - self._validation_delta_memory_bytes)
+        state_delta = max(0, desired_states - self._validation_delta_route_states)
+        if memory_delta > _WHEEL_SQP_U63_MAX_V1 or state_delta > _WHEEL_SQP_U63_MAX_V1:
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        if (
+            self.accounted_bytes > _WHEEL_SQP_U63_MAX_V1 - memory_delta
+            or self.route_states > _WHEEL_SQP_U63_MAX_V1 - state_delta
+        ):
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        prospective_memory = self.accounted_bytes + memory_delta
+        prospective_states = self.route_states + state_delta
+        if (
+            prospective_memory > self.effective_memory_limit_bytes
+            or prospective_states > self.resource_budget.max_route_states
+        ):
+            raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+        self.check_deadline()
+        self._accounted_bytes = prospective_memory
+        self._route_states = prospective_states
+        self._validation_candidate_hash = candidate_hash
+        self._validation_delta_memory_bytes = max(
+            self._validation_delta_memory_bytes,
+            desired_memory,
+        )
+        self._validation_delta_route_states = max(
+            self._validation_delta_route_states,
+            desired_states,
+        )
 
 
 def _exact_hash(value: object, name: str) -> str:
@@ -574,41 +683,184 @@ class WheelSQPOptimizationResultV2:
 @dataclass(frozen=True, slots=True)
 class WheelL2CounterexampleV2:
     segment_index: int
-    interval_start_s: float
-    interval_end_s: float
-    reason_code: str
-    cell: Cell | None = None
+    candidate_segment_hash: str
+    time_fraction_lo: float
+    time_fraction_mid: float
+    time_fraction_hi: float
+    cell: Cell
+    terrain_reason: str
+    snapshot_hash: str
+    candidate_hash: str
+    repairable: bool
 
     def __post_init__(self) -> None:
         _exact_nonnegative_int(self.segment_index, "segment_index")
-        start = _exact_finite_float(self.interval_start_s, "interval_start_s", nonnegative=True)
-        end = _exact_finite_float(self.interval_end_s, "interval_end_s", nonnegative=True)
-        if end < start:
-            raise ValueError("interval_end_s must be at least interval_start_s")
-        _exact_id(self.reason_code, "reason_code")
-        if self.cell is not None and type(self.cell) is not Cell:
-            raise TypeError("cell must be exact Cell or None")
+        _exact_hash(self.candidate_segment_hash, "candidate_segment_hash")
+        fractions = (
+            _exact_finite_float(self.time_fraction_lo, "time_fraction_lo", nonnegative=True),
+            _exact_finite_float(self.time_fraction_mid, "time_fraction_mid", nonnegative=True),
+            _exact_finite_float(self.time_fraction_hi, "time_fraction_hi", nonnegative=True),
+        )
+        if not fractions[0] <= fractions[1] <= fractions[2] <= 1.0:
+            raise ValueError("time fractions must be ordered within [0, 1]")
+        scale = 1 << 24
+        if any(not (fraction * scale).is_integer() for fraction in fractions):
+            raise ValueError("time fractions must use the depth-24 dyadic grid")
+        _exact_cell(self.cell, "cell")
+        if self.terrain_reason not in (
+            "terrain_out_of_bounds",
+            "terrain_unknown",
+            "terrain_hard_obstacle",
+            "terrain_not_traversable",
+            "terrain_slope_exceeded",
+        ):
+            raise ValueError("terrain_reason must be a stable terrain safety reason")
+        _exact_hash(self.snapshot_hash, "snapshot_hash")
+        _exact_hash(self.candidate_hash, "candidate_hash")
+        _exact_bool(self.repairable, "repairable")
+        if self.terrain_reason == "terrain_out_of_bounds" and self.repairable:
+            raise ValueError("out-of-bounds counterexamples are not repairable")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class WheelTrajectoryL2ResultV2:
     passed: bool
+    reason_code: str | None
+    route: WheelKinematicRouteV2 | None
     evidence: WheelSQPValidationEvidenceV2 | None
     counterexample: WheelL2CounterexampleV2 | None
+    actual_start: PoseStateV2 | None
+    actual_goal: PoseStateV2 | None
+    goal_position_error_m: float | None
+    goal_heading_error_rad: float | None
+    checked_cell_count: int
+    checked_interval_count: int
+    candidate_hash: str | None
+    request_hash: str | None
+    profile_hash: str | None
+    terrain_snapshot_hash: str | None
+    capability_revision: str | None
+    solver_contract_id: str | None
+    canonicalization_id: str | None
+    control_slew_id: str | None
+    observation_source_id: str | None
+    validator_contract_id: str | None
+    _request: PlanningRequestV2
+    _profile: WheelKinematicSQPProfileV2
+    _deadline: PlanningDeadlineV2
+    _input_bytes_hash: str
+    _promotion_authority: object
+
+    def __init__(self, *, _authority: object, **values: object) -> None:
+        if _authority is not _WHEEL_SQP_L2_RESULT_AUTHORITY:
+            raise TypeError("WheelTrajectoryL2ResultV2 is validator-only")
+        public_fields = (
+            "passed",
+            "reason_code",
+            "route",
+            "evidence",
+            "counterexample",
+            "actual_start",
+            "actual_goal",
+            "goal_position_error_m",
+            "goal_heading_error_rad",
+            "checked_cell_count",
+            "checked_interval_count",
+            "candidate_hash",
+            "request_hash",
+            "profile_hash",
+            "terrain_snapshot_hash",
+            "capability_revision",
+            "solver_contract_id",
+            "canonicalization_id",
+            "control_slew_id",
+            "observation_source_id",
+            "validator_contract_id",
+        )
+        private_fields = ("request", "profile", "deadline", "input_bytes_hash")
+        if set(values) != set(public_fields) | set(private_fields):
+            raise TypeError("L2 result fields must match the frozen receipt schema")
+        for name in public_fields:
+            object.__setattr__(self, name, values[name])
+        object.__setattr__(self, "_request", values["request"])
+        object.__setattr__(self, "_profile", values["profile"])
+        object.__setattr__(self, "_deadline", values["deadline"])
+        object.__setattr__(self, "_input_bytes_hash", values["input_bytes_hash"])
+        object.__setattr__(self, "_promotion_authority", _WHEEL_SQP_L2_RESULT_AUTHORITY)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         _exact_bool(self.passed, "passed")
-        if self.evidence is not None and type(self.evidence) is not WheelSQPValidationEvidenceV2:
-            raise TypeError("evidence must be exact WheelSQPValidationEvidenceV2 or None")
+        if self.reason_code is not None:
+            _exact_id(self.reason_code, "reason_code")
+        if self.route is not None or self.evidence is not None:
+            raise ValueError("pre-promotion L2 receipt cannot carry route or evidence")
         if self.counterexample is not None and type(self.counterexample) is not WheelL2CounterexampleV2:
             raise TypeError("counterexample must be exact WheelL2CounterexampleV2 or None")
+        for name in ("actual_start", "actual_goal"):
+            value = getattr(self, name)
+            if value is not None and type(value) is not PoseStateV2:
+                raise TypeError(f"{name} must be exact PoseStateV2 or None")
+        for name in ("goal_position_error_m", "goal_heading_error_rad"):
+            value = getattr(self, name)
+            if value is not None:
+                _exact_finite_float(value, name, nonnegative=True)
+        _exact_nonnegative_int(self.checked_cell_count, "checked_cell_count")
+        _exact_nonnegative_int(self.checked_interval_count, "checked_interval_count")
+        for name in (
+            "candidate_hash",
+            "request_hash",
+            "profile_hash",
+            "terrain_snapshot_hash",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _exact_hash(value, name)
+        if type(self._request) is not PlanningRequestV2:
+            raise TypeError("promotion request must be exact PlanningRequestV2")
+        if type(self._profile) is not WheelKinematicSQPProfileV2:
+            raise TypeError("promotion profile must be exact WheelKinematicSQPProfileV2")
+        if type(self._deadline) is not PlanningDeadlineV2:
+            raise TypeError("promotion deadline must be exact PlanningDeadlineV2")
+        _exact_hash(self._input_bytes_hash, "input_bytes_hash")
+        if self._promotion_authority is not _WHEEL_SQP_L2_RESULT_AUTHORITY:
+            raise TypeError("invalid L2 promotion authority")
         if self.passed:
-            if self.evidence is None or self.evidence.passed is not True:
-                raise ValueError("passed L2 result requires passing wheel evidence")
-            if self.counterexample is not None:
-                raise ValueError("passed L2 result must not have a counterexample")
-        elif self.counterexample is None:
-            raise ValueError("failed L2 result requires a counterexample")
+            if self.reason_code is not None or self.counterexample is not None:
+                raise ValueError("passed receipt cannot carry failure state")
+            required = (
+                self.actual_start,
+                self.actual_goal,
+                self.goal_position_error_m,
+                self.goal_heading_error_rad,
+                self.candidate_hash,
+                self.request_hash,
+                self.profile_hash,
+                self.terrain_snapshot_hash,
+                self.capability_revision,
+                self.solver_contract_id,
+                self.canonicalization_id,
+                self.control_slew_id,
+                self.observation_source_id,
+                self.validator_contract_id,
+            )
+            if any(value is None for value in required):
+                raise ValueError("passed receipt requires all terminal and identity fields")
+            _exact_id(self.capability_revision, "capability_revision", "wheel_kinematic_corridor_sqp/v1")
+            _exact_id(self.solver_contract_id, "solver_contract_id", WHEEL_KINEMATIC_SOLVER_CONTRACT_V2)
+            _exact_id(self.canonicalization_id, "canonicalization_id", WHEEL_KINEMATIC_CANONICALIZATION_V2)
+            _exact_id(self.control_slew_id, "control_slew_id", WHEEL_KINEMATIC_CONTROL_SLEW_V2)
+            _exact_id(self.observation_source_id, "observation_source_id", WHEEL_KINEMATIC_OBSERVATION_SOURCE_V2)
+            _exact_id(self.validator_contract_id, "validator_contract_id", WHEEL_KINEMATIC_L2_VALIDATOR_V2)
+        elif self.reason_code is None:
+            raise ValueError("failed receipt requires a reason_code")
+
+
+def _make_wheel_trajectory_l2_result_v2(**values: object) -> WheelTrajectoryL2ResultV2:
+    return WheelTrajectoryL2ResultV2(
+        _authority=_WHEEL_SQP_L2_RESULT_AUTHORITY,
+        **values,
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -648,6 +900,24 @@ class WheelSQPValidationEvidenceV2(ValidationEvidenceV2):
         _exact_nonnegative_int(self.checked_interval_count, "checked_interval_count")
         _exact_nonnegative_int(self.checked_cell_count, "checked_cell_count")
         _exact_bool(self.repair_applied, "repair_applied")
+
+
+@dataclass(frozen=True, slots=True)
+class WheelSQPPromotionV2:
+    route: WheelKinematicRouteV2
+    evidence: WheelSQPValidationEvidenceV2
+
+    def __post_init__(self) -> None:
+        if type(self.route) is not WheelKinematicRouteV2:
+            raise TypeError("route must be exact WheelKinematicRouteV2")
+        if type(self.evidence) is not WheelSQPValidationEvidenceV2:
+            raise TypeError("evidence must be exact WheelSQPValidationEvidenceV2")
+        if self.evidence.passed is not True:
+            raise ValueError("promotion evidence must pass")
+        if self.route.route_hash != self.evidence.route_hash:
+            raise ValueError("promotion route and evidence hashes must match")
+        if self.route.source_candidate_hash != self.evidence.candidate_hash:
+            raise ValueError("promotion candidate hashes must match")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

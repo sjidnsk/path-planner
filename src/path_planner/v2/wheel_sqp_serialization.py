@@ -80,7 +80,23 @@ _POSE_KEYS = frozenset({"heading_rad", "x_m", "y_m"})
 
 
 class WheelSQPCodecError(ValueError):
-    pass
+    __slots__ = ("reason_code",)
+
+    def __init__(
+        self,
+        message: str,
+        reason_code: str = "wheel_sqp_numeric_contract_failed",
+    ) -> None:
+        if type(message) is not str:
+            raise TypeError("message must be exact str")
+        if reason_code not in (
+            "wheel_sqp_numeric_contract_failed",
+            "wheel_sqp_identity_mismatch",
+            "wheel_sqp_candidate_l2_rejected",
+        ):
+            raise ValueError("reason_code must be a stable wheel SQP codec reason")
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def _exact_hash(value: object, name: str) -> str:
@@ -352,7 +368,10 @@ def wheel_route_hash_v2(route: WheelKinematicRouteV2) -> str:
     return _hash_without(route, "route_hash")
 
 
-def _request_hash_v2(request: PlanningRequestV2, terrain_snapshot_hash: str) -> str:
+def wheel_sqp_request_hash_v2(
+    request: PlanningRequestV2,
+    terrain_snapshot_hash: str,
+) -> str:
     payload = {
         "accelerator_policy": request.accelerator_policy,
         "determinism_seed": request.determinism_seed,
@@ -368,7 +387,7 @@ def _request_hash_v2(request: PlanningRequestV2, terrain_snapshot_hash: str) -> 
     return sha256(canonical_json_bytes(payload)).hexdigest()
 
 
-def _profile_hash_v2(profile: WheelKinematicSQPProfileV2) -> str:
+def wheel_sqp_profile_hash_v2(profile: WheelKinematicSQPProfileV2) -> str:
     return sha256(canonical_json_bytes(profile)).hexdigest()
 
 
@@ -491,8 +510,8 @@ def materialize_canonical_wheel_candidate_v2(
         total_relative_energy=energy,
         total_duration_s=duration,
         total_cost=total,
-        request_hash=_request_hash_v2(request, snapshot_hash),
-        profile_hash=_profile_hash_v2(profile),
+        request_hash=wheel_sqp_request_hash_v2(request, snapshot_hash),
+        profile_hash=wheel_sqp_profile_hash_v2(profile),
         terrain_snapshot_hash=snapshot_hash,
         capability_revision=_CAPABILITY_REVISION,
         solver_contract_id=WHEEL_KINEMATIC_SOLVER_CONTRACT_V2,
@@ -546,7 +565,10 @@ def _validate_private_segment(
         )
     )
     if replay != segment.end_state:
-        raise ValueError("segment endpoint does not match analytic replay")
+        raise WheelSQPCodecError(
+            "segment endpoint does not match analytic replay",
+            "wheel_sqp_candidate_l2_rejected",
+        )
     expected = _segment_from_values(
         start=segment.start_state,
         end=replay,
@@ -557,9 +579,15 @@ def _validate_private_segment(
     )
     for name in ("mode", "distance_m", "relative_energy", "samples"):
         if getattr(segment, name) != getattr(expected, name):
-            raise ValueError(f"segment {name} does not match derived value")
+            raise WheelSQPCodecError(
+                f"segment {name} does not match derived value",
+                "wheel_sqp_candidate_l2_rejected",
+            )
     if wheel_segment_hash_v2(segment) != segment.segment_hash:
-        raise ValueError("segment_hash does not match segment payload")
+        raise WheelSQPCodecError(
+            "segment_hash does not match segment payload",
+            "wheel_sqp_identity_mismatch",
+        )
 
 
 def _validate_candidate(candidate: CanonicalWheelCandidateV1) -> None:
@@ -586,9 +614,15 @@ def _validate_candidate(candidate: CanonicalWheelCandidateV1) -> None:
     }
     for name, expected in expected_totals.items():
         if getattr(candidate, name) != expected:
-            raise ValueError(f"{name} does not match canonical segment total")
+            raise WheelSQPCodecError(
+                f"{name} does not match canonical segment total",
+                "wheel_sqp_identity_mismatch",
+            )
     if candidate.candidate_hash != wheel_candidate_hash_v2(candidate):
-        raise ValueError("candidate_hash does not match candidate payload")
+        raise WheelSQPCodecError(
+            "candidate_hash does not match candidate payload",
+            "wheel_sqp_identity_mismatch",
+        )
 
 
 def _validate_public_segment(
@@ -662,6 +696,8 @@ def encode_wheel_candidate_v2(candidate: CanonicalWheelCandidateV1) -> bytes:
     try:
         _validate_candidate(candidate)
         return canonical_json_bytes(candidate)
+    except WheelSQPCodecError:
+        raise
     except (TypeError, ValueError, OverflowError) as exc:
         raise WheelSQPCodecError(str(exc)) from exc
 
@@ -730,6 +766,18 @@ def _json_str(value: object, name: str) -> str:
     return value
 
 
+def _json_hash(value: object, name: str) -> str:
+    digest = _json_str(value, name)
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise WheelSQPCodecError(
+            f"{name} identity is not a lowercase SHA-256 digest",
+            "wheel_sqp_identity_mismatch",
+        )
+    return digest
+
+
 def _decode_pose(value: object, name: str) -> PoseStateV2:
     payload = _keys(value, _POSE_KEYS, name)
     return PoseStateV2(
@@ -754,37 +802,95 @@ def _decode_private_segment(value: object, index: int) -> CanonicalWheelSegmentV
         mode = WheelSQPModeV2(_json_str(payload["mode"], "mode"))
     except ValueError as exc:
         raise WheelSQPCodecError("mode is not a contract value") from exc
+    start_state = _decode_pose(payload["start_state"], "start_state")
+    end_state = _decode_pose(payload["end_state"], "end_state")
+    v_mps = _json_float(payload["v_mps"], "v_mps")
+    omega_radps = _json_float(payload["omega_radps"], "omega_radps")
+    duration_s = _json_float(payload["duration_s"], "duration_s")
+    distance_m = _json_float(payload["distance_m"], "distance_m")
+    relative_energy = _json_float(payload["relative_energy"], "relative_energy")
+    samples = _decode_pose_list(payload["samples"], "samples")
+    segment_hash = _json_hash(payload["segment_hash"], "segment_hash")
+    if duration_s <= 0.0:
+        raise WheelSQPCodecError("duration_s must be positive")
+    if mode is not _mode_for(v_mps, omega_radps):
+        raise WheelSQPCodecError(
+            "mode does not match decoded controls",
+            "wheel_sqp_candidate_l2_rejected",
+        )
+    if samples[0] != start_state or samples[-1] != end_state:
+        raise WheelSQPCodecError(
+            "samples do not match decoded segment endpoints",
+            "wheel_sqp_candidate_l2_rejected",
+        )
     return CanonicalWheelSegmentV1(
-        start_state=_decode_pose(payload["start_state"], "start_state"),
-        end_state=_decode_pose(payload["end_state"], "end_state"),
-        v_mps=_json_float(payload["v_mps"], "v_mps"),
-        omega_radps=_json_float(payload["omega_radps"], "omega_radps"),
-        duration_s=_json_float(payload["duration_s"], "duration_s"),
+        start_state=start_state,
+        end_state=end_state,
+        v_mps=v_mps,
+        omega_radps=omega_radps,
+        duration_s=duration_s,
         mode=mode,
-        distance_m=_json_float(payload["distance_m"], "distance_m"),
-        relative_energy=_json_float(payload["relative_energy"], "relative_energy"),
-        samples=_decode_pose_list(payload["samples"], "samples"),
-        segment_hash=_json_str(payload["segment_hash"], "segment_hash"),
+        distance_m=distance_m,
+        relative_energy=relative_energy,
+        samples=samples,
+        segment_hash=segment_hash,
     )
 
 
 def decode_wheel_candidate_v2(encoded: bytes) -> CanonicalWheelCandidateV1:
     try:
         payload = _keys(_load_strict(encoded), _CANDIDATE_KEYS, "candidate")
+        expected_ids = {
+            "capability_revision": _CAPABILITY_REVISION,
+            "solver_contract_id": WHEEL_KINEMATIC_SOLVER_CONTRACT_V2,
+            "canonicalization_id": WHEEL_KINEMATIC_CANONICALIZATION_V2,
+            "control_slew_id": WHEEL_KINEMATIC_CONTROL_SLEW_V2,
+            "observation_source_id": WHEEL_KINEMATIC_OBSERVATION_SOURCE_V2,
+        }
+        for name, expected in expected_ids.items():
+            if payload.get(name) != expected:
+                raise WheelSQPCodecError(
+                    f"{name} identity mismatch",
+                    "wheel_sqp_identity_mismatch",
+                )
         raw_segments = payload["segments"]
         if type(raw_segments) is not list or not raw_segments:
             raise WheelSQPCodecError("segments must be a nonempty exact JSON array")
+        if len(raw_segments) > _CODEC_PROFILE.max_segments:
+            raise WheelSQPCodecError("segments exceed the fixed codec bound")
+        start_state = _decode_pose(payload["start_state"], "start_state")
+        requested_goal_state = _decode_pose(
+            payload["requested_goal_state"],
+            "requested_goal_state",
+        )
+        actual_endpoint = _decode_pose(
+            payload["actual_endpoint"], "actual_endpoint"
+        )
+        segments = tuple(
+            _decode_private_segment(value, index)
+            for index, value in enumerate(raw_segments)
+        )
+        if segments[0].start_state != start_state:
+            raise WheelSQPCodecError(
+                "candidate start does not match first segment",
+                "wheel_sqp_candidate_l2_rejected",
+            )
+        for previous, current in zip(segments, segments[1:], strict=False):
+            if previous.end_state != current.start_state:
+                raise WheelSQPCodecError(
+                    "candidate segment endpoints are disconnected",
+                    "wheel_sqp_candidate_l2_rejected",
+                )
+        if segments[-1].end_state != actual_endpoint:
+            raise WheelSQPCodecError(
+                "actual endpoint does not match final segment",
+                "wheel_sqp_candidate_l2_rejected",
+            )
         candidate = CanonicalWheelCandidateV1(
-            start_state=_decode_pose(payload["start_state"], "start_state"),
-            requested_goal_state=_decode_pose(
-                payload["requested_goal_state"],
-                "requested_goal_state",
-            ),
-            actual_endpoint=_decode_pose(payload["actual_endpoint"], "actual_endpoint"),
-            segments=tuple(
-                _decode_private_segment(value, index)
-                for index, value in enumerate(raw_segments)
-            ),
+            start_state=start_state,
+            requested_goal_state=requested_goal_state,
+            actual_endpoint=actual_endpoint,
+            segments=segments,
             total_distance_m=_json_float(
                 payload["total_distance_m"], "total_distance_m"
             ),
@@ -793,9 +899,9 @@ def decode_wheel_candidate_v2(encoded: bytes) -> CanonicalWheelCandidateV1:
             ),
             total_duration_s=_json_float(payload["total_duration_s"], "total_duration_s"),
             total_cost=_json_float(payload["total_cost"], "total_cost"),
-            request_hash=_json_str(payload["request_hash"], "request_hash"),
-            profile_hash=_json_str(payload["profile_hash"], "profile_hash"),
-            terrain_snapshot_hash=_json_str(
+            request_hash=_json_hash(payload["request_hash"], "request_hash"),
+            profile_hash=_json_hash(payload["profile_hash"], "profile_hash"),
+            terrain_snapshot_hash=_json_hash(
                 payload["terrain_snapshot_hash"], "terrain_snapshot_hash"
             ),
             capability_revision=_json_str(
@@ -811,7 +917,7 @@ def decode_wheel_candidate_v2(encoded: bytes) -> CanonicalWheelCandidateV1:
             observation_source_id=_json_str(
                 payload["observation_source_id"], "observation_source_id"
             ),
-            candidate_hash=_json_str(payload["candidate_hash"], "candidate_hash"),
+            candidate_hash=_json_hash(payload["candidate_hash"], "candidate_hash"),
         )
         _validate_candidate(candidate)
         if canonical_json_bytes(candidate) != encoded:
@@ -933,8 +1039,8 @@ def project_wheel_route_to_candidate_v1(
         snapshot_hash = _exact_hash(terrain_snapshot_hash, "terrain_snapshot_hash")
         _validate_route(route)
         expected_identities = {
-            "request_hash": _request_hash_v2(request, snapshot_hash),
-            "profile_hash": _profile_hash_v2(profile),
+            "request_hash": wheel_sqp_request_hash_v2(request, snapshot_hash),
+            "profile_hash": wheel_sqp_profile_hash_v2(profile),
             "terrain_snapshot_hash": snapshot_hash,
             "capability_revision": _CAPABILITY_REVISION,
             "solver_contract_id": WHEEL_KINEMATIC_SOLVER_CONTRACT_V2,

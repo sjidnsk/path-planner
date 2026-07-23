@@ -997,7 +997,7 @@ def estimate_wheel_sqp_attempt_resources_v2(
         encoded_scalar_bound=encoded_scalar_bound,
     )
     ledger.check_deadline()
-    return _make_wheel_sqp_resource_estimate_v1(
+    estimate = _make_wheel_sqp_resource_estimate_v1(
         segment_count=segment_count,
         variable_count=variable_count,
         equality_count=equality_count,
@@ -1016,6 +1016,9 @@ def estimate_wheel_sqp_attempt_resources_v2(
         required_bytes=required_bytes,
         post_solver_reserve=receipt,
     )
+    ledger.check_deadline()
+    ledger._bind_latest_attempt_estimate(estimate, problem.request, problem.profile)
+    return estimate
 
 
 @dataclass(frozen=True, slots=True)

@@ -285,18 +285,15 @@ def test_l2_reserve_assess_rejects_the_strict_deadline_boundary() -> None:
     assert ledger.reason_code == "wheel_sqp_resource_budget_exceeded"
 
 
-def test_passed_l2_result_requires_passing_exact_wheel_evidence() -> None:
-    with pytest.raises(ValueError, match="evidence"):
+def test_l2_result_is_factory_only_and_precedes_public_evidence() -> None:
+    with pytest.raises(TypeError, match="positional"):
         WheelTrajectoryL2ResultV2(True, None, None)
-    with pytest.raises(ValueError, match="evidence"):
-        WheelTrajectoryL2ResultV2(True, _l2_evidence(passed=False), None)
-    with pytest.raises(ValueError, match="counterexample"):
-        WheelTrajectoryL2ResultV2(False, None, None)
+    with pytest.raises(TypeError, match="validator-only"):
+        WheelTrajectoryL2ResultV2(_authority=object())
 
-    result = WheelTrajectoryL2ResultV2(True, _l2_evidence(), None)
-
-    assert result.passed is True
-    assert result.evidence is not None
+    evidence = _l2_evidence()
+    assert evidence.passed is True
+    assert evidence.route_hash == "a" * 64
 
 
 def test_wheel_sqp_validation_evidence_rejects_noncontract_validator() -> None:

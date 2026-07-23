@@ -33,6 +33,8 @@ from path_planner.v2.wheel_sqp_serialization import (
     materialize_canonical_wheel_candidate_v2,
     project_wheel_route_to_candidate_v1,
     wheel_candidate_hash_v2,
+    wheel_sqp_profile_hash_v2,
+    wheel_sqp_request_hash_v2,
     wheel_route_hash_v2,
     wheel_segment_hash_v2,
 )
@@ -320,6 +322,33 @@ def test_candidate_codec_round_trip_is_byte_stable_and_rejects_untrusted_variant
     for mutated in variants:
         with pytest.raises(WheelSQPCodecError):
             decode_wheel_candidate_v2(mutated)
+
+
+def test_candidate_codec_errors_have_stable_identity_and_numeric_reasons() -> None:
+    payload = json.loads(encode_wheel_candidate_v2(make_canonical_candidate()))
+    identity = dict(
+        payload,
+        solver_contract_id="wheel_kinematic_direct_multiple_shooting_sqp/v2",
+    )
+    numeric = json.loads(_dump(payload))
+    numeric["segments"][0]["duration_s"] = 0.0
+
+    with pytest.raises(WheelSQPCodecError) as identity_error:
+        decode_wheel_candidate_v2(_dump(identity))
+    with pytest.raises(WheelSQPCodecError) as numeric_error:
+        decode_wheel_candidate_v2(_dump(numeric))
+
+    assert identity_error.value.reason_code == "wheel_sqp_identity_mismatch"
+    assert numeric_error.value.reason_code == "wheel_sqp_numeric_contract_failed"
+
+
+def test_request_and_profile_hashes_use_the_shared_public_authority() -> None:
+    assert wheel_sqp_request_hash_v2(REQUEST, SNAPSHOT_HASH) == _request_hash_for_test(
+        REQUEST
+    )
+    assert wheel_sqp_profile_hash_v2(PROFILE) == sha256(
+        canonical_json_bytes(PROFILE)
+    ).hexdigest()
 
 
 def test_candidate_decoder_rederives_segment_totals_even_when_attacker_rehashes() -> None:
