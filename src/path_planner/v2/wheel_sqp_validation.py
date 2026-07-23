@@ -13,7 +13,10 @@ from path_planner.v2.contracts import (
     PrimitiveKindV2,
     ValidationLevelV2,
 )
-from path_planner.v2.profiles import WheelKinematicSQPProfileV2
+from path_planner.v2.profiles import (
+    WheelKinematicSQPProfileV2,
+    audit_wheel_kinematic_sqp_profile_v2,
+)
 from path_planner.v2.runtime import PlanningDeadlineV2
 from path_planner.v2.terrain import (
     FineGridGeometryV2,
@@ -39,6 +42,8 @@ from path_planner.v2.wheel_sqp_contracts import (
     WheelL2CounterexampleV2,
     WheelSQPModeV2,
     WheelSQPPromotionV2,
+    WheelSQPRepairConstraintV1,
+    WheelSQPRepairNotAllowed,
     WheelSQPResourceEstimateV1,
     WheelSQPValidationEvidenceV2,
     WheelSQPWorkLimitError,
@@ -215,6 +220,181 @@ def oriented_rectangle_cell_separation_v2(
             raise ValueError("SAT gap must be finite")
         gaps.append(gap)
     return nextafter(max(gaps), -inf)
+
+
+def repair_constraint_from_counterexample_v2(
+    counterexample: WheelL2CounterexampleV2,
+    canonical_candidate_bytes: bytes,
+    profile: WheelKinematicSQPProfileV2,
+    *,
+    geometry: FineGridGeometryV2,
+) -> WheelSQPRepairConstraintV1:
+    if type(counterexample) is not WheelL2CounterexampleV2:
+        raise TypeError("counterexample must be exact WheelL2CounterexampleV2")
+    if type(canonical_candidate_bytes) is not bytes:
+        raise TypeError("canonical_candidate_bytes must be exact bytes")
+    if type(profile) is not WheelKinematicSQPProfileV2:
+        raise TypeError("profile must be exact WheelKinematicSQPProfileV2")
+    if type(geometry) is not FineGridGeometryV2:
+        raise TypeError("geometry must be exact FineGridGeometryV2")
+
+    try:
+        audited_counterexample = WheelL2CounterexampleV2(
+            segment_index=counterexample.segment_index,
+            candidate_segment_hash=counterexample.candidate_segment_hash,
+            time_fraction_lo=counterexample.time_fraction_lo,
+            time_fraction_mid=counterexample.time_fraction_mid,
+            time_fraction_hi=counterexample.time_fraction_hi,
+            cell=counterexample.cell,
+            terrain_reason=counterexample.terrain_reason,
+            snapshot_hash=counterexample.snapshot_hash,
+            candidate_hash=counterexample.candidate_hash,
+            repairable=counterexample.repairable,
+        )
+        audited_profile = audit_wheel_kinematic_sqp_profile_v2(profile)
+        audited_geometry = FineGridGeometryV2(
+            width=geometry.width,
+            height=geometry.height,
+            origin=geometry.origin,
+            frame_id=geometry.frame_id,
+            resolution_m=geometry.resolution_m,
+        )
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise WheelSQPRepairNotAllowed(
+            "counterexample, profile, or geometry failed repair reaudit"
+        ) from exc
+
+    if (
+        audited_counterexample != counterexample
+        or audited_profile != profile
+        or audited_geometry != geometry
+        or audited_counterexample.repairable is not True
+        or audited_counterexample.terrain_reason
+        not in (
+            "terrain_hard_obstacle",
+            "terrain_not_traversable",
+            "terrain_slope_exceeded",
+        )
+        or not audited_geometry.in_bounds(audited_counterexample.cell)
+    ):
+        raise WheelSQPRepairNotAllowed(
+            "counterexample does not authorize known in-bounds terrain repair"
+        )
+
+    try:
+        candidate = decode_wheel_candidate_v2(canonical_candidate_bytes)
+    except WheelSQPCodecError as exc:
+        raise WheelSQPRepairNotAllowed(
+            "canonical candidate bytes failed strict decode"
+        ) from exc
+
+    segment_index = audited_counterexample.segment_index
+    if (
+        candidate.candidate_hash != audited_counterexample.candidate_hash
+        or candidate.terrain_snapshot_hash != audited_counterexample.snapshot_hash
+        or candidate.profile_hash != wheel_sqp_profile_hash_v2(audited_profile)
+        or segment_index >= len(candidate.segments)
+    ):
+        raise WheelSQPRepairNotAllowed(
+            "counterexample candidate, profile, snapshot, or segment identity mismatch"
+        )
+    segment = candidate.segments[segment_index]
+    if segment.segment_hash != audited_counterexample.candidate_segment_hash:
+        raise WheelSQPRepairNotAllowed(
+            "counterexample segment identity mismatch"
+        )
+
+    try:
+        midpoint = wheel_pose_at_elapsed_v2(
+            segment.start_state,
+            segment.v_mps,
+            segment.omega_radps,
+            segment.duration_s,
+            segment.duration_s * audited_counterexample.time_fraction_mid,
+        )
+        collision_gap = oriented_rectangle_cell_separation_v2(
+            midpoint,
+            audited_counterexample.cell,
+            audited_geometry,
+            audited_profile,
+        )
+        left_x = (
+            audited_geometry.origin[0]
+            + audited_counterexample.cell.x * audited_geometry.resolution_m
+        )
+        right_x = left_x + audited_geometry.resolution_m
+        bottom_y = (
+            audited_geometry.origin[1]
+            + audited_counterexample.cell.y * audited_geometry.resolution_m
+        )
+        top_y = bottom_y + audited_geometry.resolution_m
+        heading_cos = abs(cos(midpoint.heading_rad))
+        heading_sin = abs(sin(midpoint.heading_rad))
+        half_length = (
+            audited_profile.body_length_m / 2.0
+            + audited_profile.footprint_safety_margin_m
+        )
+        half_width = (
+            audited_profile.body_width_m / 2.0
+            + audited_profile.footprint_safety_margin_m
+        )
+        support_x = half_length * heading_cos + half_width * heading_sin
+        support_y = half_length * heading_sin + half_width * heading_cos
+        clearance = audited_profile.repair_clearance_m
+        margins = (
+            left_x - midpoint.x_m - support_x - clearance,
+            midpoint.x_m - right_x - support_x - clearance,
+            bottom_y - midpoint.y_m - support_y - clearance,
+            midpoint.y_m - top_y - support_y - clearance,
+        )
+        derived = (
+            collision_gap,
+            left_x,
+            right_x,
+            bottom_y,
+            top_y,
+            heading_cos,
+            heading_sin,
+            half_length,
+            half_width,
+            support_x,
+            support_y,
+            clearance,
+            *margins,
+        )
+        if not all(isfinite(value) for value in derived):
+            raise ValueError("repair geometry must be finite")
+        if not left_x < right_x or not bottom_y < top_y:
+            raise ValueError("repair cell bounds must be strictly ordered")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise WheelSQPRepairNotAllowed(
+            "counterexample repair geometry could not be derived"
+        ) from exc
+
+    if collision_gap > audited_profile.continuous_separation_epsilon_m:
+        raise WheelSQPRepairNotAllowed(
+            "counterexample midpoint does not collide with its terrain cell"
+        )
+
+    face = ("left", "right", "bottom", "top")[
+        max(range(4), key=margins.__getitem__)
+    ]
+    return WheelSQPRepairConstraintV1(
+        source_candidate_hash=candidate.candidate_hash,
+        source_segment_hash=segment.segment_hash,
+        source_snapshot_hash=candidate.terrain_snapshot_hash,
+        segment_index=segment_index,
+        cell=audited_counterexample.cell,
+        face=face,
+        rho_lo=audited_counterexample.time_fraction_lo,
+        rho_mid=audited_counterexample.time_fraction_mid,
+        rho_hi=audited_counterexample.time_fraction_hi,
+        cell_left_x_m=left_x,
+        cell_right_x_m=right_x,
+        cell_bottom_y_m=bottom_y,
+        cell_top_y_m=top_y,
+        clearance_m=clearance,
+    )
 
 
 def _oriented_rectangle_boundary_separations_v2(
@@ -525,6 +705,92 @@ def _iter_wheel_closed_cell_range_v2(
     for row in range(cell_range.row_lo, cell_range.row_hi + 1):
         for column in range(cell_range.column_lo, cell_range.column_hi + 1):
             yield Cell(column, row)
+
+
+def validate_wheel_stationary_footprint_v2(
+    pose: PoseStateV2,
+    anchor: FineSafetyAnchorV2,
+    profile: WheelKinematicSQPProfileV2,
+    deadline: PlanningDeadlineV2,
+    ledger: WheelSQPWorkLedgerV1,
+) -> str | None:
+    """Return the first L2 terrain reason intersecting one stationary body rectangle."""
+
+    if type(pose) is not PoseStateV2:
+        raise TypeError("pose must be exact PoseStateV2")
+    if type(anchor) is not FineSafetyAnchorV2:
+        raise TypeError("anchor must be exact FineSafetyAnchorV2")
+    if type(profile) is not WheelKinematicSQPProfileV2:
+        raise TypeError("profile must be exact WheelKinematicSQPProfileV2")
+    if type(deadline) is not PlanningDeadlineV2:
+        raise TypeError("deadline must be exact PlanningDeadlineV2")
+    if type(ledger) is not WheelSQPWorkLedgerV1:
+        raise TypeError("ledger must be exact WheelSQPWorkLedgerV1")
+    if ledger.deadline is not deadline:
+        raise ValueError("stationary footprint deadline authority mismatch")
+
+    ledger.check_deadline()
+    audited_profile = audit_wheel_kinematic_sqp_profile_v2(profile)
+    if audited_profile != profile:
+        raise ValueError("stationary footprint profile reaudit mismatch")
+    geometry = anchor.snapshot.geometry
+    epsilon = profile.continuous_separation_epsilon_m
+    boundary_margins = _oriented_rectangle_boundary_separations_v2(
+        pose,
+        geometry,
+        profile,
+    )
+    ledger.check_deadline()
+    if any(margin <= epsilon for margin in boundary_margins):
+        return "terrain_out_of_bounds"
+
+    heading_cos = abs(cos(pose.heading_rad))
+    heading_sin = abs(sin(pose.heading_rad))
+    half_length = profile.body_length_m / 2.0 + profile.footprint_safety_margin_m
+    half_width = profile.body_width_m / 2.0 + profile.footprint_safety_margin_m
+    support_x = half_length * heading_cos + half_width * heading_sin
+    support_y = half_length * heading_sin + half_width * heading_cos
+    bounds = (
+        nextafter(pose.x_m - support_x, -inf),
+        nextafter(pose.x_m + support_x, inf),
+        nextafter(pose.y_m - support_y, -inf),
+        nextafter(pose.y_m + support_y, inf),
+    )
+    if not all(isfinite(value) for value in bounds):
+        raise ValueError("stationary footprint AABB must be finite")
+    cell_range = _wheel_closed_aabb_cell_range_v2(*bounds, geometry)
+    ledger.check_deadline()
+    if cell_range is None:
+        return None
+    if cell_range.cell_count > profile.max_l2_candidate_cells:
+        raise WheelSQPWorkLimitError("wheel_sqp_resource_budget_exceeded")
+
+    best: tuple[int, int, int, str] | None = None
+    for cell in _iter_wheel_closed_cell_range_v2(cell_range):
+        ledger.check_deadline()
+        query = anchor.query(cell, profile.profile.max_traversable_slope_deg)
+        ledger.check_deadline()
+        if query.passed:
+            continue
+        gap = oriented_rectangle_cell_separation_v2(
+            pose,
+            cell,
+            geometry,
+            profile,
+        )
+        ledger.check_deadline()
+        if gap > epsilon:
+            continue
+        candidate = (
+            _INVALID_REASON_RANK[query.reason_code],
+            cell.y,
+            cell.x,
+            query.reason_code,
+        )
+        if best is None or candidate < best:
+            best = candidate
+    ledger.check_deadline()
+    return None if best is None else best[3]
 
 
 @dataclass(frozen=True, slots=True)

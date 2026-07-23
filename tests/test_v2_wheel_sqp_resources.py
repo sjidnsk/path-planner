@@ -38,6 +38,7 @@ from path_planner.v2.wheel_sqp_contracts import (
     WheelCorridorV2,
     WheelSQPInitialGuessV2,
     WheelSQPModeV2,
+    WheelSQPRepairConstraintV1,
     WheelSQPResourceEstimateV1,
     WheelSQPResourceLedgerV1,
     WheelSQPWorkLedgerV1,
@@ -217,6 +218,25 @@ def _problem(
     return problem, deadline, ledger, clock
 
 
+def _repair(problem: WheelSQPProblemV1) -> WheelSQPRepairConstraintV1:
+    return WheelSQPRepairConstraintV1(
+        source_candidate_hash="a" * 64,
+        source_segment_hash="b" * 64,
+        source_snapshot_hash=snapshot_hash(problem.request.terrain_snapshot),
+        segment_index=0,
+        cell=Cell(4, 2),
+        face="left",
+        rho_lo=0.25,
+        rho_mid=0.5,
+        rho_hi=0.75,
+        cell_left_x_m=1.0,
+        cell_right_x_m=1.5,
+        cell_bottom_y_m=0.0,
+        cell_top_y_m=0.5,
+        clearance_m=1.0e-4,
+    )
+
+
 def test_optimizer_invalid_records_use_stable_reason_precedence_and_slope_boundary() -> None:
     both = Cell(5, 1)
     snapshot = _snapshot(
@@ -309,6 +329,55 @@ def test_resource_estimate_uses_frozen_counts_and_exact_byte_formula() -> None:
         + estimate.codec_bytes
     )
     assert estimate.post_solver_reserve.accepted is True
+
+
+def test_repair_resource_estimate_adds_three_rows_and_exact_jacobian_bytes() -> None:
+    snapshot = _snapshot()
+    controls = (
+        (0.25, 0.0, 2.0, WheelSQPModeV2.FORWARD),
+        (0.25, 0.0, 2.0, WheelSQPModeV2.FORWARD),
+    )
+    legacy, legacy_deadline, legacy_ledger, _ = _problem(
+        snapshot,
+        controls=controls,
+    )
+    repaired_base, repaired_deadline, repaired_ledger, _ = _problem(
+        snapshot,
+        controls=controls,
+    )
+    repaired = replace(repaired_base, repair=_repair(repaired_base))
+
+    legacy_estimate = estimate_wheel_sqp_attempt_resources_v2(
+        legacy,
+        legacy_deadline,
+        legacy_ledger,
+    )
+    repaired_estimate = estimate_wheel_sqp_attempt_resources_v2(
+        repaired,
+        repaired_deadline,
+        repaired_ledger,
+    )
+
+    assert repaired_estimate.total_constraint_count == (
+        legacy_estimate.total_constraint_count + 3
+    )
+    assert (
+        repaired_estimate.jacobian_bytes
+        == legacy_estimate.jacobian_bytes + 144 * 2
+    )
+    assert (
+        repaired_estimate.required_bytes
+        == legacy_estimate.required_bytes + 144 * 2
+    )
+    assert repaired_estimate.post_solver_reserve == legacy_estimate.post_solver_reserve
+    assert (
+        repaired_estimate.base_inequality_count
+        == legacy_estimate.base_inequality_count
+    )
+    assert (
+        repaired_estimate.terrain_inequality_count
+        == legacy_estimate.terrain_inequality_count
+    )
 
 
 def test_resource_admission_atomically_charges_memory_and_route_states() -> None:

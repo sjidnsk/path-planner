@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from hashlib import sha256
-from math import inf, nextafter, pi
+from math import cos, inf, nextafter, pi, sin
 from types import SimpleNamespace
 
 import numpy as np
@@ -40,6 +40,7 @@ from path_planner.v2.wheel_sqp_contracts import (
     WheelCorridorV2,
     WheelSQPInitialGuessV2,
     WheelSQPModeV2,
+    WheelSQPRepairConstraintV1,
     WheelSQPResourceLedgerV1,
     WheelSQPStatusV2,
     WheelSQPWorkLedgerV1,
@@ -199,6 +200,227 @@ def _problem(
         terrain_guide=terrain_guide,
     )
     return problem, deadline, ledger, clock
+
+
+def _repair(
+    problem: WheelSQPProblemV1,
+    *,
+    face: str = "left",
+    segment_index: int = 0,
+    rhos: tuple[float, float, float] = (0.25, 0.5, 0.75),
+    bounds: tuple[float, float, float, float] = (1.0, 1.5, 0.0, 0.5),
+) -> WheelSQPRepairConstraintV1:
+    return WheelSQPRepairConstraintV1(
+        source_candidate_hash="a" * 64,
+        source_segment_hash="b" * 64,
+        source_snapshot_hash=snapshot_hash(problem.request.terrain_snapshot),
+        segment_index=segment_index,
+        cell=Cell(4, 2),
+        face=face,
+        rho_lo=rhos[0],
+        rho_mid=rhos[1],
+        rho_hi=rhos[2],
+        cell_left_x_m=bounds[0],
+        cell_right_x_m=bounds[1],
+        cell_bottom_y_m=bounds[2],
+        cell_top_y_m=bounds[3],
+        clearance_m=1.0e-4,
+    )
+
+
+def test_problem_accepts_only_exact_repair_with_matching_solver_identity() -> None:
+    problem, _, _, _ = _problem()
+    repair = _repair(problem)
+
+    assert replace(problem, repair=repair).repair is repair
+    with pytest.raises(TypeError, match="repair must be exact"):
+        replace(problem, repair=object())
+    with pytest.raises(ValueError, match="repair segment_index"):
+        replace(problem, repair=replace(repair, segment_index=1))
+    with pytest.raises(ValueError, match="repair snapshot"):
+        replace(problem, repair=replace(repair, source_snapshot_hash="f" * 64))
+
+
+@pytest.mark.parametrize("face", ("left", "right", "bottom", "top"))
+def test_repair_rows_append_exact_fixed_face_margins_after_legacy_prefix(
+    face: str,
+) -> None:
+    legacy, _, _, _ = _problem(
+        controls=((0.4, 0.2, 1.0, WheelSQPModeV2.FORWARD),)
+    )
+    repair = _repair(legacy, face=face)
+    problem = replace(legacy, repair=repair)
+    vector = problem.initial_vector
+
+    legacy_values = legacy.inequalities(vector)
+    legacy_jacobian = legacy.inequality_jacobian(vector)
+    actual_values = problem.inequalities(vector)
+    actual_jacobian = problem.inequality_jacobian(vector)
+
+    assert actual_values.shape == (legacy_values.size + 3,)
+    assert actual_jacobian.shape == (legacy_jacobian.shape[0] + 3, vector.size)
+    assert actual_values[:-3].tobytes() == legacy_values.tobytes()
+    assert actual_jacobian[:-3].tobytes() == legacy_jacobian.tobytes()
+
+    half_length = PROFILE.body_length_m / 2.0 + PROFILE.footprint_safety_margin_m
+    half_width = PROFILE.body_width_m / 2.0 + PROFILE.footprint_safety_margin_m
+    expected: list[float] = []
+    for rho in repair.time_fractions:
+        pose = integrate_wheel_segment_v2(
+            problem.request.start_state,
+            vector[3],
+            vector[4],
+            rho * vector[5],
+        )
+        support_x = half_length * abs(cos(pose.heading_rad)) + half_width * abs(
+            sin(pose.heading_rad)
+        )
+        support_y = half_length * abs(sin(pose.heading_rad)) + half_width * abs(
+            cos(pose.heading_rad)
+        )
+        expected.append(
+            {
+                "left": repair.cell_left_x_m
+                - pose.x_m
+                - support_x
+                - repair.clearance_m,
+                "right": pose.x_m
+                - repair.cell_right_x_m
+                - support_x
+                - repair.clearance_m,
+                "bottom": repair.cell_bottom_y_m
+                - pose.y_m
+                - support_y
+                - repair.clearance_m,
+                "top": pose.y_m
+                - repair.cell_top_y_m
+                - support_y
+                - repair.clearance_m,
+            }[face]
+        )
+    assert actual_values[-3:] == pytest.approx(expected, rel=0.0, abs=1.0e-15)
+
+
+@pytest.mark.parametrize("face", ("left", "right", "bottom", "top"))
+def test_repair_jacobian_matches_central_difference_away_from_support_kinks(
+    face: str,
+) -> None:
+    legacy, _, _, _ = _problem(
+        controls=((0.4, 0.2, 1.0, WheelSQPModeV2.FORWARD),)
+    )
+    problem = replace(legacy, repair=_repair(legacy, face=face))
+    vector = problem.initial_vector
+    actual = problem.inequality_jacobian(vector)[-3:]
+    step = 1.0e-6
+
+    for column in range(vector.size):
+        lower = vector.copy()
+        upper = vector.copy()
+        lower[column] -= step
+        upper[column] += step
+        expected = (
+            problem.inequalities(upper)[-3:] - problem.inequalities(lower)[-3:]
+        ) / (2.0 * step)
+        assert actual[:, column] == pytest.approx(
+            expected,
+            rel=3.0e-6,
+            abs=3.0e-8,
+        )
+
+
+def test_later_segment_positive_rho_repair_jacobian_matches_all_columns() -> None:
+    legacy, _, _, _ = _problem(
+        controls=(
+            (0.4, 0.2, 1.0, WheelSQPModeV2.FORWARD),
+            (0.5, 0.1, 1.0, WheelSQPModeV2.FORWARD),
+        )
+    )
+    problem = replace(
+        legacy,
+        repair=_repair(legacy, segment_index=1, rhos=(0.25, 0.5, 0.75)),
+    )
+    vector = problem.initial_vector
+    actual = problem.repair_jacobian(vector)
+    step = 1.0e-6
+
+    for column in range(vector.size):
+        lower = vector.copy()
+        upper = vector.copy()
+        lower[column] -= step
+        upper[column] += step
+        expected = (
+            problem.repair_inequalities(upper)
+            - problem.repair_inequalities(lower)
+        ) / (2.0 * step)
+        assert actual[:, column] == pytest.approx(
+            expected,
+            rel=3.0e-6,
+            abs=3.0e-8,
+        )
+
+
+def test_first_segment_rho_zero_repair_jacobian_row_is_all_zero() -> None:
+    legacy, _, _, _ = _problem(
+        controls=((0.4, 0.2, 1.0, WheelSQPModeV2.FORWARD),)
+    )
+    problem = replace(
+        legacy,
+        repair=_repair(legacy, segment_index=0, rhos=(0.0, 0.25, 0.75)),
+    )
+
+    first_row = problem.repair_jacobian(problem.initial_vector)[0]
+
+    assert np.array_equal(first_row, np.zeros(problem.layout.variable_count))
+    assert first_row.tobytes() == bytes(first_row.nbytes)
+
+
+def test_later_segment_rho_zero_repair_row_only_uses_previous_declared_state() -> None:
+    legacy, _, _, _ = _problem(
+        controls=(
+            (0.4, 0.2, 1.0, WheelSQPModeV2.FORWARD),
+            (0.5, 0.1, 1.0, WheelSQPModeV2.FORWARD),
+        )
+    )
+    problem = replace(
+        legacy,
+        repair=_repair(legacy, segment_index=1, rhos=(0.0, 0.25, 0.75)),
+    )
+    vector = problem.initial_vector
+    start = problem.layout.unpack(vector).states[0]
+    half_length = PROFILE.body_length_m / 2.0 + PROFILE.footprint_safety_margin_m
+    half_width = PROFILE.body_width_m / 2.0 + PROFILE.footprint_safety_margin_m
+    support_theta = (
+        -half_length * sin(start.heading_rad)
+        + half_width * cos(start.heading_rad)
+    )
+    expected = np.zeros(vector.size, dtype=np.float64)
+    expected[0] = -1.0
+    expected[2] = -support_theta
+
+    assert problem.inequality_jacobian(vector)[-3] == pytest.approx(
+        expected,
+        rel=0.0,
+        abs=1.0e-15,
+    )
+
+
+def test_negative_repair_margin_is_infeasible_and_never_terminal_only() -> None:
+    legacy, _, _, _ = _problem(goal=PoseStateV2(2.0, 0.0, 0.0))
+    problem = replace(
+        legacy,
+        repair=_repair(
+            legacy,
+            face="left",
+            rhos=(0.0, 0.5, 1.0),
+            bounds=(0.0, 0.5, 0.0, 0.5),
+        ),
+    )
+
+    audit = audit_wheel_sqp_candidate_v2(problem, problem.initial_vector)
+
+    assert audit.passed is False
+    assert audit.reason_code == "wheel_sqp_infeasible"
+    assert audit.terminal_only_failure is False
 
 
 def test_layout_has_six_physical_values_per_segment_and_excludes_fixed_start() -> None:

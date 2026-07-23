@@ -31,6 +31,7 @@ from path_planner.v2.wheel_sqp_contracts import (
     WheelSQPInitialGuessV2,
     WheelSQPModeV2,
     WheelSQPOptimizationResultV2,
+    WheelSQPRepairConstraintV1,
     WheelSQPResourceEstimateV1,
     WheelSQPResourceLedgerV1,
     WheelSQPStatusV2,
@@ -305,6 +306,7 @@ class WheelSQPProblemV1:
     profile: WheelKinematicSQPProfileV2
     post_solver_reserve: WheelSQPResourceLedgerV1
     terrain_guide: WheelSQPTerrainGuideV1
+    repair: WheelSQPRepairConstraintV1 | None = None
 
     def __post_init__(self) -> None:
         if type(self.corridor) is not WheelCorridorV2:
@@ -319,6 +321,11 @@ class WheelSQPProblemV1:
             raise TypeError("post_solver_reserve must be exact WheelSQPResourceLedgerV1")
         if type(self.terrain_guide) is not WheelSQPTerrainGuideV1:
             raise TypeError("terrain_guide must be exact WheelSQPTerrainGuideV1")
+        if (
+            self.repair is not None
+            and type(self.repair) is not WheelSQPRepairConstraintV1
+        ):
+            raise TypeError("repair must be exact WheelSQPRepairConstraintV1 or None")
         if not self.post_solver_reserve.accepted or self.post_solver_reserve.reason_code is not None:
             raise ValueError("post_solver_reserve must be an accepted typed receipt")
         if self.request.platform_profile_id != self.profile.profile.profile_id:
@@ -356,6 +363,14 @@ class WheelSQPProblemV1:
         count = len(self.initial_guess.segments)
         if count > self.profile.max_segments:
             raise ValueError("initial guess exceeds max_segments")
+        if self.repair is not None:
+            if (
+                self.repair.source_snapshot_hash
+                != self.terrain_guide.terrain_snapshot_hash
+            ):
+                raise ValueError("repair snapshot identity mismatch")
+            if self.repair.segment_index >= count:
+                raise ValueError("repair segment_index must identify an initial segment")
         _require_dedicated_stop(self.initial_guess.modes)
         initial_controls = tuple(
             (segment.v_mps, segment.omega_radps, segment.duration_s)
@@ -497,6 +512,30 @@ class WheelSQPProblemV1:
         )
         return jacobian
 
+    def repair_inequalities(self, vector: object) -> np.ndarray:
+        if self.repair is None:
+            return np.empty(0, dtype=np.float64)
+        values = np.empty(3, dtype=np.float64)
+        _fill_wheel_sqp_repair_constraints_v1(
+            self,
+            vector,
+            values=values,
+            jacobian=None,
+        )
+        return values
+
+    def repair_jacobian(self, vector: object) -> np.ndarray:
+        if self.repair is None:
+            return np.empty((0, self.layout.variable_count), dtype=np.float64)
+        jacobian = np.zeros((3, self.layout.variable_count), dtype=np.float64)
+        _fill_wheel_sqp_repair_constraints_v1(
+            self,
+            vector,
+            values=None,
+            jacobian=jacobian,
+        )
+        return jacobian
+
     def inequalities(self, vector: object) -> np.ndarray:
         unpacked = self.layout.unpack(vector)
         values = list(self.terminal_inequalities(vector))
@@ -518,11 +557,14 @@ class WheelSQPProblemV1:
                 )
             )
         values.extend(self.terrain_inequalities(vector))
+        if self.repair is not None:
+            values.extend(self.repair_inequalities(vector))
         return np.asarray(values, dtype=np.float64)
 
     def inequality_jacobian(self, vector: object) -> np.ndarray:
         unpacked = self.layout.unpack(vector)
-        row_count = 9 * self.layout.segment_count - 1
+        repair_row_count = 3 if self.repair is not None else 0
+        row_count = 9 * self.layout.segment_count - 1 + repair_row_count
         result = np.zeros((row_count, self.layout.variable_count), dtype=np.float64)
         goal = self.request.goal_state
         final = unpacked.states[-1]
@@ -578,6 +620,14 @@ class WheelSQPProblemV1:
             jacobian=result,
             row_offset=row,
         )
+        if self.repair is not None:
+            _fill_wheel_sqp_repair_constraints_v1(
+                self,
+                vector,
+                values=None,
+                jacobian=result,
+                row_offset=row + 5 * self.layout.segment_count,
+            )
         return result
 
     def objective(self, vector: object) -> float:
@@ -782,6 +832,166 @@ def _fill_wheel_sqp_terrain_constraints_v2(
     return tie_count
 
 
+def _fill_wheel_sqp_repair_constraints_v1(
+    problem: WheelSQPProblemV1,
+    vector: object,
+    *,
+    values: np.ndarray | None,
+    jacobian: np.ndarray | None,
+    row_offset: int = 0,
+) -> None:
+    if type(problem) is not WheelSQPProblemV1:
+        raise TypeError("problem must be exact WheelSQPProblemV1")
+    repair = problem.repair
+    if type(repair) is not WheelSQPRepairConstraintV1:
+        raise ValueError("problem must carry an exact repair constraint")
+    _exact_nonnegative_int(row_offset, "row_offset")
+    row_count = 3
+    if values is not None:
+        if (
+            type(values) is not np.ndarray
+            or values.dtype != np.dtype(np.float64)
+            or values.ndim != 1
+            or values.shape[0] < row_offset + row_count
+        ):
+            raise ValueError("repair values output has the wrong fixed shape")
+    if jacobian is not None:
+        if (
+            type(jacobian) is not np.ndarray
+            or jacobian.dtype != np.dtype(np.float64)
+            or jacobian.ndim != 2
+            or jacobian.shape[0] < row_offset + row_count
+            or jacobian.shape[1] != problem.layout.variable_count
+        ):
+            raise ValueError("repair Jacobian output has the wrong fixed shape")
+
+    unpacked = problem.layout.unpack(vector)
+    segment_index = repair.segment_index
+    start = (
+        problem.request.start_state
+        if segment_index == 0
+        else unpacked.states[segment_index - 1]
+    )
+    v_mps, omega_radps, duration_s = unpacked.controls[segment_index]
+    half_length = (
+        problem.profile.body_length_m / 2.0
+        + problem.profile.footprint_safety_margin_m
+    )
+    half_width = (
+        problem.profile.body_width_m / 2.0
+        + problem.profile.footprint_safety_margin_m
+    )
+
+    row = row_offset
+    for rho in repair.time_fractions:
+        if rho == 0.0:
+            sample = start
+            replay_jacobian = None
+        else:
+            sampled_duration = rho * duration_s
+            sample = integrate_wheel_segment_v2(
+                start,
+                v_mps,
+                omega_radps,
+                sampled_duration,
+            )
+            replay_jacobian = (
+                wheel_segment_jacobian_v2(
+                    start,
+                    v_mps,
+                    omega_radps,
+                    sampled_duration,
+                )
+                if jacobian is not None
+                else None
+            )
+
+        heading_cos = cos(sample.heading_rad)
+        heading_sin = sin(sample.heading_rad)
+        support_x = (
+            half_length * abs(heading_cos) + half_width * abs(heading_sin)
+        )
+        support_y = (
+            half_length * abs(heading_sin) + half_width * abs(heading_cos)
+        )
+        support_x_heading = (
+            -half_length * _sign(heading_cos) * heading_sin
+            + half_width * _sign(heading_sin) * heading_cos
+        )
+        support_y_heading = (
+            half_length * _sign(heading_sin) * heading_cos
+            - half_width * _sign(heading_cos) * heading_sin
+        )
+
+        if repair.face == "left":
+            margin = (
+                repair.cell_left_x_m
+                - sample.x_m
+                - support_x
+                - repair.clearance_m
+            )
+            gx, gy, gheading = -1.0, 0.0, -support_x_heading
+        elif repair.face == "right":
+            margin = (
+                sample.x_m
+                - repair.cell_right_x_m
+                - support_x
+                - repair.clearance_m
+            )
+            gx, gy, gheading = 1.0, 0.0, -support_x_heading
+        elif repair.face == "bottom":
+            margin = (
+                repair.cell_bottom_y_m
+                - sample.y_m
+                - support_y
+                - repair.clearance_m
+            )
+            gx, gy, gheading = 0.0, -1.0, -support_y_heading
+        else:
+            margin = (
+                sample.y_m
+                - repair.cell_top_y_m
+                - support_y
+                - repair.clearance_m
+            )
+            gx, gy, gheading = 0.0, 1.0, -support_y_heading
+
+        if values is not None:
+            values[row] = margin
+        if jacobian is None:
+            row += 1
+            continue
+        if rho == 0.0:
+            if segment_index > 0:
+                previous = 6 * (segment_index - 1)
+                jacobian[row, previous] = gx
+                jacobian[row, previous + 1] = gy
+                jacobian[row, previous + 2] = gheading
+        else:
+            assert replay_jacobian is not None
+            if segment_index > 0:
+                previous = 6 * (segment_index - 1)
+                for column in range(3):
+                    jacobian[row, previous + column] = (
+                        gx * replay_jacobian[0][column]
+                        + gy * replay_jacobian[1][column]
+                        + gheading * replay_jacobian[2][column]
+                    )
+            current = 6 * segment_index
+            for control_column in range(2):
+                jacobian[row, current + 3 + control_column] = (
+                    gx * replay_jacobian[0][3 + control_column]
+                    + gy * replay_jacobian[1][3 + control_column]
+                    + gheading * replay_jacobian[2][3 + control_column]
+                )
+            jacobian[row, current + 5] = rho * (
+                gx * replay_jacobian[0][5]
+                + gy * replay_jacobian[1][5]
+                + gheading * replay_jacobian[2][5]
+            )
+        row += 1
+
+
 def build_wheel_sqp_terrain_constraints_v2(
     problem: WheelSQPProblemV1,
     vector: object,
@@ -898,7 +1108,11 @@ def estimate_wheel_sqp_attempt_resources_v2(
         "base_inequality_count",
     )
     terrain_inequality_count = _checked_u63_mul(5, segment_count)
-    total_constraint_count = _checked_u63(12 * segment_count - 1, "total_constraint_count")
+    repair_inequality_count = 3 if problem.repair is not None else 0
+    total_constraint_count = _checked_u63_add(
+        _checked_u63(12 * segment_count - 1, "legacy_total_constraint_count"),
+        repair_inequality_count,
+    )
     ledger.check_deadline()
 
     radius = hypot(
@@ -1171,6 +1385,24 @@ def audit_wheel_sqp_candidate_v2(
                 objective=objective_value,
                 mode_and_slew_passed=True,
             )
+        if problem.repair is not None:
+            repair = problem.repair_inequalities(copied)
+            if not bool(np.isfinite(repair).all()):
+                return _failed_audit(
+                    "wheel_sqp_numeric_contract_failed",
+                    dynamics=maximum_dynamics,
+                    margin=minimum_margin,
+                    objective=objective_value,
+                    mode_and_slew_passed=True,
+                )
+            if bool(np.any(repair < 0.0)):
+                return _failed_audit(
+                    "wheel_sqp_infeasible",
+                    dynamics=maximum_dynamics,
+                    margin=minimum_margin,
+                    objective=objective_value,
+                    mode_and_slew_passed=True,
+                )
         terminal = problem.terminal_inequalities(copied)
         exact_heading_error = _absolute_wrapped_heading_error(
             unpacked.states[-1].heading_rad,
@@ -1413,6 +1645,49 @@ def _candidate_from_audit(
         segments=tuple(segments),
         objective_value=audit.objective_value,
         status=WheelSQPStatusV2.FEASIBLE,
+    )
+
+
+def build_wheel_sqp_problem_v1(
+    corridor: WheelCorridorV2,
+    initial_guess: WheelSQPInitialGuessV2,
+    request: PlanningRequestV2,
+    profile: WheelKinematicSQPProfileV2,
+    terrain_guide: WheelSQPTerrainGuideV1,
+    deadline: PlanningDeadlineV2,
+    ledger: WheelSQPWorkLedgerV1,
+    *,
+    repair: WheelSQPRepairConstraintV1 | None = None,
+) -> WheelSQPProblemV1:
+    """Build an attempt problem with a solver-owned pre-estimate bootstrap receipt."""
+
+    if type(request) is not PlanningRequestV2:
+        raise TypeError("request must be exact PlanningRequestV2")
+    if type(deadline) is not PlanningDeadlineV2:
+        raise TypeError("deadline must be exact PlanningDeadlineV2")
+    if type(ledger) is not WheelSQPWorkLedgerV1:
+        raise TypeError("ledger must be exact WheelSQPWorkLedgerV1")
+    if ledger.deadline is not deadline or ledger.resource_budget != request.resource_budget:
+        raise ValueError("wheel SQP problem resource authority mismatch")
+    ledger.check_deadline()
+    remaining_s = deadline.remaining_s
+    if remaining_s <= 0.0:
+        raise WheelSQPWorkLimitError("planning_deadline_expired")
+    bootstrap = WheelSQPResourceLedgerV1(
+        reserve_s=0.0,
+        remaining_s=remaining_s,
+        accepted=True,
+        reason_code=None,
+    )
+    ledger.check_deadline()
+    return WheelSQPProblemV1(
+        corridor=corridor,
+        initial_guess=initial_guess,
+        request=request,
+        profile=profile,
+        post_solver_reserve=bootstrap,
+        terrain_guide=terrain_guide,
+        repair=repair,
     )
 
 

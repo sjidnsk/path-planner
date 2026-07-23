@@ -74,6 +74,10 @@ class WheelSQPWorkLimitError(RuntimeError):
         self.reason_code = reason_code
 
 
+class WheelSQPRepairNotAllowed(ValueError):
+    """Raised when an L2 counterexample cannot authorize geometric repair."""
+
+
 class WheelSQPWorkLedgerV1:
     __slots__ = (
         "_accounted_bytes",
@@ -722,6 +726,75 @@ class WheelL2CounterexampleV2:
             raise ValueError("out-of-bounds counterexamples are not repairable")
 
 
+@dataclass(frozen=True, slots=True)
+class WheelSQPRepairConstraintV1:
+    source_candidate_hash: str
+    source_segment_hash: str
+    source_snapshot_hash: str
+    segment_index: int
+    cell: Cell
+    face: str
+    rho_lo: float
+    rho_mid: float
+    rho_hi: float
+    cell_left_x_m: float
+    cell_right_x_m: float
+    cell_bottom_y_m: float
+    cell_top_y_m: float
+    clearance_m: float
+
+    def __post_init__(self) -> None:
+        _exact_hash(self.source_candidate_hash, "source_candidate_hash")
+        _exact_hash(self.source_segment_hash, "source_segment_hash")
+        _exact_hash(self.source_snapshot_hash, "source_snapshot_hash")
+        _exact_nonnegative_int(self.segment_index, "segment_index")
+        _exact_cell(self.cell, "cell")
+        if type(self.face) is not str:
+            raise TypeError("face must be exact str")
+        if self.face not in ("left", "right", "bottom", "top"):
+            raise ValueError("face must be left, right, bottom, or top")
+        fractions = (
+            _exact_finite_float(self.rho_lo, "rho_lo", nonnegative=True),
+            _exact_finite_float(self.rho_mid, "rho_mid", nonnegative=True),
+            _exact_finite_float(self.rho_hi, "rho_hi", nonnegative=True),
+        )
+        if not fractions[0] <= fractions[1] <= fractions[2] <= 1.0:
+            raise ValueError("repair rho values must be ordered within [0, 1]")
+        scale = 1 << 24
+        if any(not (fraction * scale).is_integer() for fraction in fractions):
+            raise ValueError("repair rho values must use the depth-24 dyadic grid")
+        bounds = (
+            _exact_finite_float(self.cell_left_x_m, "cell_left_x_m"),
+            _exact_finite_float(self.cell_right_x_m, "cell_right_x_m"),
+            _exact_finite_float(self.cell_bottom_y_m, "cell_bottom_y_m"),
+            _exact_finite_float(self.cell_top_y_m, "cell_top_y_m"),
+        )
+        if not bounds[0] < bounds[1] or not bounds[2] < bounds[3]:
+            raise ValueError("repair cell world bounds must be strictly ordered")
+        if bounds[1] != bounds[0] + 0.5 or bounds[3] != bounds[2] + 0.5:
+            raise ValueError("repair cell bounds must use the fine-grid resolution")
+        clearance = _exact_finite_float(
+            self.clearance_m,
+            "clearance_m",
+            nonnegative=True,
+        )
+        if clearance != 1.0e-4:
+            raise ValueError("clearance_m must be exactly 1e-4")
+
+    @property
+    def time_fractions(self) -> tuple[float, float, float]:
+        return (self.rho_lo, self.rho_mid, self.rho_hi)
+
+    @property
+    def cell_bounds_m(self) -> tuple[float, float, float, float]:
+        return (
+            self.cell_left_x_m,
+            self.cell_right_x_m,
+            self.cell_bottom_y_m,
+            self.cell_top_y_m,
+        )
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class WheelTrajectoryL2ResultV2:
     passed: bool
@@ -1063,8 +1136,12 @@ class WheelSQPResourceEstimateV1:
             raise ValueError("base_inequality_count must equal 4N-1")
         if self.terrain_inequality_count != 5 * self.segment_count:
             raise ValueError("terrain_inequality_count must equal 5N")
-        if self.total_constraint_count != 12 * self.segment_count - 1:
-            raise ValueError("total_constraint_count must equal 12N-1")
+        legacy_constraint_count = 12 * self.segment_count - 1
+        if self.total_constraint_count not in (
+            legacy_constraint_count,
+            legacy_constraint_count + 3,
+        ):
+            raise ValueError("total_constraint_count must equal 12N-1 or 12N+2")
         if self.required_bytes != (
             self.decision_bytes
             + self.jacobian_bytes
