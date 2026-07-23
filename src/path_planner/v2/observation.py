@@ -20,6 +20,7 @@ from path_planner.v2.terrain import (
     TerrainProvenanceV2,
     TerrainSnapshotV2,
 )
+from path_planner.v2.wheel_sqp_contracts import WheelKinematicRouteV2
 
 
 OBSERVATION_PROJECTION_SOURCE_V2 = "path-planner-v2-observed-only-fov-los/v1"
@@ -159,7 +160,9 @@ def _append_without_pose_seam(
     output.extend(values[start_index:])
 
 
-def _route_waypoints(route: TypedRouteV2) -> tuple[PoseStateV2, ...]:
+def _route_waypoints(
+    route: TypedRouteV2 | WheelKinematicRouteV2,
+) -> tuple[PoseStateV2, ...]:
     points: list[PoseStateV2] = []
     if route.platform_kind is PlatformKindV2.WHEEL:
         for primitive in route.primitives:
@@ -339,13 +342,13 @@ def _visible_unknown_cells(
 
 
 def project_route_observation_v2(
-    route: TypedRouteV2,
+    route: TypedRouteV2 | WheelKinematicRouteV2,
     observed_terrain: ObservedTerrainInputV2,
     *,
     endpoint_theta_rad: float,
 ) -> ObservationProjectionV2:
-    if type(route) is not TypedRouteV2:
-        raise TypeError("route must be exact TypedRouteV2")
+    if type(route) not in (TypedRouteV2, WheelKinematicRouteV2):
+        raise TypeError("route must be an exact supported TypedRouteV2")
     if type(observed_terrain) is not ObservedTerrainInputV2:
         raise TypeError("observed_terrain must be exact ObservedTerrainInputV2")
     endpoint_theta = PoseStateV2(0.0, 0.0, endpoint_theta_rad).heading_rad

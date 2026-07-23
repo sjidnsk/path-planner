@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from math import pi
 
 import numpy as np
+import pytest
 
 from path_planner.v2.contracts import (
     PlatformKindV2,
@@ -128,6 +129,17 @@ def _observed(snapshot: TerrainSnapshotV2, start: PoseStateV2) -> ObservedTerrai
         start_state=start,
         terrain_snapshot=snapshot,
     )
+
+
+def test_projection_rejects_values_outside_the_exact_route_type_whitelist() -> None:
+    snapshot = _snapshot()
+    start = PoseStateV2(0.25, 0.25, 0.0)
+    with pytest.raises(TypeError, match="exact supported TypedRouteV2"):
+        project_route_observation_v2(
+            object(),
+            _observed(snapshot, start),
+            endpoint_theta_rad=0.0,
+        )
 
 
 def test_observed_input_masks_unknown_values_and_rebuilds_truth_independent_provenance() -> None:

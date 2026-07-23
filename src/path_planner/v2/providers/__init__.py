@@ -24,6 +24,7 @@ from path_planner.v2.providers.wheel import (
     WheelMotionPrimitiveV2,
     WheelPrimitiveProviderV2,
 )
+from path_planner.v2.providers.wheel_sqp import WheelKinematicSQPProviderV2
 
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "HopperPrimitiveProviderV2",
     "PrimitiveProviderV2",
     "WheelMotionPrimitiveV2",
+    "WheelKinematicSQPProviderV2",
     "WheelPrimitiveProviderV2",
     "legged_state_key_v2",
     "nominal_legged_search_state_v2",

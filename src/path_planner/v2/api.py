@@ -23,7 +23,11 @@ from path_planner.v2.contracts import (
     ValidationEvidenceV2,
     ValidationLevelV2,
 )
-from path_planner.v2.profiles import PlatformProfileRegistryV2, PlatformProfileV2
+from path_planner.v2.profiles import (
+    WHEEL_KINEMATIC_CORRIDOR_SQP_CAPABILITY_V2,
+    PlatformProfileRegistryV2,
+    PlatformProfileV2,
+)
 from path_planner.v2.providers import (
     LeggedSearchStateV2,
     LeggedStepPrimitiveV2,
@@ -573,6 +577,12 @@ def plan_v2(
             stage="profile_resolution",
             details=(("profile_id", request.platform_profile_id),),
         )
+    wheel_sqp_dispatch_required = (
+        type(profile) is PlatformProfileV2
+        and profile.platform_kind is PlatformKindV2.WHEEL
+        and profile.capability_revision
+        == WHEEL_KINEMATIC_CORRIDOR_SQP_CAPABILITY_V2
+    )
 
     snapshot = request.terrain_snapshot
     if type(snapshot) is not TerrainSnapshotV2:
@@ -619,6 +629,17 @@ def plan_v2(
             reason_code="primitive_provider_unregistered",
             stage="provider_resolution",
             details=(("profile_id", profile.profile_id),),
+        )
+
+    if wheel_sqp_dispatch_required:
+        from path_planner.v2.wheel_sqp_api import dispatch_wheel_sqp_provider_v2
+
+        return dispatch_wheel_sqp_provider_v2(
+            request,
+            profile,
+            provider,
+            anchor,
+            deadline,
         )
 
     try:

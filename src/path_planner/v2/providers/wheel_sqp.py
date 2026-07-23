@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from hashlib import sha256
 from math import isfinite
@@ -71,6 +72,11 @@ WHEEL_SQP_CACHE_NAMESPACE_DISABLED_V2 = (
 )
 WHEEL_SQP_CACHE_KEY_DISABLED_V2 = "wheel-sqp-cache-disabled/v1"
 WHEEL_SQP_DECISION_DOMAIN_V1 = "wheel_sqp_first_passing_route_decision/v1"
+
+_DECISION_AUDIT_SINK_V1: ContextVar[object | None] = ContextVar(
+    "wheel_sqp_decision_audit_sink_v1",
+    default=None,
+)
 
 _ZERO_HASH = "0" * 64
 _PRESERVED_L2_REASONS = frozenset(
@@ -199,7 +205,7 @@ def _telemetry(
     selected_corridor_index: int | None,
     decision_hash: str | None,
 ) -> WheelSQPSearchTelemetryV2:
-    return WheelSQPSearchTelemetryV2(
+    telemetry = WheelSQPSearchTelemetryV2(
         expanded_states=0 if ledger is None else ledger.expanded_states,
         generated_primitives=0 if state is None else state.generated_primitives,
         rejected_l0=0,
@@ -222,6 +228,12 @@ def _telemetry(
         repair_attempted=False if state is None else state.repair_attempted,
         decision_hash=decision_hash,
     )
+    audit_sink = _DECISION_AUDIT_SINK_V1.get()
+    if audit_sink is not None:
+        if not callable(audit_sink):
+            raise TypeError("wheel SQP decision audit sink must be callable")
+        audit_sink((termination_reason, decision_hash))
+    return telemetry
 
 
 def _failure(

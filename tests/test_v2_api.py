@@ -253,6 +253,27 @@ def test_single_request_calls_only_the_exact_registered_provider_once() -> None:
     assert other_provider.calls == []
 
 
+def test_old_wheel_capability_never_enters_wheel_sqp_dispatch(monkeypatch) -> None:
+    import path_planner.v2.wheel_sqp_api as wheel_sqp_api
+
+    request = _request()
+    profile = _profile()
+    provider = _ProviderSpy(profile, lambda value: _success(value))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("old wheel capability must not enter wheel SQP dispatch")
+
+    monkeypatch.setattr(wheel_sqp_api, "dispatch_wheel_sqp_provider_v2", forbidden)
+    outcome = plan_v2(
+        request,
+        registry=PlatformProfileRegistryV2((profile,)),
+        providers={profile.profile_id: provider},
+    )
+
+    assert type(outcome) is PlanningSuccessV2
+    assert len(provider.calls) == 1
+
+
 class _FakeClock:
     def __init__(self, now: float) -> None:
         self.now = now
