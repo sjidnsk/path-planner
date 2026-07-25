@@ -4,13 +4,49 @@ import heapq
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from numbers import Real
+from typing import Any, Callable, Iterable
 
 from path_planner.core import Cell, CostGrid, FailureReason, GridSpec, WorldPoint
 from path_planner.search.planning_grid import PlanningGrid
 
 
 HYBRID_ASTAR_POSE_PATH = "hybrid_astar_pose_path"
+MAX_REPLAY_STEPS = 100_000
+
+
+class _ReplayDeadlineExceeded(TimeoutError):
+    pass
+
+
+class _ValidatorContractError(RuntimeError):
+    pass
+
+
+def _finite_real(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a finite real number")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise ValueError(f"{name} must be finite")
+    return normalized
+
+
+def _call_validator(callback: Callable[[Any], bool], value: Any, name: str) -> bool:
+    try:
+        result = callback(value)
+    except Exception as exc:
+        raise _ValidatorContractError(f"{name} raised an exception") from exc
+    if type(result) is not bool:
+        raise _ValidatorContractError(f"{name} must return exact bool")
+    return result
+
+
+def _deadline_checker_expired(deadline_checker: Callable[[], bool]) -> bool:
+    result = deadline_checker()
+    if type(result) is not bool:
+        raise TypeError("deadline_checker must return exact bool")
+    return result
 
 
 @dataclass(frozen=True)
@@ -53,6 +89,161 @@ class MotionPrimitive:
             "reverse": bool(self.reverse),
             "turn_in_place": bool(self.turn_in_place),
         }
+
+
+@dataclass(frozen=True)
+class PoseTransition:
+    start: Pose2D
+    primitive: MotionPrimitive
+    samples: tuple[Pose2D, ...]
+    end: Pose2D
+    distance_m: float
+    absolute_heading_change_rad: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.start, Pose2D):
+            raise TypeError("start must be Pose2D")
+        if not isinstance(self.primitive, MotionPrimitive):
+            raise TypeError("primitive must be MotionPrimitive")
+        if not isinstance(self.samples, tuple):
+            raise TypeError("samples must be a tuple")
+        if len(self.samples) < 2 or any(not isinstance(sample, Pose2D) for sample in self.samples):
+            raise ValueError("samples must contain at least exact start and end Pose2D values")
+        if not isinstance(self.end, Pose2D):
+            raise TypeError("end must be Pose2D")
+        if self.samples[0] != self.start:
+            raise ValueError("samples must begin with start")
+        if self.samples[-1] != self.end:
+            raise ValueError("samples must end with end")
+        for pose in self.samples:
+            _finite_real(pose.x_m, "sample x_m")
+            _finite_real(pose.y_m, "sample y_m")
+            _finite_real(pose.theta_rad, "sample theta_rad")
+        distance_m = _finite_real(self.distance_m, "distance_m")
+        heading_change = _finite_real(
+            self.absolute_heading_change_rad,
+            "absolute_heading_change_rad",
+        )
+        primitive_omega = _finite_real(
+            self.primitive.omega_radps,
+            "primitive omega_radps",
+        )
+        primitive_duration = _finite_real(
+            self.primitive.duration_s,
+            "primitive duration_s",
+        )
+        if distance_m < 0.0:
+            raise ValueError("distance_m must be nonnegative")
+        if heading_change < 0.0:
+            raise ValueError("absolute heading change must be nonnegative")
+        expected_heading_change = abs(primitive_omega) * primitive_duration
+        if not math.isclose(
+            heading_change,
+            expected_heading_change,
+            rel_tol=1.0e-12,
+            abs_tol=1.0e-12,
+        ):
+            raise ValueError("absolute heading change must match primitive motion")
+        sampled_distance = sum(
+            math.hypot(right.x_m - left.x_m, right.y_m - left.y_m)
+            for left, right in zip(self.samples, self.samples[1:], strict=False)
+        )
+        if not math.isclose(distance_m, sampled_distance, rel_tol=1.0e-12, abs_tol=1.0e-12):
+            raise ValueError("distance_m must match sample distance")
+
+
+@dataclass(frozen=True)
+class PoseSearchAudit:
+    generated_primitives: int = 0
+    rejected_poses: int = 0
+    rejected_transitions: int = 0
+    timed_out: bool = False
+    termination_reason: str = "not_started"
+
+    def __post_init__(self) -> None:
+        for name in ("generated_primitives", "rejected_poses", "rejected_transitions"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+            if value < 0:
+                raise ValueError(f"{name} must be nonnegative")
+        if self.rejected_transitions > self.generated_primitives:
+            raise ValueError("rejected_transitions cannot exceed generated_primitives")
+        if type(self.timed_out) is not bool:
+            raise TypeError("timed_out must be bool")
+        if not isinstance(self.termination_reason, str) or not self.termination_reason:
+            raise ValueError("termination_reason must be a nonempty string")
+        if self.timed_out != (self.termination_reason == FailureReason.TIMEOUT.value):
+            raise ValueError("timeout audit fields must agree")
+
+
+def replay_motion_primitive(
+    start: Pose2D,
+    primitive: MotionPrimitive,
+    integration_dt_s: float,
+    *,
+    deadline_checker: Callable[[], bool] | None = None,
+) -> PoseTransition:
+    """Replay one primitive with the same exact integration used by Hybrid A*."""
+
+    if not isinstance(start, Pose2D):
+        raise TypeError("start must be Pose2D")
+    if not isinstance(primitive, MotionPrimitive):
+        raise TypeError("primitive must be MotionPrimitive")
+    _finite_real(start.x_m, "start x_m")
+    _finite_real(start.y_m, "start y_m")
+    _finite_real(start.theta_rad, "start theta_rad")
+    _finite_real(primitive.v_mps, "primitive v_mps")
+    _finite_real(primitive.omega_radps, "primitive omega_radps")
+    duration_s = _finite_real(primitive.duration_s, "primitive duration_s")
+    integration_dt_s = _finite_real(integration_dt_s, "integration_dt_s")
+    if integration_dt_s <= 0.0:
+        raise ValueError("integration_dt_s must be a finite positive number")
+    if deadline_checker is not None and not callable(deadline_checker):
+        raise TypeError("deadline_checker must be callable")
+
+    step_ratio = duration_s / integration_dt_s
+    if not math.isfinite(step_ratio) or step_ratio > MAX_REPLAY_STEPS:
+        raise ValueError(f"replay steps must not exceed {MAX_REPLAY_STEPS}")
+    steps = max(1, int(math.ceil(step_ratio)))
+    dt = duration_s / float(steps)
+    pose = start.normalized()
+    samples = [start]
+    distance_m = 0.0
+    absolute_heading_change_rad = 0.0
+    for _ in range(steps):
+        if deadline_checker is not None and _deadline_checker_expired(deadline_checker):
+            raise _ReplayDeadlineExceeded("motion primitive replay deadline expired")
+        if abs(primitive.omega_radps) < 1.0e-12:
+            next_pose = Pose2D(
+                pose.x_m + primitive.v_mps * math.cos(pose.theta_rad) * dt,
+                pose.y_m + primitive.v_mps * math.sin(pose.theta_rad) * dt,
+                pose.theta_rad,
+            ).normalized()
+        else:
+            theta_next = pose.theta_rad + primitive.omega_radps * dt
+            if abs(primitive.v_mps) < 1.0e-12:
+                next_pose = Pose2D(pose.x_m, pose.y_m, theta_next).normalized()
+            else:
+                radius = primitive.v_mps / primitive.omega_radps
+                next_pose = Pose2D(
+                    pose.x_m + radius * (math.sin(theta_next) - math.sin(pose.theta_rad)),
+                    pose.y_m - radius * (math.cos(theta_next) - math.cos(pose.theta_rad)),
+                    theta_next,
+                ).normalized()
+        distance_m += math.hypot(next_pose.x_m - pose.x_m, next_pose.y_m - pose.y_m)
+        absolute_heading_change_rad += abs(primitive.omega_radps * dt)
+        samples.append(next_pose)
+        pose = next_pose
+
+    return PoseTransition(
+        start=start,
+        primitive=primitive,
+        samples=tuple(samples),
+        end=samples[-1],
+        distance_m=distance_m,
+        absolute_heading_change_rad=absolute_heading_change_rad,
+    )
 
 
 @dataclass(frozen=True)
@@ -191,6 +382,7 @@ class PosePlanResult:
     expanded_count: int
     failure_reason: FailureReason | None
     diagnostics: PosePathDiagnostics = field(default_factory=PosePathDiagnostics)
+    audit: PoseSearchAudit = field(default_factory=PoseSearchAudit)
 
     def __post_init__(self) -> None:
         if self.success and self.failure_reason is not None:
@@ -234,7 +426,7 @@ class _Node:
 
 @dataclass(frozen=True)
 class _StepOutcome:
-    pose: Pose2D
+    transition: PoseTransition
     samples: tuple[Pose2D, ...]
     breakdown: PoseCostBreakdown
 
@@ -249,14 +441,101 @@ class HybridAStarPlanner:
     def __init__(self, primitives: Iterable[MotionPrimitive] | None = None) -> None:
         self._custom_primitives = tuple(primitives) if primitives is not None else None
 
-    def plan(self, grid: CostGrid | PlanningGrid, request: PosePlanRequest) -> PosePlanResult:
+    def plan(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PosePlanRequest,
+        *,
+        pose_validator: Callable[[Pose2D], bool] | None = None,
+        transition_validator: Callable[[PoseTransition], bool] | None = None,
+        deadline_monotonic_s: float | None = None,
+        monotonic_clock: Callable[[], float] = time.monotonic,
+    ) -> PosePlanResult:
+        if pose_validator is not None and not callable(pose_validator):
+            raise TypeError("pose_validator must be callable")
+        if transition_validator is not None and not callable(transition_validator):
+            raise TypeError("transition_validator must be callable")
+        if not callable(monotonic_clock):
+            raise TypeError("monotonic_clock must be callable")
+        normalized_deadline = (
+            None
+            if deadline_monotonic_s is None
+            else _finite_real(deadline_monotonic_s, "deadline_monotonic_s")
+        )
         started = time.perf_counter()
-        failure = self._validate_request(grid, request, started)
-        if failure is not None:
-            return failure
-
         primitives = self._custom_primitives or default_scout_mini_primitives(request)
-        grid_cost_to_goal = _grid_cost_to_goal(grid, request.goal)
+        generated_primitives = 0
+        rejected_poses = 0
+        rejected_transitions = 0
+
+        def deadline_expired() -> bool:
+            if normalized_deadline is None:
+                return False
+            now = _finite_real(monotonic_clock(), "monotonic_clock result")
+            return now >= normalized_deadline
+
+        def audit(reason: str, *, timed_out: bool = False) -> PoseSearchAudit:
+            return PoseSearchAudit(
+                generated_primitives=generated_primitives,
+                rejected_poses=rejected_poses,
+                rejected_transitions=rejected_transitions,
+                timed_out=timed_out,
+                termination_reason=reason,
+            )
+
+        if deadline_expired():
+            return self._failure(
+                grid, request, FailureReason.TIMEOUT, 0, 0, started, primitives,
+                audit(FailureReason.TIMEOUT.value, timed_out=True),
+            )
+
+        try:
+            failure, endpoint_rejections = self._validate_request(
+                grid,
+                request,
+                started,
+                pose_validator,
+            )
+        except _ValidatorContractError:
+            return self._failure(
+                grid,
+                request,
+                FailureReason.VALIDATOR_ERROR,
+                0,
+                0,
+                started,
+                primitives,
+                audit(FailureReason.VALIDATOR_ERROR.value),
+            )
+        rejected_poses += endpoint_rejections
+        if deadline_expired():
+            return self._failure(
+                grid, request, FailureReason.TIMEOUT, 0, 0, started, primitives,
+                audit(FailureReason.TIMEOUT.value, timed_out=True),
+            )
+        if failure is not None:
+            return self._failure(
+                grid,
+                request,
+                failure.failure_reason or FailureReason.INVALID_INPUT,
+                0,
+                0,
+                started,
+                primitives,
+                audit((failure.failure_reason or FailureReason.INVALID_INPUT).value),
+            )
+
+        if deadline_expired():
+            return self._failure(
+                grid, request, FailureReason.TIMEOUT, 0, 0, started, primitives,
+                audit(FailureReason.TIMEOUT.value, timed_out=True),
+            )
+        grid_cost_to_goal = _grid_cost_to_goal(grid, request.goal, deadline_expired)
+        if grid_cost_to_goal is None or deadline_expired():
+            return self._failure(
+                grid, request, FailureReason.TIMEOUT, 0, 0, started, primitives,
+                audit(FailureReason.TIMEOUT.value, timed_out=True),
+            )
         start_key = self._key(
             grid.spec,
             request.start,
@@ -273,6 +552,11 @@ class HybridAStarPlanner:
         order = 0
 
         while frontier:
+            if deadline_expired():
+                return self._failure(
+                    grid, request, FailureReason.TIMEOUT, expanded_count, max_frontier_size,
+                    started, primitives, audit(FailureReason.TIMEOUT.value, timed_out=True),
+                )
             if expanded_count >= request.max_iterations:
                 return self._failure(
                     grid,
@@ -282,28 +566,105 @@ class HybridAStarPlanner:
                     max_frontier_size,
                     started,
                     primitives,
+                    audit(FailureReason.MAX_ITERATIONS.value),
                 )
 
             current_item = heapq.heappop(frontier)
+            if deadline_expired():
+                return self._failure(
+                    grid, request, FailureReason.TIMEOUT, expanded_count, max_frontier_size,
+                    started, primitives, audit(FailureReason.TIMEOUT.value, timed_out=True),
+                )
             current = nodes[current_item.key]
             if current.cost > best_cost.get(current_item.key, math.inf) + 1.0e-12:
                 continue
             expanded_count += 1
 
             if self._goal_reached(current.pose, request):
-                return self._success(grid, request, current_item.key, nodes, expanded_count, max_frontier_size, started, primitives)
+                if deadline_expired():
+                    return self._failure(
+                        grid, request, FailureReason.TIMEOUT, expanded_count, max_frontier_size,
+                        started, primitives, audit(FailureReason.TIMEOUT.value, timed_out=True),
+                    )
+                success = self._success(
+                    grid, request, current_item.key, nodes, expanded_count,
+                    max_frontier_size, started, primitives, audit("success"),
+                )
+                if deadline_expired():
+                    return self._failure(
+                        grid, request, FailureReason.TIMEOUT, expanded_count, max_frontier_size,
+                        started, primitives, audit(FailureReason.TIMEOUT.value, timed_out=True),
+                    )
+                return success
 
             for primitive in primitives:
-                outcome = self._apply_primitive(grid, request, current.pose, primitive)
+                if deadline_expired():
+                    return self._failure(
+                        grid, request, FailureReason.TIMEOUT, expanded_count, max_frontier_size,
+                        started, primitives, audit(FailureReason.TIMEOUT.value, timed_out=True),
+                    )
+                generated_primitives += 1
+                try:
+                    outcome = self._apply_primitive(
+                        grid,
+                        request,
+                        current.pose,
+                        primitive,
+                        pose_validator,
+                        deadline_expired,
+                    )
+                except _ReplayDeadlineExceeded:
+                    return self._failure(
+                        grid, request, FailureReason.TIMEOUT, expanded_count, max_frontier_size,
+                        started, primitives, audit(FailureReason.TIMEOUT.value, timed_out=True),
+                    )
+                except _ValidatorContractError:
+                    return self._failure(
+                        grid, request, FailureReason.VALIDATOR_ERROR, expanded_count,
+                        max_frontier_size, started, primitives,
+                        audit(FailureReason.VALIDATOR_ERROR.value),
+                    )
+                if deadline_expired():
+                    return self._failure(
+                        grid, request, FailureReason.TIMEOUT, expanded_count, max_frontier_size,
+                        started, primitives, audit(FailureReason.TIMEOUT.value, timed_out=True),
+                    )
                 if outcome is None:
+                    rejected_poses += 1
                     continue
-                key = self._key(grid.spec, outcome.pose, request.theta_bin_count, request.closed_key_xy_resolution_m)
+                if transition_validator is not None:
+                    try:
+                        transition_accepted = _call_validator(
+                            transition_validator,
+                            outcome.transition,
+                            "transition_validator",
+                        )
+                    except _ValidatorContractError:
+                        return self._failure(
+                            grid, request, FailureReason.VALIDATOR_ERROR, expanded_count,
+                            max_frontier_size, started, primitives,
+                            audit(FailureReason.VALIDATOR_ERROR.value),
+                        )
+                    if not transition_accepted:
+                        rejected_transitions += 1
+                        continue
+                if deadline_expired():
+                    return self._failure(
+                        grid, request, FailureReason.TIMEOUT, expanded_count, max_frontier_size,
+                        started, primitives, audit(FailureReason.TIMEOUT.value, timed_out=True),
+                    )
+                key = self._key(
+                    grid.spec,
+                    outcome.transition.end,
+                    request.theta_bin_count,
+                    request.closed_key_xy_resolution_m,
+                )
                 new_cost = current.cost + outcome.breakdown.total
                 if new_cost >= best_cost.get(key, math.inf):
                     continue
                 best_cost[key] = new_cost
                 nodes[key] = _Node(
-                    pose=outcome.pose,
+                    pose=outcome.transition.end,
                     samples_from_parent=outcome.samples,
                     parent_key=current_item.key,
                     primitive=primitive,
@@ -313,7 +674,7 @@ class HybridAStarPlanner:
                 order += 1
                 heapq.heappush(
                     frontier,
-                    _QueueItem(new_cost + self._heuristic(grid, outcome.pose, request, grid_cost_to_goal), order, key),
+                    _QueueItem(new_cost + self._heuristic(grid, outcome.transition.end, request, grid_cost_to_goal), order, key),
                 )
             max_frontier_size = max(max_frontier_size, len(frontier))
 
@@ -325,6 +686,7 @@ class HybridAStarPlanner:
             max_frontier_size,
             started,
             primitives,
+            audit(FailureReason.UNREACHABLE.value),
         )
 
     def _validate_request(
@@ -332,19 +694,32 @@ class HybridAStarPlanner:
         grid: CostGrid | PlanningGrid,
         request: PosePlanRequest,
         started: float,
-    ) -> PosePlanResult | None:
+        pose_validator: Callable[[Pose2D], bool] | None,
+    ) -> tuple[PosePlanResult | None, int]:
         start_cell = grid.spec.world_to_cell(WorldPoint(request.start.x_m, request.start.y_m))
         goal_cell = grid.spec.world_to_cell(WorldPoint(request.goal.x_m, request.goal.y_m))
         primitives = self._custom_primitives or default_scout_mini_primitives(request)
         if not grid.spec.in_bounds(start_cell):
-            return self._failure(grid, request, FailureReason.START_OUT_OF_BOUNDS, 0, 0, started, primitives)
+            return self._failure(grid, request, FailureReason.START_OUT_OF_BOUNDS, 0, 0, started, primitives), 0
         if not grid.spec.in_bounds(goal_cell):
-            return self._failure(grid, request, FailureReason.GOAL_OUT_OF_BOUNDS, 0, 0, started, primitives)
-        if not self._pose_collision_free(grid, request, request.start):
-            return self._failure(grid, request, FailureReason.START_BLOCKED, 0, 0, started, primitives)
-        if not self._pose_collision_free(grid, request, request.goal):
-            return self._failure(grid, request, FailureReason.GOAL_BLOCKED, 0, 0, started, primitives)
-        return None
+            return self._failure(grid, request, FailureReason.GOAL_OUT_OF_BOUNDS, 0, 0, started, primitives), 0
+        start_feasible, start_rejected = self._pose_is_feasible(
+            grid, request, request.start, pose_validator,
+        )
+        if not start_feasible:
+            return (
+                self._failure(grid, request, FailureReason.START_BLOCKED, 0, 0, started, primitives),
+                int(start_rejected),
+            )
+        goal_feasible, goal_rejected = self._pose_is_feasible(
+            grid, request, request.goal, pose_validator,
+        )
+        if not goal_feasible:
+            return (
+                self._failure(grid, request, FailureReason.GOAL_BLOCKED, 0, 0, started, primitives),
+                int(goal_rejected),
+            )
+        return None, 0
 
     def _apply_primitive(
         self,
@@ -352,52 +727,72 @@ class HybridAStarPlanner:
         request: PosePlanRequest,
         start: Pose2D,
         primitive: MotionPrimitive,
+        pose_validator: Callable[[Pose2D], bool] | None,
+        deadline_expired: Callable[[], bool],
     ) -> _StepOutcome | None:
-        steps = max(1, int(math.ceil(primitive.duration_s / request.integration_dt_s)))
-        dt = primitive.duration_s / float(steps)
-        pose = start.normalized()
-        samples: list[Pose2D] = []
-        translation = 0.0
-        rotation = 0.0
+        if deadline_expired():
+            return None
+        transition = replay_motion_primitive(
+            start,
+            primitive,
+            request.integration_dt_s,
+            deadline_checker=deadline_expired,
+        )
+        if deadline_expired():
+            return None
         terrain_cost = 0.0
-        for _ in range(steps):
-            if abs(primitive.omega_radps) < 1.0e-12:
-                next_pose = Pose2D(
-                    pose.x_m + primitive.v_mps * math.cos(pose.theta_rad) * dt,
-                    pose.y_m + primitive.v_mps * math.sin(pose.theta_rad) * dt,
-                    pose.theta_rad,
-                ).normalized()
-            else:
-                theta_next = pose.theta_rad + primitive.omega_radps * dt
-                if abs(primitive.v_mps) < 1.0e-12:
-                    next_pose = Pose2D(pose.x_m, pose.y_m, theta_next).normalized()
-                else:
-                    radius = primitive.v_mps / primitive.omega_radps
-                    next_pose = Pose2D(
-                        pose.x_m + radius * (math.sin(theta_next) - math.sin(pose.theta_rad)),
-                        pose.y_m - radius * (math.cos(theta_next) - math.cos(pose.theta_rad)),
-                        theta_next,
-                    ).normalized()
-            if not self._pose_collision_free(grid, request, next_pose):
+        search_heading_change_rad = 0.0
+        previous_pose = start.normalized()
+        dt = primitive.duration_s / float(len(transition.samples) - 1)
+        for next_pose in transition.samples[1:]:
+            if deadline_expired():
+                return None
+            feasible, _ = self._pose_is_feasible(grid, request, next_pose, pose_validator)
+            if not feasible:
                 return None
             cell = grid.spec.world_to_cell(WorldPoint(next_pose.x_m, next_pose.y_m))
             if not grid.spec.in_bounds(cell):
                 return None
-            translation += math.hypot(next_pose.x_m - pose.x_m, next_pose.y_m - pose.y_m)
-            rotation += abs(_angle_diff(next_pose.theta_rad, pose.theta_rad))
+            search_heading_change_rad += abs(
+                _angle_diff(next_pose.theta_rad, previous_pose.theta_rad)
+            )
+            previous_pose = next_pose
             terrain_cost += max(0.0, grid.cost_at(cell) - grid.min_passable_cost()) * request.terrain_cost_weight * dt
-            samples.append(next_pose)
-            pose = next_pose
 
         breakdown = PoseCostBreakdown(
-            translation_cost=translation * request.translation_cost_weight,
-            rotation_cost=rotation * request.rotation_cost_weight,
-            reverse_penalty=(translation * request.reverse_penalty_weight if primitive.reverse else 0.0),
-            turn_penalty=(rotation * request.turn_penalty_weight if abs(primitive.omega_radps) > 1.0e-12 else 0.0),
+            translation_cost=transition.distance_m * request.translation_cost_weight,
+            rotation_cost=search_heading_change_rad * request.rotation_cost_weight,
+            reverse_penalty=(transition.distance_m * request.reverse_penalty_weight if primitive.reverse else 0.0),
+            turn_penalty=(search_heading_change_rad * request.turn_penalty_weight if abs(primitive.omega_radps) > 1.0e-12 else 0.0),
             slope_cost=terrain_cost,
             clearance_cost=0.0,
         )
-        return _StepOutcome(pose=pose, samples=tuple(samples), breakdown=breakdown)
+        return _StepOutcome(
+            transition=transition,
+            samples=transition.samples[1:],
+            breakdown=breakdown,
+        )
+
+    def _pose_is_feasible(
+        self,
+        grid: CostGrid | PlanningGrid,
+        request: PosePlanRequest,
+        pose: Pose2D,
+        pose_validator: Callable[[Pose2D], bool] | None,
+    ) -> tuple[bool, bool]:
+        if pose_validator is None:
+            return self._pose_collision_free(grid, request, pose), False
+        center_cell = grid.spec.world_to_cell(WorldPoint(pose.x_m, pose.y_m))
+        if not grid.spec.in_bounds(center_cell):
+            return False, False
+        try:
+            center_cost = grid.cost_at(center_cell)
+        except Exception:
+            return False, False
+        if not math.isfinite(center_cost) or center_cost < 0.0:
+            return False, False
+        accepted = _call_validator(pose_validator, pose, "pose_validator")
+        return accepted, not accepted
 
     def _pose_collision_free(self, grid: CostGrid | PlanningGrid, request: PosePlanRequest, pose: Pose2D) -> bool:
         center_cell = grid.spec.world_to_cell(WorldPoint(pose.x_m, pose.y_m))
@@ -458,6 +853,7 @@ class HybridAStarPlanner:
         max_frontier_size: int,
         started: float,
         primitives: tuple[MotionPrimitive, ...],
+        audit: PoseSearchAudit,
     ) -> PosePlanResult:
         pose_path, controls = _reconstruct(nodes, goal_key)
         legacy_cells = _dedupe_cells(
@@ -475,6 +871,7 @@ class HybridAStarPlanner:
             expanded_count=expanded_count,
             failure_reason=None,
             diagnostics=self._diagnostics(request, expanded_count, max_frontier_size, started, primitives),
+            audit=audit,
         )
 
     def _failure(
@@ -486,6 +883,7 @@ class HybridAStarPlanner:
         max_frontier_size: int,
         started: float,
         primitives: tuple[MotionPrimitive, ...],
+        audit: PoseSearchAudit | None = None,
     ) -> PosePlanResult:
         return PosePlanResult(
             success=False,
@@ -497,6 +895,11 @@ class HybridAStarPlanner:
             expanded_count=expanded_count,
             failure_reason=reason,
             diagnostics=self._diagnostics(request, expanded_count, max_frontier_size, started, primitives),
+            audit=(
+                audit
+                if audit is not None
+                else PoseSearchAudit(termination_reason=reason.value)
+            ),
         )
 
     def _diagnostics(
@@ -599,7 +1002,13 @@ def _dedupe_cells(cells: Iterable[Cell]) -> tuple[Cell, ...]:
     return tuple(result)
 
 
-def _grid_cost_to_goal(grid: CostGrid | PlanningGrid, goal_pose: Pose2D) -> dict[Cell, float]:
+def _grid_cost_to_goal(
+    grid: CostGrid | PlanningGrid,
+    goal_pose: Pose2D,
+    deadline_expired: Callable[[], bool] | None = None,
+) -> dict[Cell, float] | None:
+    if deadline_expired is not None and deadline_expired():
+        return None
     goal = grid.spec.world_to_cell(WorldPoint(goal_pose.x_m, goal_pose.y_m))
     if not grid.is_passable(goal):
         return {}
@@ -618,10 +1027,14 @@ def _grid_cost_to_goal(grid: CostGrid | PlanningGrid, goal_pose: Pose2D) -> dict
         (1, 1, math.sqrt(2.0)),
     )
     while frontier:
+        if deadline_expired is not None and deadline_expired():
+            return None
         current_cost, _, current = heapq.heappop(frontier)
         if current_cost > cost_so_far.get(current, math.inf) + 1.0e-12:
             continue
         for dx, dy, step in directions:
+            if deadline_expired is not None and deadline_expired():
+                return None
             neighbor = Cell(current.x + dx, current.y + dy)
             if not grid.is_passable(neighbor):
                 continue

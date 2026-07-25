@@ -17,7 +17,10 @@ from .hybrid_astar import (
     PosePathDiagnostics,
     PosePlanRequest,
     PosePlanResult,
+    PoseSearchAudit,
+    PoseTransition,
     default_scout_mini_primitives,
+    replay_motion_primitive,
 )
 from .planning_grid import (
     PLATFORM_AWARE_ASTAR,
@@ -54,6 +57,8 @@ __all__ = [
     "PosePathDiagnostics",
     "PosePlanRequest",
     "PosePlanResult",
+    "PoseSearchAudit",
+    "PoseTransition",
     "REGION_GRAPH_GUIDED_BACKEND",
     "SAMPLED_REGION_PATH_BACKEND",
     "STANDARD_GRID_ASTAR",
@@ -66,4 +71,5 @@ __all__ = [
     "SearchTerrainLayers",
     "build_planning_grid",
     "default_scout_mini_primitives",
+    "replay_motion_primitive",
 ]
