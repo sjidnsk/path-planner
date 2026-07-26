@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from time import perf_counter_ns
-from typing import Any
 
 from path_planner.v2.contracts import (
     FailureCategoryV2,
@@ -23,12 +22,17 @@ class TimingBreakdownV2:
     complete_route_validation_ns: int
     result_assembly_ns: int
     total_ns: int
+    timing_measurement_valid: bool = True
 
     def __post_init__(self) -> None:
+        if type(self.total_ns) is not int:
+            raise TypeError("total_ns must be an exact integer")
         if any(type(value) is not int or value < 0 for value in self.phase_values()):
             raise ValueError("timing phases must be nonnegative integers")
         if self.total_ns != sum(self.phase_values()):
             raise ValueError("total_ns must equal the exact sum of timing phases")
+        if type(self.timing_measurement_valid) is not bool:
+            raise TypeError("timing_measurement_valid must be exact bool")
 
     def phase_values(self) -> tuple[int, int, int, int, int]:
         return (
@@ -57,15 +61,6 @@ class TimedRequestResultV2:
     timing: TimingBreakdownV2
 
 
-def _interval(clock_ns: Callable[[], int], callback: Callable[[], Any]) -> tuple[Any, int]:
-    started = clock_ns()
-    value = callback()
-    finished = clock_ns()
-    if type(started) is not int or type(finished) is not int or finished < started:
-        raise ValueError("clock_ns must return nondecreasing exact integers")
-    return value, finished - started
-
-
 def _revalidation_failure(success: PlanningSuccessV2, evidence: object) -> PlanningFailureV2:
     details = (("validation_type", type(evidence).__name__),)
     return PlanningFailureV2(
@@ -82,14 +77,100 @@ def _revalidation_failure(success: PlanningSuccessV2, evidence: object) -> Plann
     )
 
 
-def _cannot_encode_timeout_success(outcome: object) -> object:
+_MISSING_CATEGORY = object()
+_FAILURE_CATEGORY_VALUES = frozenset(category.value for category in FailureCategoryV2)
+_PHASE_NAMES = (
+    "input_validation",
+    "platform_instantiation",
+    "search",
+    "complete_route_validation",
+    "result_assembly",
+)
+
+
+def _normalize_outcome(outcome: object) -> object:
     if type(outcome) is PlanningFailureV2:
         return outcome
-    if isinstance(outcome, Mapping) and outcome.get("category") is FailureCategoryV2.TIMEOUT:
+    if not isinstance(outcome, Mapping):
+        return outcome
+    category = outcome.get("category", _MISSING_CATEGORY)
+    if category is _MISSING_CATEGORY:
+        return outcome
+    recognized = (
+        type(category) is FailureCategoryV2
+        or type(category) is str
+        and category in _FAILURE_CATEGORY_VALUES
+    )
+    if recognized:
         clean = dict(outcome)
         clean["route"] = None
         return clean
+    clean = dict(outcome)
+    clean["category"] = FailureCategoryV2.INTERNAL_ERROR
+    clean["reason_code"] = "unknown_failure_category"
+    clean["route"] = None
+    return clean
+
+
+def _validated_outcome(
+    outcome: object,
+    validation: object,
+) -> object:
+    if type(outcome) is PlanningSuccessV2 and not (
+        type(validation) is ValidationEvidenceV2
+        and validation.passed is True
+        and validation.level is ValidationLevelV2.L2
+    ):
+        return _revalidation_failure(outcome, validation)
     return outcome
+
+
+def _read_clock(clock_ns: Callable[[], int]) -> int:
+    value = clock_ns()
+    if type(value) is not int:
+        raise TypeError("clock_ns must return exact integers")
+    return value
+
+
+def _timing(
+    durations: list[int],
+    *,
+    measurement_valid: bool,
+) -> TimingBreakdownV2:
+    return TimingBreakdownV2(
+        input_validation_ns=durations[0],
+        platform_instantiation_ns=durations[1],
+        search_ns=durations[2],
+        complete_route_validation_ns=durations[3],
+        result_assembly_ns=durations[4],
+        total_ns=sum(durations),
+        timing_measurement_valid=measurement_valid,
+    )
+
+
+def _internal_failure_result(
+    *,
+    exception_stage: str,
+    exception: Exception,
+    durations: list[int],
+    timing_measurement_valid: bool,
+) -> TimedRequestResultV2:
+    failure = {
+        "category": FailureCategoryV2.INTERNAL_ERROR,
+        "reason_code": "timed_executor_exception",
+        "route": None,
+        "exception_stage": exception_stage,
+        "exception_type": type(exception).__name__,
+        "timing_measurement_valid": timing_measurement_valid,
+    }
+    return TimedRequestResultV2(
+        outcome=failure,
+        assembled=failure,
+        timing=_timing(
+            durations,
+            measurement_valid=timing_measurement_valid,
+        ),
+    )
 
 
 def execute_timed_request_v2(
@@ -119,43 +200,102 @@ def execute_timed_request_v2(
         )
     ):
         raise TypeError("all timed request callbacks and clock_ns must be callable")
+    durations = [0, 0, 0, 0, 0]
     try:
-        request, input_ns = _interval(clock_ns, lambda: decode_request(encoded_request))
-        stack, stack_ns = _interval(clock_ns, lambda: build_platform_stack(request))
-        outcome, search_ns = _interval(clock_ns, lambda: plan_request(request, stack))
-        outcome = _cannot_encode_timeout_success(outcome)
-        validation, validation_ns = _interval(
-            clock_ns,
-            lambda: revalidate_success_route(request, outcome, stack),
-        )
-        if type(outcome) is PlanningSuccessV2 and not (
-            type(validation) is ValidationEvidenceV2
-            and validation.passed is True
-            and validation.level is ValidationLevelV2.L2
-        ):
-            outcome = _revalidation_failure(outcome, validation)
-        provisional = TimingBreakdownV2(
-            input_ns, stack_ns, search_ns, validation_ns, 0,
-            input_ns + stack_ns + search_ns + validation_ns,
-        )
-        assembled, assembly_ns = _interval(
-            clock_ns,
-            lambda: assemble_result(outcome, validation, provisional),
-        )
-        timing = TimingBreakdownV2(
-            input_ns, stack_ns, search_ns, validation_ns, assembly_ns,
-            input_ns + stack_ns + search_ns + validation_ns + assembly_ns,
-        )
-        return TimedRequestResultV2(outcome=outcome, assembled=assembled, timing=timing)
+        boundary = _read_clock(clock_ns)
     except (KeyboardInterrupt, SystemExit, MemoryError):
         raise
     except Exception as exc:
-        # Return a row-shaped failure instead of silently dropping a formal call.
-        failure = {
-            "category": FailureCategoryV2.INTERNAL_ERROR,
-            "reason_code": "timed_executor_exception",
-            "route": None,
-            "exception_type": type(exc).__name__,
-        }
-        zero = TimingBreakdownV2(0, 0, 0, 0, 0, 0)
-        return TimedRequestResultV2(outcome=failure, assembled=failure, timing=zero)
+        return _internal_failure_result(
+            exception_stage=_PHASE_NAMES[0],
+            exception=exc,
+            durations=durations,
+            timing_measurement_valid=False,
+        )
+
+    request: object = None
+    stack: object = None
+    outcome: object = None
+    validation: object = None
+    assembled: object = None
+
+    def run_phase(index: int, callback: Callable[[], object]) -> tuple[object, int] | TimedRequestResultV2:
+        nonlocal boundary
+        try:
+            value = callback()
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception as exc:
+            measurement_valid = True
+            try:
+                finished = _read_clock(clock_ns)
+                if finished < boundary:
+                    raise ValueError("clock_ns must be nondecreasing")
+                durations[index] = finished - boundary
+            except (KeyboardInterrupt, SystemExit, MemoryError):
+                raise
+            except Exception:
+                measurement_valid = False
+            return _internal_failure_result(
+                exception_stage=_PHASE_NAMES[index],
+                exception=exc,
+                durations=durations,
+                timing_measurement_valid=measurement_valid,
+            )
+        try:
+            finished = _read_clock(clock_ns)
+            if finished < boundary:
+                raise ValueError("clock_ns must be nondecreasing")
+        except (KeyboardInterrupt, SystemExit, MemoryError):
+            raise
+        except Exception as exc:
+            return _internal_failure_result(
+                exception_stage=_PHASE_NAMES[index],
+                exception=exc,
+                durations=durations,
+                timing_measurement_valid=False,
+            )
+        durations[index] = finished - boundary
+        boundary = finished
+        return value, finished
+
+    phase_result = run_phase(0, lambda: decode_request(encoded_request))
+    if type(phase_result) is TimedRequestResultV2:
+        return phase_result
+    request = phase_result[0]
+
+    phase_result = run_phase(1, lambda: build_platform_stack(request))
+    if type(phase_result) is TimedRequestResultV2:
+        return phase_result
+    stack = phase_result[0]
+
+    def search_phase() -> object:
+        return _normalize_outcome(plan_request(request, stack))
+
+    phase_result = run_phase(2, search_phase)
+    if type(phase_result) is TimedRequestResultV2:
+        return phase_result
+    outcome = phase_result[0]
+
+    def validation_phase() -> tuple[object, object]:
+        checked = revalidate_success_route(request, outcome, stack)
+        return _validated_outcome(outcome, checked), checked
+
+    phase_result = run_phase(3, validation_phase)
+    if type(phase_result) is TimedRequestResultV2:
+        return phase_result
+    outcome, validation = phase_result[0]
+
+    def assembly_phase() -> object:
+        provisional = _timing(durations, measurement_valid=True)
+        return assemble_result(outcome, validation, provisional)
+
+    phase_result = run_phase(4, assembly_phase)
+    if type(phase_result) is TimedRequestResultV2:
+        return phase_result
+    assembled = phase_result[0]
+    return TimedRequestResultV2(
+        outcome=outcome,
+        assembled=assembled,
+        timing=_timing(durations, measurement_valid=True),
+    )

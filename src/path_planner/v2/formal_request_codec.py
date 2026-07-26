@@ -25,6 +25,9 @@ from path_planner.v2.terrain import (
 
 FORMAL_REQUEST_CODEC_SCHEMA_V2 = "path-planner-v2-formal-request-codec/v1"
 _HASH_DOMAIN = b"path-planner-v2-formal-request/v1"
+_CANONICAL_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+_CANONICAL_ZIP_CREATE_SYSTEM = 3
+_CANONICAL_ZIP_EXTERNAL_ATTR = 0o600 << 16
 _LAYER_SPECS = (
     ("elevation_m", np.dtype("<f8")),
     ("slope_deg", np.dtype("<f8")),
@@ -97,6 +100,8 @@ def _metadata_without_digest(request: PlanningRequestV2) -> tuple[dict[str, obje
     descriptors, payloads = _layer_descriptors(snapshot)
     geometry = snapshot.geometry
     provenance = snapshot.provenance
+    if not _is_digest(provenance.source_hash):
+        raise ValueError("provenance source_hash must be a lowercase SHA-256 digest")
     return (
         {
             "codec_schema_version": FORMAL_REQUEST_CODEC_SCHEMA_V2,
@@ -161,11 +166,14 @@ def encode_formal_request_v2(request: PlanningRequestV2) -> FormalRequestArtifac
     metadata, payloads = _metadata_without_digest(request)
     request_sha256 = _request_digest(metadata, payloads)
     complete_metadata = {**metadata, "request_sha256": request_sha256}
-    output = BytesIO()
-    np.savez(output, **{name: getattr(request.terrain_snapshot, name) for name, _ in _LAYER_SPECS})
     return FormalRequestArtifactV2(
         metadata_json=canonical_json_bytes(complete_metadata),
-        terrain_npz=output.getvalue(),
+        terrain_npz=_canonical_npz_bytes(
+            {
+                name: getattr(request.terrain_snapshot, name)
+                for name, _ in _LAYER_SPECS
+            }
+        ),
         request_sha256=request_sha256,
     )
 
@@ -185,6 +193,46 @@ def _decode_metadata(raw: bytes) -> dict[str, object]:
     return parsed
 
 
+def _canonical_npy_bytes(array: np.ndarray) -> bytes:
+    output = BytesIO()
+    np.lib.format.write_array(
+        output,
+        array,
+        version=(1, 0),
+        allow_pickle=False,
+    )
+    return output.getvalue()
+
+
+def _canonical_npz_bytes(arrays: dict[str, np.ndarray]) -> bytes:
+    output = BytesIO()
+    with zipfile.ZipFile(
+        output,
+        mode="w",
+        compression=zipfile.ZIP_STORED,
+        allowZip64=False,
+    ) as archive:
+        for name, dtype in _LAYER_SPECS:
+            array = _canonical_layer(name, arrays[name], dtype)
+            info = zipfile.ZipInfo(
+                filename=f"{name}.npy",
+                date_time=_CANONICAL_ZIP_TIMESTAMP,
+            )
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = _CANONICAL_ZIP_CREATE_SYSTEM
+            info.external_attr = _CANONICAL_ZIP_EXTERNAL_ATTR
+            info.internal_attr = 0
+            info.flag_bits = 0
+            info.comment = b""
+            info.extra = b""
+            archive.writestr(
+                info,
+                _canonical_npy_bytes(array),
+                compress_type=zipfile.ZIP_STORED,
+            )
+    return output.getvalue()
+
+
 def _decode_arrays(blob: bytes) -> dict[str, np.ndarray]:
     try:
         archive = zipfile.ZipFile(BytesIO(blob))
@@ -200,8 +248,13 @@ def _decode_arrays(blob: bytes) -> dict[str, np.ndarray]:
     try:
         with np.load(BytesIO(blob), allow_pickle=False) as archive:
             arrays = {name: archive[name] for name, _ in _LAYER_SPECS}
-    except (OSError, ValueError, KeyError) as exc:
-        raise ValueError("terrain_npz rejects pickle data and invalid arrays") from exc
+        canonical_blob = _canonical_npz_bytes(arrays)
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        raise ValueError(
+            "terrain_npz rejects pickle data, invalid dtype, or noncanonical arrays"
+        ) from exc
+    if canonical_blob != blob:
+        raise ValueError("terrain_npz must use the canonical NPZ representation")
     return arrays
 
 
@@ -227,6 +280,10 @@ def _request_from_metadata(metadata: dict[str, object], arrays: dict[str, np.nda
             physical_obstacle_cells_written=provenance_data["physical_obstacle_cells_written"],
             details=tuple(tuple(item) for item in provenance_data["details"]),
         )
+        if not _is_digest(provenance.source_hash):
+            raise ValueError(
+                "provenance source_hash must be a lowercase SHA-256 digest"
+            )
         for descriptor, (name, dtype) in zip(descriptors, _LAYER_SPECS, strict=True):
             array = _canonical_layer(name, arrays[name], dtype)
             if descriptor != {
