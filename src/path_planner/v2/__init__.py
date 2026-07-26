@@ -22,6 +22,17 @@ from path_planner.v2.contracts import (
     ValidationLevelV2,
 )
 from path_planner.v2.serialization import canonical_json_bytes
+from path_planner.v2.formal_request_codec import (
+    FORMAL_REQUEST_CODEC_SCHEMA_V2,
+    FormalRequestArtifactV2,
+    decode_formal_request_v2,
+    encode_formal_request_v2,
+)
+from path_planner.v2.timing import (
+    TimedRequestResultV2,
+    TimingBreakdownV2,
+    execute_timed_request_v2,
+)
 from path_planner.v2.cache import (
     VALIDATION_CACHE_SCHEMA_VERSION_V2,
     ValidationCacheKeyV2,
@@ -143,6 +154,7 @@ from path_planner.v2.benchmark import (
 
 __all__ = [
     "PLANNING_SCHEMA_VERSION_V2",
+    "FORMAL_REQUEST_CODEC_SCHEMA_V2",
     "AcceleratorPolicyV2",
     "CacheEvidenceV2",
     "CostBreakdownV2",
@@ -189,6 +201,7 @@ __all__ = [
     "PlanningDeadlineV2",
     "PlanningOutcomeV2",
     "PlanningRequestV2",
+    "FormalRequestArtifactV2",
     "PlanningSuccessV2",
     "PlatformKindV2",
     "PoseStateV2",
@@ -247,10 +260,13 @@ __all__ = [
     "aggregate_standard_episodes_v2",
     "audit_wheel_kinematic_sqp_profile_v2",
     "canonical_json_bytes",
+    "decode_formal_request_v2",
     "convex_hull_xy",
     "conservative_wheel_pose_cells",
     "conservative_wheel_sweep_cells",
     "dense_wheel_replay_step_count",
+    "encode_formal_request_v2",
+    "execute_timed_request_v2",
     "hopper_state_key_v2",
     "legged_state_key_v2",
     "nominal_legged_search_state_v2",
@@ -258,6 +274,8 @@ __all__ = [
     "oriented_rectangle_cells",
     "point_margin_to_convex_polygon",
     "sample_pose_sweep",
+    "TimedRequestResultV2",
+    "TimingBreakdownV2",
     "validate_route_l2",
     "validate_route",
     "validate_hopper_jump_l2",
