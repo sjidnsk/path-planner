@@ -24,8 +24,11 @@ from path_planner.v2.contracts import (
 )
 from path_planner.v2.hopper_authority import (
     HOPPER_RESOURCE_AUTHORITY_V2,
+    HopperGenericInternalSimulationProxyImplementationRecordV2,
     HopperParameterSetRecordV2,
     HopperProviderAuthorityV2,
+    _hopper_parameter_set_in_memory_token_v2,
+    _hopper_profile_matches_parameter_set_record_v2,
     _lookup_hopper_parameter_set_v2,
     _parameter_set_record_is_exact_v2,
     _require_canonical_resource_authority_v2,
@@ -49,6 +52,13 @@ _HOPPER_SPEED_COUNT_V2 = 4
 _HOPPER_ELEVATION_COUNT_V2 = 3
 _HOPPER_AZIMUTH_COUNT_V2 = 16
 _MIN_SELECTED_LANDING_MASS_V2 = 0.99
+_TRUSTED_HOPPER_JUMP_L2_V2 = validate_hopper_jump_l2
+_TRUSTED_HOPPER_PARAMETER_LOOKUP_V2 = _lookup_hopper_parameter_set_v2
+_TRUSTED_HOPPER_PARAMETER_EXACT_CHECK_V2 = _parameter_set_record_is_exact_v2
+_TRUSTED_HOPPER_PARAMETER_TOKEN_V2 = _hopper_parameter_set_in_memory_token_v2
+_TRUSTED_HOPPER_PROFILE_RECORD_MATCH_V2 = (
+    _hopper_profile_matches_parameter_set_record_v2
+)
 
 
 def _exact_float(value: object, name: str) -> float:
@@ -296,28 +306,28 @@ def _provider_failure_v2(
 
 def _provider_record_v2(
     authority: HopperProviderAuthorityV2,
-) -> HopperParameterSetRecordV2 | None:
+) -> (
+    HopperParameterSetRecordV2
+    | HopperGenericInternalSimulationProxyImplementationRecordV2
+    | None
+):
     record = _lookup_hopper_parameter_set_v2(authority.parameter_set_id)
-    if type(record) is not HopperParameterSetRecordV2:
-        return None
     if not _parameter_set_record_is_exact_v2(record):
         return None
+    _hopper_parameter_set_in_memory_token_v2(record)
     return record
 
 
 def _provider_profile_matches_record_v2(
     authority: HopperProviderAuthorityV2,
-    record: HopperParameterSetRecordV2,
+    record: (
+        HopperParameterSetRecordV2
+        | HopperGenericInternalSimulationProxyImplementationRecordV2
+    ),
 ) -> bool:
-    profile = authority.hopper_profile
-    return (
-        profile.profile.profile_id == record.base_profile_id
-        and profile.body_envelope_radius_m == record.body_envelope_radius_m
-        and profile.launch_reference_height_m == record.launch_reference_height_m
-        and profile.arc_clearance_margin_m == record.arc_clearance_margin_m
-        and profile.landing_footprint_radius_m == record.landing_footprint_radius_m
-        and profile.stop_condition == record.stop_condition
-        and profile.energy_model == record.energy_model
+    return _hopper_profile_matches_parameter_set_record_v2(
+        authority.hopper_profile,
+        record,
     )
 
 
@@ -561,7 +571,36 @@ class HopperPrimitiveProviderV2:
                 FailureCategoryV2.UNSUPPORTED_CAPABILITY,
                 "capability_preflight",
             )
-        record = _provider_record_v2(self.hopper_authority)
+        try:
+            record = _provider_record_v2(self.hopper_authority)
+        except (KeyboardInterrupt, MemoryError, SystemExit):
+            raise
+        except Exception:
+            return _provider_failure_v2(
+                request,
+                deadline,
+                "hopper_authority_contract_mismatch",
+                FailureCategoryV2.INTERNAL_ERROR,
+                "provider_authority",
+            )
+        if (
+            validate_hopper_jump_l2 is not _TRUSTED_HOPPER_JUMP_L2_V2
+            or _lookup_hopper_parameter_set_v2
+            is not _TRUSTED_HOPPER_PARAMETER_LOOKUP_V2
+            or _parameter_set_record_is_exact_v2
+            is not _TRUSTED_HOPPER_PARAMETER_EXACT_CHECK_V2
+            or _hopper_parameter_set_in_memory_token_v2
+            is not _TRUSTED_HOPPER_PARAMETER_TOKEN_V2
+            or _hopper_profile_matches_parameter_set_record_v2
+            is not _TRUSTED_HOPPER_PROFILE_RECORD_MATCH_V2
+        ):
+            return _provider_failure_v2(
+                request,
+                deadline,
+                "hopper_authority_contract_mismatch",
+                FailureCategoryV2.INTERNAL_ERROR,
+                "provider_authority",
+            )
         if record is None:
             return _provider_failure_v2(
                 request,
@@ -571,6 +610,17 @@ class HopperPrimitiveProviderV2:
                 "capability_preflight",
             )
         if not _provider_profile_matches_record_v2(self.hopper_authority, record):
+            if (
+                type(record)
+                is HopperGenericInternalSimulationProxyImplementationRecordV2
+            ):
+                return _provider_failure_v2(
+                    request,
+                    deadline,
+                    "hopper_authority_contract_mismatch",
+                    FailureCategoryV2.INTERNAL_ERROR,
+                    "provider_authority",
+                )
             reason = (
                 "hopper_stop_condition_unsupported"
                 if profile.stop_condition != record.stop_condition
@@ -895,6 +945,17 @@ class HopperPrimitiveProviderV2:
                             raise
                         except Exception:
                             validation = None
+                        if validate_hopper_jump_l2 is not _TRUSTED_HOPPER_JUMP_L2_V2:
+                            return _provider_failure_v2(
+                                request,
+                                deadline,
+                                "hopper_authority_contract_mismatch",
+                                FailureCategoryV2.INTERNAL_ERROR,
+                                "provider_authority",
+                                expanded_states=expanded_states,
+                                generated_primitives=generated_primitives,
+                                rejected_l2=rejected_l2,
+                            )
                         if type(validation) is not HopperValidationResultV2:
                             return _provider_failure_v2(
                                 request,
@@ -1026,7 +1087,9 @@ class HopperPrimitiveProviderV2:
                             node.state.support_height_m,
                         )
                         try:
+                            _hopper_parameter_set_in_memory_token_v2(record)
                             energy = record.energy_evaluator(speed)
+                            _hopper_parameter_set_in_memory_token_v2(record)
                             distance_cost = node.distance_cost + (
                                 objective.distance_weight * distance
                             )

@@ -18,14 +18,18 @@ from path_planner.v2.contracts import (
     ValidationLevelV2,
 )
 from path_planner.v2.hopper_authority import (
+    HopperGenericInternalSimulationProxyImplementationRecordV2,
     HopperParameterSetRecordV2,
     HopperProviderAuthorityV2,
+    _hopper_parameter_set_in_memory_token_v2,
+    _hopper_profile_matches_parameter_set_record_v2,
     _lookup_hopper_parameter_set_v2,
     _parameter_set_record_is_exact_v2,
 )
 from path_planner.v2.oracles.hopper import (
     HOPPER_REPLAY_COUNTER_IDS_V1,
     HopperJumpCandidateV2,
+    HopperValidationResultV2,
     validate_hopper_jump_l2,
 )
 from path_planner.v2.runtime import PlanningDeadlineV2
@@ -37,6 +41,13 @@ HOPPER_ROUTE_VALIDATOR_ID_V2 = "path-planner-v2-hopper-route-l2/v1"
 _PROBABILITY_SCHEMA = "hopper-route-probability-diagnostic/v1"
 _RESULT_SCHEMA = "hopper-route-validation-result/v1"
 _MAX_ROUTE_STATES = 100_001
+_TRUSTED_HOPPER_JUMP_L2 = validate_hopper_jump_l2
+_TRUSTED_HOPPER_PARAMETER_LOOKUP = _lookup_hopper_parameter_set_v2
+_TRUSTED_HOPPER_PARAMETER_EXACT_CHECK = _parameter_set_record_is_exact_v2
+_TRUSTED_HOPPER_PARAMETER_TOKEN = _hopper_parameter_set_in_memory_token_v2
+_TRUSTED_HOPPER_PROFILE_RECORD_MATCH = (
+    _hopper_profile_matches_parameter_set_record_v2
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,26 +204,37 @@ def _canonical_direction(index: int) -> tuple[float, float]:
     return cos(azimuth), sin(azimuth)
 
 
-def _fixture_record(
+def _supported_record(
     authority: object,
-) -> tuple[object, HopperParameterSetRecordV2] | None:
+) -> tuple[
+    object,
+    (
+        HopperParameterSetRecordV2
+        | HopperGenericInternalSimulationProxyImplementationRecordV2
+    ),
+] | None:
     if type(authority) is not HopperProviderAuthorityV2:
         return None
-    record = _lookup_hopper_parameter_set_v2(authority.parameter_set_id)
-    if type(record) is not HopperParameterSetRecordV2 or not _parameter_set_record_is_exact_v2(record):
+    try:
+        record = _lookup_hopper_parameter_set_v2(authority.parameter_set_id)
+    except (KeyboardInterrupt, MemoryError, SystemExit):
+        raise
+    except Exception:
         return None
-    profile = authority.hopper_profile
-    if (
-        profile.profile.profile_id != record.base_profile_id
-        or profile.body_envelope_radius_m.hex() != record.body_envelope_radius_m.hex()
-        or profile.launch_reference_height_m.hex() != record.launch_reference_height_m.hex()
-        or profile.arc_clearance_margin_m.hex() != record.arc_clearance_margin_m.hex()
-        or profile.landing_footprint_radius_m.hex() != record.landing_footprint_radius_m.hex()
-        or profile.stop_condition != record.stop_condition
-        or profile.energy_model != record.energy_model
+    if not _parameter_set_record_is_exact_v2(record):
+        return None
+    if not _hopper_profile_matches_parameter_set_record_v2(
+        authority.hopper_profile,
+        record,
     ):
         return None
-    return profile, record
+    try:
+        _hopper_parameter_set_in_memory_token_v2(record)
+    except (KeyboardInterrupt, MemoryError, SystemExit):
+        raise
+    except Exception:
+        return None
+    return authority.hopper_profile, record
 
 
 def validate_hopper_route_l2(
@@ -235,15 +257,32 @@ def validate_hopper_route_l2(
             "route_validation",
             route_state_count,
         )
-    fixture = _fixture_record(hopper_authority)
-    if fixture is None:
+    if (
+        validate_hopper_jump_l2 is not _TRUSTED_HOPPER_JUMP_L2
+        or _lookup_hopper_parameter_set_v2
+        is not _TRUSTED_HOPPER_PARAMETER_LOOKUP
+        or _parameter_set_record_is_exact_v2
+        is not _TRUSTED_HOPPER_PARAMETER_EXACT_CHECK
+        or _hopper_parameter_set_in_memory_token_v2
+        is not _TRUSTED_HOPPER_PARAMETER_TOKEN
+        or _hopper_profile_matches_parameter_set_record_v2
+        is not _TRUSTED_HOPPER_PROFILE_RECORD_MATCH
+    ):
         return _failure(
             "hopper_authority_contract_mismatch",
             FailureCategoryV2.INTERNAL_ERROR,
             "route_validation",
             route_state_count,
         )
-    profile, record = fixture
+    supported = _supported_record(hopper_authority)
+    if supported is None:
+        return _failure(
+            "hopper_authority_contract_mismatch",
+            FailureCategoryV2.INTERNAL_ERROR,
+            "route_validation",
+            route_state_count,
+        )
+    profile, record = supported
     if (
         type(route) is not TypedRouteV2
         or route.platform_kind is not PlatformKindV2.HOPPER
@@ -322,7 +361,23 @@ def validate_hopper_route_l2(
             primitive.start_state.heading_rad,
         )
         distance = horizontal_speed * flight_time
-        expected_energy = record.energy_evaluator(speed)
+        try:
+            _hopper_parameter_set_in_memory_token_v2(record)
+            expected_energy = record.energy_evaluator(speed)
+            _hopper_parameter_set_in_memory_token_v2(record)
+        except (KeyboardInterrupt, MemoryError, SystemExit):
+            raise
+        except Exception:
+            return _failure(
+                "hopper_authority_contract_mismatch",
+                FailureCategoryV2.INTERNAL_ERROR,
+                "route_validation",
+                route_state_count,
+                tuple(
+                    (name, counts_max[index])
+                    for index, name in enumerate(HOPPER_REPLAY_COUNTER_IDS_V1)
+                ),
+            )
         if (
             primitive.end_state != expected_end
             or primitive.start_hopper_state.support_height_m
@@ -350,6 +405,20 @@ def validate_hopper_route_l2(
             "hopper-jump-candidate/v1",
         )
         oracle = validate_hopper_jump_l2(candidate, anchor, deadline)
+        if (
+            validate_hopper_jump_l2 is not _TRUSTED_HOPPER_JUMP_L2
+            or type(oracle) is not HopperValidationResultV2
+        ):
+            return _failure(
+                "hopper_authority_contract_mismatch",
+                FailureCategoryV2.INTERNAL_ERROR,
+                "route_validation",
+                route_state_count,
+                tuple(
+                    (name, counts_max[index])
+                    for index, name in enumerate(HOPPER_REPLAY_COUNTER_IDS_V1)
+                ),
+            )
         for index, (_counter_id, count) in enumerate(oracle.replay_work_counts):
             counts_max[index] = max(counts_max[index], count)
         frozen_counts = tuple(

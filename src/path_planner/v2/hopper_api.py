@@ -29,11 +29,12 @@ from path_planner.v2.contracts import (
 )
 from path_planner.v2.hopper_authority import (
     HOPPER_RESOURCE_AUTHORITY_V2,
-    HopperParameterSetRecordV2,
     HopperProviderAuthorityV2,
     _hopper_parameter_set_in_memory_token_v2,
+    _hopper_profile_matches_parameter_set_record_v2,
     _hopper_resource_authority_in_memory_token_v2,
     _lookup_hopper_parameter_set_v2,
+    _parameter_set_record_is_exact_v2,
     _require_canonical_resource_authority_v2,
 )
 from path_planner.v2.hopper_route_validation import (
@@ -48,9 +49,15 @@ from path_planner.v2.terrain import FineSafetyAnchorV2, snapshot_hash
 
 __all__ = ()
 
-_COMPOSITE_SCHEMA = "hopper-api-composite-authority/v1"
+_COMPOSITE_SCHEMA = "hopper-api-composite-authority/v2"
+_TRUSTED_PROVIDER_TYPE = _provider_module.HopperPrimitiveProviderV2
+_TRUSTED_PROVIDER_PLAN = _TRUSTED_PROVIDER_TYPE.plan
 _TRUSTED_JUMP_ORACLE = _provider_module.validate_hopper_jump_l2
 _TRUSTED_ROUTE_L2 = validate_hopper_route_l2
+_TRUSTED_PARAMETER_LOOKUP = _lookup_hopper_parameter_set_v2
+_TRUSTED_PARAMETER_EXACT_CHECK = _parameter_set_record_is_exact_v2
+_TRUSTED_PARAMETER_TOKEN = _hopper_parameter_set_in_memory_token_v2
+_TRUSTED_PROFILE_RECORD_MATCH = _hopper_profile_matches_parameter_set_record_v2
 
 _AUTHORITY_L2_REASONS = frozenset(
     {
@@ -326,7 +333,7 @@ def _section2_token(authority: HopperProviderAuthorityV2) -> tuple[object, ...]:
     if type(authority) is not HopperProviderAuthorityV2:
         raise ValueError("hopper_authority_contract_mismatch")
     record = _lookup_hopper_parameter_set_v2(authority.parameter_set_id)
-    if type(record) is HopperParameterSetRecordV2:
+    if _parameter_set_record_is_exact_v2(record):
         resolved = _hopper_parameter_set_in_memory_token_v2(record)
     else:
         resolved = record
@@ -380,7 +387,11 @@ def _capture_seal(
     plan = provider.plan
     plan_self = getattr(plan, "__self__", None)
     plan_func = getattr(plan, "__func__", None)
-    if plan_self is not provider or plan_func is None:
+    if (
+        type(provider) is not _TRUSTED_PROVIDER_TYPE
+        or plan_self is not provider
+        or plan_func is not _TRUSTED_PROVIDER_PLAN
+    ):
         raise ValueError("hopper_authority_contract_mismatch")
 
     # Attribute acquisition order is part of the Hopper API contract.
@@ -396,6 +407,21 @@ def _capture_seal(
     if (
         _provider_module.validate_hopper_jump_l2 is not _TRUSTED_JUMP_ORACLE
         or _route_validation_module.validate_hopper_route_l2 is not _TRUSTED_ROUTE_L2
+        or _lookup_hopper_parameter_set_v2 is not _TRUSTED_PARAMETER_LOOKUP
+        or _parameter_set_record_is_exact_v2
+        is not _TRUSTED_PARAMETER_EXACT_CHECK
+        or _hopper_parameter_set_in_memory_token_v2
+        is not _TRUSTED_PARAMETER_TOKEN
+        or _hopper_profile_matches_parameter_set_record_v2
+        is not _TRUSTED_PROFILE_RECORD_MATCH
+        or _authority_module._lookup_hopper_parameter_set_v2
+        is not _TRUSTED_PARAMETER_LOOKUP
+        or _authority_module._parameter_set_record_is_exact_v2
+        is not _TRUSTED_PARAMETER_EXACT_CHECK
+        or _authority_module._hopper_parameter_set_in_memory_token_v2
+        is not _TRUSTED_PARAMETER_TOKEN
+        or _authority_module._hopper_profile_matches_parameter_set_record_v2
+        is not _TRUSTED_PROFILE_RECORD_MATCH
     ):
         raise ValueError("hopper_authority_contract_mismatch")
 
@@ -408,6 +434,12 @@ def _capture_seal(
         (provider, plan_func),
         _TRUSTED_JUMP_ORACLE,
         _TRUSTED_ROUTE_L2,
+        (
+            _TRUSTED_PARAMETER_LOOKUP,
+            _TRUSTED_PARAMETER_EXACT_CHECK,
+            _TRUSTED_PARAMETER_TOKEN,
+            _TRUSTED_PROFILE_RECORD_MATCH,
+        ),
     )
     geometry = anchor.snapshot.geometry
     return _ApiSeal(

@@ -25,9 +25,12 @@ from path_planner.v2.hopper_authority import (
     _call_captured_ballistic_helper_v2,
     _call_captured_landing_helper_v2,
     _hopper_parameter_set_in_memory_token_v2,
+    _hopper_profile_matches_parameter_set_record_v2,
     _HopperExactIntegerArenaV2,
     _lookup_hopper_parameter_set_v2,
+    _parameter_set_record_is_exact_v2,
     _require_canonical_resource_authority_v2,
+    HopperGenericInternalSimulationProxyImplementationRecordV2,
     HopperParameterSetRecordV2,
 )
 from path_planner.v2.profiles import HopperProfileV2, PlatformProfileV2
@@ -86,6 +89,12 @@ _STAGES = (
     "landing_probability",
     "landing_validation",
     "stop_validation",
+)
+_TRUSTED_HOPPER_PARAMETER_LOOKUP_V2 = _lookup_hopper_parameter_set_v2
+_TRUSTED_HOPPER_PARAMETER_EXACT_CHECK_V2 = _parameter_set_record_is_exact_v2
+_TRUSTED_HOPPER_PARAMETER_TOKEN_V2 = _hopper_parameter_set_in_memory_token_v2
+_TRUSTED_HOPPER_PROFILE_RECORD_MATCH_V2 = (
+    _hopper_profile_matches_parameter_set_record_v2
 )
 
 
@@ -1533,18 +1542,19 @@ def _nominal_landing_pose_v2(
 
 def _candidate_parameter_record_v2(
     candidate: HopperJumpCandidateV2,
-) -> HopperParameterSetRecordV2:
+) -> (
+    HopperParameterSetRecordV2
+    | HopperGenericInternalSimulationProxyImplementationRecordV2
+):
     record = _lookup_hopper_parameter_set_v2(candidate.parameter_set_id)
-    if type(record) is not HopperParameterSetRecordV2:
+    if not _parameter_set_record_is_exact_v2(record):
         raise ValueError("hopper_authority_contract_mismatch")
     _hopper_parameter_set_in_memory_token_v2(record)
-    profile = candidate.hopper_profile
-    if (
-        profile.profile.profile_id != record.base_profile_id
-        or profile.stop_condition != record.stop_condition
-        or profile.energy_model != record.energy_model
+    if not _hopper_profile_matches_parameter_set_record_v2(
+        candidate.hopper_profile,
+        record,
     ):
-        raise ValueError("hopper_profile_contract_mismatch")
+        raise ValueError("hopper_authority_contract_mismatch")
     return record
 
 
@@ -1591,7 +1601,10 @@ def _validate_hopper_landing_and_stop_v2(
     anchor: FineSafetyAnchorV2,
     deadline: PlanningDeadlineV2,
     counts: list[int],
-    record: HopperParameterSetRecordV2,
+    record: (
+        HopperParameterSetRecordV2
+        | HopperGenericInternalSimulationProxyImplementationRecordV2
+    ),
     mean_x_m: float,
     mean_y_m: float,
     horizontal_range_m: float,
@@ -1829,6 +1842,21 @@ def validate_hopper_jump_l2(
     deadline: PlanningDeadlineV2,
 ) -> HopperValidationResultV2:
     counts = [0, 0, 0, 0, 0, 0]
+    if (
+        _lookup_hopper_parameter_set_v2
+        is not _TRUSTED_HOPPER_PARAMETER_LOOKUP_V2
+        or _parameter_set_record_is_exact_v2
+        is not _TRUSTED_HOPPER_PARAMETER_EXACT_CHECK_V2
+        or _hopper_parameter_set_in_memory_token_v2
+        is not _TRUSTED_HOPPER_PARAMETER_TOKEN_V2
+        or _hopper_profile_matches_parameter_set_record_v2
+        is not _TRUSTED_HOPPER_PROFILE_RECORD_MATCH_V2
+    ):
+        return _contract_result_v2(
+            "hopper_authority_contract_mismatch",
+            "launch_validation",
+            counts,
+        )
     try:
         _require_canonical_resource_authority_v2(HOPPER_RESOURCE_AUTHORITY_V2)
     except (KeyboardInterrupt, MemoryError, SystemExit):

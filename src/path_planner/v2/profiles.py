@@ -15,6 +15,9 @@ LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2 = "simulation_proxy_static_crawl/v1"
 HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2 = (
     "simulation_proxy_lunar_ballistic/v1"
 )
+HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_CAPABILITY_REVISION_V2 = (
+    "simulation_proxy_generic_internal_lunar_ballistic/v2"
+)
 HOPPER_PROXY_PROFILE_INCOMPLETE_REASON_V2 = "hopper_proxy_profile_incomplete"
 _HOPPER_FORMAL_CAPABILITY_FIELDS_V2 = (
     "body_envelope_radius_m",
@@ -183,8 +186,13 @@ def _reaudit_hopper_platform_profile(value: object) -> PlatformProfileV2:
         raise ValueError("hopper profile requires PlatformKindV2.HOPPER")
     if audited.simulation_proxy is not True:
         raise ValueError("hopper profile requires simulation_proxy=True")
-    if audited.capability_revision != HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2:
-        raise ValueError("capability_revision must be the fixed lunar ballistic proxy")
+    if audited.capability_revision not in (
+        HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2,
+        HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_CAPABILITY_REVISION_V2,
+    ):
+        raise ValueError(
+            "capability_revision must be a supported lunar ballistic proxy"
+        )
     if audited.max_traversable_slope_deg != 30.0:
         raise ValueError("hopper profile slope boundary must be exactly 30.0")
     if audited.goal_position_tolerance_m != 0.0:
