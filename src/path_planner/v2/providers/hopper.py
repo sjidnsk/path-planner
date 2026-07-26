@@ -4,6 +4,7 @@ import struct
 from dataclasses import dataclass
 from math import copysign, cos, isfinite, pi, sin
 
+import path_planner.v2.hopper_route_validation as _hopper_route_validation_module
 from path_planner.v2.contracts import (
     AcceleratorPolicyV2,
     CacheEvidenceV2,
@@ -58,6 +59,9 @@ _TRUSTED_HOPPER_PARAMETER_EXACT_CHECK_V2 = _parameter_set_record_is_exact_v2
 _TRUSTED_HOPPER_PARAMETER_TOKEN_V2 = _hopper_parameter_set_in_memory_token_v2
 _TRUSTED_HOPPER_PROFILE_RECORD_MATCH_V2 = (
     _hopper_profile_matches_parameter_set_record_v2
+)
+_TRUSTED_HOPPER_ROUTE_L2_V2 = (
+    _hopper_route_validation_module.validate_hopper_route_l2
 )
 
 
@@ -562,7 +566,23 @@ class HopperPrimitiveProviderV2:
             )
 
         profile = self.hopper_authority.hopper_profile
-        audit = audit_hopper_profile_v2(profile)
+        try:
+            audit = audit_hopper_profile_v2(profile)
+        except (KeyboardInterrupt, MemoryError, SystemExit):
+            raise
+        except Exception:
+            return _provider_failure_v2(
+                request,
+                deadline,
+                "hopper_authority_contract_mismatch",
+                FailureCategoryV2.INTERNAL_ERROR,
+                "provider_authority",
+                details=(
+                    ("actual", "hopper_profile_contract_mismatch"),
+                    ("expected", "canonical_hopper_profile"),
+                    ("phase", "provider_authority"),
+                ),
+            )
         if not audit.complete:
             return _provider_failure_v2(
                 request,
@@ -1429,15 +1449,49 @@ class HopperPrimitiveProviderV2:
             persistent_bytes=complete_reservation,
             transient_bytes=route_l2_transient,
         )
-        from path_planner.v2.hopper_route_validation import validate_hopper_route_l2
-
-        l2_result = validate_hopper_route_l2(
+        route_l2 = _hopper_route_validation_module.validate_hopper_route_l2
+        if route_l2 is not _TRUSTED_HOPPER_ROUTE_L2_V2:
+            return _provider_failure_v2(
+                request,
+                deadline,
+                "hopper_authority_contract_mismatch",
+                FailureCategoryV2.INTERNAL_ERROR,
+                "provider_authority",
+                expanded_states=expanded_states,
+                generated_primitives=generated_primitives,
+                rejected_l2=rejected_l2,
+                details=(
+                    ("actual", "hopper_route_l2_binding_drift"),
+                    ("expected", "trusted_hopper_route_l2"),
+                    ("phase", "provider_authority"),
+                ),
+            )
+        l2_result = route_l2(
             route,
             request,
             anchor,
             self.hopper_authority,
             deadline,
         )
+        if (
+            _hopper_route_validation_module.validate_hopper_route_l2
+            is not _TRUSTED_HOPPER_ROUTE_L2_V2
+        ):
+            return _provider_failure_v2(
+                request,
+                deadline,
+                "hopper_authority_contract_mismatch",
+                FailureCategoryV2.INTERNAL_ERROR,
+                "provider_authority",
+                expanded_states=expanded_states,
+                generated_primitives=generated_primitives,
+                rejected_l2=rejected_l2,
+                details=(
+                    ("actual", "hopper_route_l2_binding_drift"),
+                    ("expected", "trusted_hopper_route_l2"),
+                    ("phase", "provider_authority"),
+                ),
+            )
         if not l2_result.passed:
             return _provider_failure_v2(
                 request,

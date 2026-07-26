@@ -558,6 +558,70 @@ def test_direct_provider_rejects_jump_l2_binding_drift(
     assert result.reason_code == "hopper_authority_contract_mismatch"
 
 
+def test_direct_provider_rejects_route_l2_binding_drift(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    anchor = _flat_anchor()
+    request = _request(
+        anchor,
+        PoseStateV2(14.047186939188279, 15.25, 0.0),
+        max_expanded_states=2,
+    )
+    trusted_route_l2 = route_validation.validate_hopper_route_l2
+
+    def equivalent_wrapper(*args, **kwargs):
+        return trusted_route_l2(*args, **kwargs)
+
+    monkeypatch.setattr(
+        route_validation,
+        "validate_hopper_route_l2",
+        equivalent_wrapper,
+    )
+
+    result = _provider().plan(request, anchor, _deadline())
+
+    assert type(result) is PlanningFailureV2
+    assert result.reason_code == "hopper_authority_contract_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("field", "mutated"),
+    (
+        ("gravity_mps2", nextafter(1.62, inf)),
+        ("launch_speeds_mps", (1.5, 2.0, 2.5)),
+        ("landing_probability_threshold", nextafter(0.99, -inf)),
+    ),
+)
+@pytest.mark.parametrize("consumer", ("provider", "api"))
+def test_post_construction_profile_mutation_is_structured_authority_mismatch(
+    field: str,
+    mutated: object,
+    consumer: str,
+):
+    anchor = _flat_anchor()
+    provider = _provider()
+    object.__setattr__(provider.hopper_authority.hopper_profile, field, mutated)
+    request = _request(
+        anchor,
+        PoseStateV2(15.123, 15.456, 0.0),
+        max_expanded_states=1,
+    )
+
+    if consumer == "provider":
+        result = provider.plan(request, anchor, _deadline())
+    else:
+        result = hopper_api.dispatch_hopper_provider_v2(
+            request,
+            provider.profile,
+            provider,
+            anchor,
+            _deadline(),
+        )
+
+    assert type(result) is PlanningFailureV2
+    assert result.reason_code == "hopper_authority_contract_mismatch"
+
+
 def test_direct_route_l2_rejects_its_jump_l2_binding_drift(
     monkeypatch: pytest.MonkeyPatch,
 ):
