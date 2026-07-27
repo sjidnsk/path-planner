@@ -53,6 +53,7 @@ LEGGED_SEARCH_STATE_SCHEMA_V2 = "path-planner-v2-legged-search-state/v1"
 LEGGED_STEP_PRIMITIVE_SCHEMA_V2 = "path-planner-v2-legged-step/v1"
 LEGGED_RESOURCE_PROXY_ID_V2 = "legged_static_crawl_relative_resource/v1"
 LEGGED_CAPABILITY_LEVEL_V2 = "simulation_proxy"
+LEGGED_PROVIDER_INITIAL_CRAWL_PHASE_V2 = 1
 LEGGED_LOCAL_FOOTHOLD_OFFSETS_V2 = (
     (0.0, 0.0),
     (-0.25, 0.0),
@@ -1733,9 +1734,14 @@ def _provider_canonical_heading_v2(value: float) -> float:
 
 
 def _provider_initial_state_v2(request: PlanningRequestV2) -> LeggedSearchStateV2:
-    state = nominal_legged_search_state_v2(request.start_state)
-    if type(state) is not LeggedSearchStateV2:
+    nominal_state = nominal_legged_search_state_v2(request.start_state)
+    if type(nominal_state) is not LeggedSearchStateV2:
         raise TypeError("nominal state must be exact LeggedSearchStateV2")
+    state = LeggedSearchStateV2(
+        nominal_state.body_state,
+        nominal_state.foot_contacts,
+        LEGGED_PROVIDER_INITIAL_CRAWL_PHASE_V2,
+    )
     canonical_heading = _provider_canonical_heading_v2(request.start_state.heading_rad)
     expected_body = PoseStateV2(
         _provider_positive_zero_v2(request.start_state.x_m),
@@ -1768,7 +1774,11 @@ def _provider_initial_state_v2(request: PlanningRequestV2) -> LeggedSearchStateV
             strict=True,
         )
     )
-    expected = LeggedSearchStateV2(expected_body, expected_contacts, 0)
+    expected = LeggedSearchStateV2(
+        expected_body,
+        expected_contacts,
+        LEGGED_PROVIDER_INITIAL_CRAWL_PHASE_V2,
+    )
     if legged_state_key_v2(state) != legged_state_key_v2(expected):
         raise ValueError("nominal state postcondition mismatch")
     return state
@@ -2726,6 +2736,7 @@ class LeggedPrimitiveProviderV2:
 __all__ = [
     "LEGGED_CAPABILITY_LEVEL_V2",
     "LEGGED_LOCAL_FOOTHOLD_OFFSETS_V2",
+    "LEGGED_PROVIDER_INITIAL_CRAWL_PHASE_V2",
     "LEGGED_RESOURCE_PROXY_ID_V2",
     "LEGGED_SEARCH_MEMORY_ACCOUNTING_ID_V2",
     "LEGGED_SEARCH_RECORD_BYTES_V2",

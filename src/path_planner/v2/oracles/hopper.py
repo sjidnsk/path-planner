@@ -33,7 +33,12 @@ from path_planner.v2.hopper_authority import (
     HopperGenericInternalSimulationProxyImplementationRecordV2,
     HopperParameterSetRecordV2,
 )
-from path_planner.v2.profiles import HopperProfileV2, PlatformProfileV2
+from path_planner.v2.profiles import (
+    HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_CAPABILITY_REVISION_V2,
+    HOPPER_SUPPORT_HEIGHT_TOLERANCE_M_V2,
+    HopperProfileV2,
+    PlatformProfileV2,
+)
 from path_planner.v2.runtime import PlanningDeadlineV2
 from path_planner.v2.terrain import (
     FineGridGeometryV2,
@@ -1347,6 +1352,22 @@ def _query_is_exact_v2(query: object, cell: Cell, anchor_hash: str) -> bool:
     )
 
 
+def _support_height_residual_is_valid_v2(
+    profile: HopperProfileV2,
+    elevation_m: float,
+    support_height_m: float,
+) -> bool:
+    if (
+        profile.profile.capability_revision
+        == HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_CAPABILITY_REVISION_V2
+    ):
+        return (
+            abs(elevation_m - support_height_m)
+            <= HOPPER_SUPPORT_HEIGHT_TOLERANCE_M_V2
+        )
+    return elevation_m == support_height_m
+
+
 def _launch_footprint_v2(
     candidate: HopperJumpCandidateV2,
     anchor: FineSafetyAnchorV2,
@@ -1364,8 +1385,7 @@ def _launch_footprint_v2(
     min_y, max_y = _fast_candidate_index_bounds_v2(
         y0 - radius, y0 + radius, geometry.origin[1], geometry.resolution_m
     )
-    common_elevation = None
-    first_required_cell = None
+    first_elevation = None
     for cell_y in range(min_y, max_y + 1):
         for cell_x in range(min_x, max_x + 1):
             x_lower = geometry.origin[0] + cell_x * geometry.resolution_m
@@ -1380,8 +1400,6 @@ def _launch_footprint_v2(
             if relation == "empty":
                 continue
             cell = Cell(cell_x, cell_y)
-            if first_required_cell is None:
-                first_required_cell = cell
             if _deadline_expired_v2(deadline):
                 return _result_v2("planning_deadline_expired", "launch_validation", counts), 0.0
             query = anchor.query(cell, profile.profile.max_traversable_slope_deg)
@@ -1392,19 +1410,16 @@ def _launch_footprint_v2(
             if not query.passed:
                 return _result_v2("hopper_launch_unsafe", "launch_validation", counts, failed_cell=cell), 0.0
             elevation = float(anchor.snapshot.elevation_m[cell_y, cell_x])
-            if common_elevation is None:
-                common_elevation = elevation
-            elif elevation != common_elevation:
+            if first_elevation is None:
+                first_elevation = elevation
+            if not _support_height_residual_is_valid_v2(
+                profile,
+                elevation,
+                candidate.support_height_m,
+            ):
                 return _result_v2("hopper_launch_unsafe", "launch_validation", counts, failed_cell=cell), 0.0
-    if common_elevation is None:
+    if first_elevation is None:
         return _contract_result_v2("hopper_numeric_contract_mismatch", "launch_validation", counts), 0.0
-    if common_elevation != candidate.support_height_m:
-        return _result_v2(
-            "hopper_launch_unsafe",
-            "launch_validation",
-            counts,
-            failed_cell=first_required_cell,
-        ), 0.0
     if profile.launch_reference_height_m < radius:
         return _result_v2(
             "hopper_launch_unsafe",
@@ -1412,7 +1427,7 @@ def _launch_footprint_v2(
             counts,
             failed_cell=Cell(min_x, min_y),
         ), 0.0
-    return None, common_elevation
+    return None, candidate.support_height_m
 
 
 def _validate_hopper_arc_partitions_v2(
@@ -1578,6 +1593,7 @@ def _landing_failure_from_query_v2(
     query: SafetyQueryV2,
     elevation_m: float | None,
     support_height_m: float,
+    profile: HopperProfileV2,
 ) -> tuple[int, str] | None:
     if query.reason_code == "terrain_unknown":
         return 40, "hopper_landing_zone_unknown"
@@ -1591,7 +1607,11 @@ def _landing_failure_from_query_v2(
         return 42, "hopper_landing_slope_exceeded"
     if not query.passed:
         return 41, "hopper_landing_zone_unsafe"
-    if elevation_m != support_height_m:
+    if elevation_m is None or not _support_height_residual_is_valid_v2(
+        profile,
+        elevation_m,
+        support_height_m,
+    ):
         return 43, "hopper_landing_height_unreachable"
     return None
 
@@ -1675,7 +1695,10 @@ def _validate_hopper_landing_and_stop_v2(
         if geometry.in_bounds(cell):
             elevation = float(anchor.snapshot.elevation_m[cell.y, cell.x])
         failure = _landing_failure_from_query_v2(
-            query, elevation, candidate.support_height_m
+            query,
+            elevation,
+            candidate.support_height_m,
+            profile,
         )
         if failure is not None:
             rank, reason = failure

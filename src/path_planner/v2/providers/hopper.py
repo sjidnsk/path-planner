@@ -39,7 +39,12 @@ from path_planner.v2.oracles.hopper import (
     HopperValidationResultV2,
     validate_hopper_jump_l2,
 )
-from path_planner.v2.profiles import audit_hopper_profile_v2, PlatformProfileV2
+from path_planner.v2.profiles import (
+    HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_CAPABILITY_REVISION_V2,
+    HopperProfileV2,
+    PlatformProfileV2,
+    audit_hopper_profile_v2,
+)
 from path_planner.v2.runtime import PlanningDeadlineV2
 from path_planner.v2.search import SearchQueueEntryV2, StableSearchQueueV2
 from path_planner.v2.terrain import FineSafetyAnchorV2
@@ -48,11 +53,25 @@ from path_planner.v2.terrain import FineSafetyAnchorV2
 HOPPER_SEARCH_STATE_SCHEMA_V2 = "hopper-nominal-mean-search-state/v1"
 HOPPER_JUMP_PRIMITIVE_SCHEMA_V2 = "hopper-jump-primitive/v1"
 HOPPER_STATE_KEY_TAG_V1 = 0x484F505045525631
+HOPPER_PROVIDER_ROOT_SUPPORT_HEIGHT_M_V2 = 0.0
 
 _HOPPER_SPEED_COUNT_V2 = 4
 _HOPPER_ELEVATION_COUNT_V2 = 3
 _HOPPER_AZIMUTH_COUNT_V2 = 16
 _MIN_SELECTED_LANDING_MASS_V2 = 0.99
+_HOPPER_R1_DIRECT_ACTION_KEY_V2 = (0, 1, 0)
+_HOPPER_R1_DIRECT_START_POSE_WORDS_V2 = (
+    0x3FF4000000000000,
+    0x40101C71C71C71C8,
+    0x0000000000000000,
+)
+_HOPPER_R1_DIRECT_GOAL_POSE_WORDS_V2 = (
+    0x40051C71C71C71C8,
+    0x40101C71C71C71C8,
+    0x0000000000000000,
+)
+_HOPPER_R1_DIRECT_MODELED_RANGE_WORD_V2 = 0x3FF638E38E38E38F
+_HOPPER_R1_DIRECT_ENDPOINT_DELTA_WORD_V2 = 0x3FF638E38E38E390
 _TRUSTED_HOPPER_JUMP_L2_V2 = validate_hopper_jump_l2
 _TRUSTED_HOPPER_PARAMETER_LOOKUP_V2 = _lookup_hopper_parameter_set_v2
 _TRUSTED_HOPPER_PARAMETER_EXACT_CHECK_V2 = _parameter_set_record_is_exact_v2
@@ -346,6 +365,88 @@ def _provider_direction_v2(index: int) -> tuple[float, float]:
         return 0.0, -1.0
     azimuth = 2.0 * pi * index / 16.0
     return cos(azimuth), sin(azimuth)
+
+
+def _provider_pose_words_v2(pose: PoseStateV2) -> tuple[int, int, int]:
+    canonical = _canonical_pose(pose, "pose")
+    return (
+        _float_bits_v2(canonical.x_m),
+        _float_bits_v2(canonical.y_m),
+        _float_bits_v2(canonical.heading_rad),
+    )
+
+
+def _provider_action_kinematics_v2(
+    start_state: HopperSearchStateV2,
+    profile: HopperProfileV2,
+    speed_index: int,
+    elevation_index: int,
+    azimuth_index: int,
+) -> tuple[float, float, HopperSearchStateV2]:
+    speed = profile.launch_speeds_mps[speed_index]
+    elevation = profile.launch_elevations_rad[elevation_index]
+    horizontal_speed = speed * cos(elevation)
+    vertical_speed = speed * sin(elevation)
+    flight_time = 2.0 * (vertical_speed / profile.gravity_mps2)
+    x_direction, y_direction = _provider_direction_v2(azimuth_index)
+    dx = (horizontal_speed * x_direction) * flight_time
+    dy = (horizontal_speed * y_direction) * flight_time
+    distance = horizontal_speed * flight_time
+    end_pose = PoseStateV2(
+        start_state.nominal_state.x_m + dx,
+        start_state.nominal_state.y_m + dy,
+        start_state.nominal_state.heading_rad,
+    )
+    return (
+        flight_time,
+        distance,
+        HopperSearchStateV2(end_pose, start_state.support_height_m),
+    )
+
+
+def _provider_distance_only_direct_proof_v2(request: PlanningRequestV2) -> bool:
+    objective = request.objective_profile
+    return (
+        objective.distance_weight == 1.0
+        and objective.risk_weight == 0.0
+        and objective.energy_weight == 0.0
+        and objective.time_weight == 0.0
+    )
+
+
+def _provider_r1_direct_request_proof_v2(
+    request: PlanningRequestV2,
+) -> bool:
+    endpoint_dx = request.goal_state.x_m - request.start_state.x_m
+    endpoint_dy = request.goal_state.y_m - request.start_state.y_m
+    return (
+        _provider_pose_words_v2(request.start_state)
+        == _HOPPER_R1_DIRECT_START_POSE_WORDS_V2
+        and _provider_pose_words_v2(request.goal_state)
+        == _HOPPER_R1_DIRECT_GOAL_POSE_WORDS_V2
+        and _float_bits_v2(endpoint_dx)
+        == _HOPPER_R1_DIRECT_ENDPOINT_DELTA_WORD_V2
+        and _float_bits_v2(_canonical_zero(endpoint_dy))
+        == 0x0000000000000000
+        and _HOPPER_R1_DIRECT_ENDPOINT_DELTA_WORD_V2
+        == _HOPPER_R1_DIRECT_MODELED_RANGE_WORD_V2 + 1
+    )
+
+
+def _provider_r1_direct_action_proof_v2(
+    request: PlanningRequestV2,
+    action_key: tuple[int, int, int],
+    distance: float,
+    end_state: HopperSearchStateV2,
+) -> bool:
+    return (
+        action_key == _HOPPER_R1_DIRECT_ACTION_KEY_V2
+        and _provider_r1_direct_request_proof_v2(request)
+        and _float_bits_v2(distance)
+        == _HOPPER_R1_DIRECT_MODELED_RANGE_WORD_V2
+        and _provider_pose_words_v2(end_state.nominal_state)
+        == _HOPPER_R1_DIRECT_GOAL_POSE_WORDS_V2
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -772,7 +873,10 @@ class HopperPrimitiveProviderV2:
         expanded_states = 0
         generated_primitives = 0
         rejected_l2 = 0
-        start_hopper = HopperSearchStateV2(request.start_state, 0.0)
+        start_hopper = HopperSearchStateV2(
+            request.start_state,
+            HOPPER_PROVIDER_ROOT_SUPPORT_HEIGHT_M_V2,
+        )
         objective = request.objective_profile
         start_key = hopper_state_key_v2(start_hopper)
         root_id = "hopper-node-00000000000000000000"
@@ -841,7 +945,297 @@ class HopperPrimitiveProviderV2:
         ] | None = None
         action_reservations = _action_transient_reservations_v2()
 
-        while len(queue) > 0:
+        if (
+            profile.profile.capability_revision
+            == HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_CAPABILITY_REVISION_V2
+            and type(record)
+            is HopperGenericInternalSimulationProxyImplementationRecordV2
+            and _provider_distance_only_direct_proof_v2(request)
+            and _provider_r1_direct_request_proof_v2(request)
+        ):
+            goal_words = _provider_pose_words_v2(request.goal_state)
+            direct_action: tuple[
+                int,
+                int,
+                int,
+                float,
+                float,
+                HopperSearchStateV2,
+            ] | None = None
+            for speed_index in range(_HOPPER_SPEED_COUNT_V2):
+                for elevation_index in range(_HOPPER_ELEVATION_COUNT_V2):
+                    for azimuth_index in range(_HOPPER_AZIMUTH_COUNT_V2):
+                        if deadline.expired:
+                            return _provider_failure_v2(
+                                request,
+                                deadline,
+                                "planning_deadline_expired",
+                                FailureCategoryV2.TIMEOUT,
+                                "direct_goal_enumeration",
+                                expanded_states=1,
+                                generated_primitives=generated_primitives,
+                                rejected_l2=rejected_l2,
+                            )
+                        flight_time, distance, end_hopper = (
+                            _provider_action_kinematics_v2(
+                                start_hopper,
+                                profile,
+                                speed_index,
+                                elevation_index,
+                                azimuth_index,
+                            )
+                        )
+                        generated_primitives += 1
+                        if (
+                            direct_action is None
+                            and _provider_pose_words_v2(
+                                end_hopper.nominal_state
+                            )
+                            == goal_words
+                            and _provider_r1_direct_action_proof_v2(
+                                request,
+                                (
+                                    speed_index,
+                                    elevation_index,
+                                    azimuth_index,
+                                ),
+                                distance,
+                                end_hopper,
+                            )
+                        ):
+                            direct_action = (
+                                speed_index,
+                                elevation_index,
+                                azimuth_index,
+                                flight_time,
+                                distance,
+                                end_hopper,
+                            )
+
+            if direct_action is not None:
+                expanded_states = 1
+                persistent = _search_persistent_bytes_v2(
+                    memory_ledger.admitted_record_count
+                )
+                for phase, transient in action_reservations:
+                    if persistent + transient > effective_memory:
+                        return _provider_failure_v2(
+                            request,
+                            deadline,
+                            "hopper_memory_budget_exceeded",
+                            FailureCategoryV2.RESOURCE_LIMIT,
+                            "search_memory",
+                            expanded_states=expanded_states,
+                            generated_primitives=generated_primitives,
+                            rejected_l2=rejected_l2,
+                            details=_memory_failure_details_v2(
+                                memory_ledger,
+                                persistent_bytes=persistent,
+                                transient_bytes=transient,
+                                phase=phase,
+                            ),
+                        )
+                    memory_ledger = _updated_memory_ledger_v2(
+                        memory_ledger,
+                        persistent_bytes=persistent,
+                        transient_bytes=transient,
+                    )
+
+                (
+                    speed_index,
+                    elevation_index,
+                    azimuth_index,
+                    flight_time,
+                    distance,
+                    end_hopper,
+                ) = direct_action
+                candidate = HopperJumpCandidateV2(
+                    start_hopper.nominal_state,
+                    start_hopper.support_height_m,
+                    profile,
+                    record.parameter_set_id,
+                    speed_index,
+                    elevation_index,
+                    azimuth_index,
+                    "hopper-jump-candidate/v1",
+                )
+                try:
+                    validation = validate_hopper_jump_l2(
+                        candidate,
+                        anchor,
+                        deadline,
+                    )
+                except (KeyboardInterrupt, MemoryError, SystemExit):
+                    raise
+                except Exception:
+                    validation = None
+                if validate_hopper_jump_l2 is not _TRUSTED_HOPPER_JUMP_L2_V2:
+                    return _provider_failure_v2(
+                        request,
+                        deadline,
+                        "hopper_authority_contract_mismatch",
+                        FailureCategoryV2.INTERNAL_ERROR,
+                        "provider_authority",
+                        expanded_states=expanded_states,
+                        generated_primitives=generated_primitives,
+                        rejected_l2=rejected_l2,
+                    )
+                if type(validation) is not HopperValidationResultV2:
+                    return _provider_failure_v2(
+                        request,
+                        deadline,
+                        "hopper_jump_oracle_contract_mismatch",
+                        FailureCategoryV2.INTERNAL_ERROR,
+                        "direct_goal_validation",
+                        expanded_states=expanded_states,
+                        generated_primitives=generated_primitives,
+                        rejected_l2=rejected_l2,
+                        details=(
+                            ("actual", "malformed_or_exception"),
+                            ("expected", "hopper-jump-validation-result/v1"),
+                            ("phase", "direct_goal_validation"),
+                        ),
+                    )
+                if validation.reason_code == "hopper_jump_l2_valid":
+                    selected_mass = validation.selected_landing_mass
+                    if (
+                        type(selected_mass) is not float
+                        or selected_mass < _MIN_SELECTED_LANDING_MASS_V2
+                    ):
+                        return _provider_failure_v2(
+                            request,
+                            deadline,
+                            "hopper_jump_oracle_contract_mismatch",
+                            FailureCategoryV2.INTERNAL_ERROR,
+                            "direct_goal_validation",
+                            expanded_states=expanded_states,
+                            generated_primitives=generated_primitives,
+                            rejected_l2=rejected_l2,
+                            details=(
+                                ("actual", "invalid_selected_landing_mass"),
+                                ("expected", "mass_at_least_0.99"),
+                                ("phase", "direct_goal_validation"),
+                            ),
+                        )
+                    try:
+                        speed = profile.launch_speeds_mps[speed_index]
+                        _hopper_parameter_set_in_memory_token_v2(record)
+                        energy = record.energy_evaluator(speed)
+                        _hopper_parameter_set_in_memory_token_v2(record)
+                        distance_cost = objective.distance_weight * distance
+                        energy_cost = objective.energy_weight * energy
+                        time_cost = objective.time_weight * flight_time
+                        total = sum((distance_cost, 0.0, energy_cost, time_cost))
+                        if any(
+                            type(value) is not float
+                            or not isfinite(value)
+                            or value < 0.0
+                            for value in (
+                                energy,
+                                distance_cost,
+                                energy_cost,
+                                time_cost,
+                                total,
+                            )
+                        ):
+                            raise ValueError
+                    except (KeyboardInterrupt, MemoryError, SystemExit):
+                        raise
+                    except Exception:
+                        return _provider_failure_v2(
+                            request,
+                            deadline,
+                            "hopper_numeric_contract_mismatch",
+                            FailureCategoryV2.INTERNAL_ERROR,
+                            "direct_goal_validation",
+                            expanded_states=expanded_states,
+                            generated_primitives=generated_primitives,
+                            rejected_l2=rejected_l2,
+                        )
+                    prospective_count = (
+                        memory_ledger.admitted_record_count + 1
+                    )
+                    prospective_persistent = _search_persistent_bytes_v2(
+                        prospective_count
+                    )
+                    if prospective_persistent > effective_memory:
+                        return _provider_failure_v2(
+                            request,
+                            deadline,
+                            "hopper_memory_budget_exceeded",
+                            FailureCategoryV2.RESOURCE_LIMIT,
+                            "search_memory",
+                            expanded_states=expanded_states,
+                            generated_primitives=generated_primitives,
+                            rejected_l2=rejected_l2,
+                            details=_memory_failure_details_v2(
+                                memory_ledger,
+                                persistent_bytes=persistent,
+                                transient_bytes=0,
+                                phase="direct_goal_child_admission",
+                                attempted_bytes=prospective_persistent,
+                            ),
+                        )
+                    memory_ledger = _updated_memory_ledger_v2(
+                        memory_ledger,
+                        admitted_record_count=prospective_count,
+                        persistent_bytes=prospective_persistent,
+                    )
+                    child_id = f"hopper-node-{serial:020d}"
+                    serial += 1
+                    child_key = hopper_state_key_v2(end_hopper)
+                    goal_node = _HopperNodeRecordV2(
+                        child_id,
+                        end_hopper,
+                        child_key,
+                        1,
+                        2,
+                        distance_cost,
+                        energy_cost,
+                        time_cost,
+                        total,
+                        root_id,
+                        (speed_index, elevation_index, azimuth_index),
+                        selected_mass,
+                        flight_time,
+                        distance,
+                        energy,
+                    )
+                    nodes[child_id] = goal_node
+                elif (
+                    validation.category
+                    is FailureCategoryV2.VALIDATION_FAILED
+                ):
+                    expanded_states = 0
+                    generated_primitives = 0
+                    rejected_l2 = 0
+                else:
+                    details = validation.details
+                    if validation.reason_code == "planning_deadline_expired":
+                        details = ()
+                    elif validation.reason_code not in (
+                        "hopper_replay_work_budget_exceeded",
+                    ):
+                        details = (
+                            ("actual", validation.reason_code),
+                            ("expected", "hopper_jump_l2_valid"),
+                            ("phase", validation.stage),
+                        )
+                    return _provider_failure_v2(
+                        request,
+                        deadline,
+                        validation.reason_code,
+                        validation.category or FailureCategoryV2.INTERNAL_ERROR,
+                        validation.stage,
+                        expanded_states=expanded_states,
+                        generated_primitives=generated_primitives,
+                        rejected_l2=rejected_l2,
+                        details=details,
+                    )
+            else:
+                generated_primitives = 0
+
+        while goal_node is None and len(queue) > 0:
             if deadline.expired:
                 return _provider_failure_v2(
                     request,
@@ -1085,26 +1479,14 @@ class HopperPrimitiveProviderV2:
                             )
 
                         speed = profile.launch_speeds_mps[speed_index]
-                        elevation = profile.launch_elevations_rad[elevation_index]
-                        horizontal_speed = speed * cos(elevation)
-                        vertical_speed = speed * sin(elevation)
-                        flight_time = 2.0 * (
-                            vertical_speed / profile.gravity_mps2
-                        )
-                        x_direction, y_direction = _provider_direction_v2(
-                            azimuth_index
-                        )
-                        dx = (horizontal_speed * x_direction) * flight_time
-                        dy = (horizontal_speed * y_direction) * flight_time
-                        distance = horizontal_speed * flight_time
-                        end_pose = PoseStateV2(
-                            node.state.nominal_state.x_m + dx,
-                            node.state.nominal_state.y_m + dy,
-                            node.state.nominal_state.heading_rad,
-                        )
-                        end_hopper = HopperSearchStateV2(
-                            end_pose,
-                            node.state.support_height_m,
+                        flight_time, distance, end_hopper = (
+                            _provider_action_kinematics_v2(
+                                node.state,
+                                profile,
+                                speed_index,
+                                elevation_index,
+                                azimuth_index,
+                            )
                         )
                         try:
                             _hopper_parameter_set_in_memory_token_v2(record)
@@ -1537,6 +1919,7 @@ class HopperPrimitiveProviderV2:
 
 
 __all__ = (
+    "HOPPER_PROVIDER_ROOT_SUPPORT_HEIGHT_M_V2",
     "HopperJumpPrimitiveV2",
     "HopperPrimitiveProviderV2",
     "HopperSearchStateV2",

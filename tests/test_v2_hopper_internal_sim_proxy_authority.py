@@ -44,8 +44,10 @@ BASE_PROFILE_ID = (
     "hopper-generic-internal-computational-simulation-proxy-midterm/v1"
 )
 CAPABILITY_REVISION = (
-    "simulation_proxy_generic_internal_lunar_ballistic/v2"
+    "simulation_proxy_generic_internal_lunar_ballistic/v3"
 )
+SUPPORT_PLANE_MODEL_ID = "hopper_horizontal_same_support_full_envelope_50mm/v1"
+SUPPORT_HEIGHT_TOLERANCE_M = 0.05
 STOP_CONDITION_ID = (
     "hopper_generic_internal_same_height_capture_le_2p5mps_"
     "stop_computational_simulation_proxy/v1"
@@ -143,6 +145,13 @@ def test_generic_internal_record_has_frozen_values_and_never_grants_formal_evide
     assert record.launch_reference_height_m.hex() == "0x1.8000000000000p-1"
     assert record.arc_clearance_margin_m.hex() == "0x1.0000000000000p-3"
     assert record.landing_footprint_radius_m.hex() == "0x1.4000000000000p-1"
+    assert record.support_plane_model_id == SUPPORT_PLANE_MODEL_ID
+    assert record.support_height_tolerance_m.hex() == SUPPORT_HEIGHT_TOLERANCE_M.hex()
+    assert record.relief_preservation_required is True
+    assert record.schema_version == (
+        "hopper-generic-internal-computational-simulation-proxy-"
+        "implementation-record/v2"
+    )
     assert (
         record.launch_reference_height_m
         >= record.body_envelope_radius_m + record.arc_clearance_margin_m
@@ -256,8 +265,24 @@ def test_generic_profile_is_opt_in_and_default_capability_revision_is_unchanged(
     assert generic.launch_reference_height_m == 0.75
     assert generic.arc_clearance_margin_m == 0.125
     assert generic.landing_footprint_radius_m == 0.625
+    assert profiles.HOPPER_SUPPORT_PLANE_MODEL_ID_V2 == SUPPORT_PLANE_MODEL_ID
+    assert (
+        profiles.HOPPER_SUPPORT_HEIGHT_TOLERANCE_M_V2.hex()
+        == SUPPORT_HEIGHT_TOLERANCE_M.hex()
+    )
     assert generic.stop_condition == STOP_CONDITION_ID
     assert generic.energy_model == ENERGY_MODEL_ID
+
+
+def test_old_generic_v2_capability_cannot_carry_full_envelope_support_behavior():
+    generic = authority.hopper_generic_internal_simulation_proxy_midterm_v1()
+    old_platform = replace(
+        generic.profile,
+        capability_revision="simulation_proxy_generic_internal_lunar_ballistic/v2",
+    )
+
+    with pytest.raises(ValueError, match="capability_revision"):
+        replace(generic, profile=old_platform)
 
 
 @pytest.mark.parametrize(
@@ -275,6 +300,22 @@ def test_generic_record_rejects_one_ulp_numeric_drift(field: str, direction: flo
 
     with pytest.raises(ValueError):
         replace(record, **{field: drifted})
+
+
+@pytest.mark.parametrize(
+    ("field", "mutated"),
+    (
+        ("support_plane_model_id", "hopper_horizontal_same_support_flat/v1"),
+        ("support_height_tolerance_m", nextafter(0.05, inf)),
+        ("relief_preservation_required", False),
+    ),
+)
+def test_generic_record_rejects_support_contract_identity_drift(
+    field: str,
+    mutated: object,
+):
+    with pytest.raises(ValueError):
+        replace(_generic_record(), **{field: mutated})
 
 
 def test_jump_l2_accepts_2p5_and_rejects_3p0_only_at_stop_validation():
@@ -405,6 +446,9 @@ def test_generic_lineage_binds_evaluator_ids_and_source_digests_without_objects(
     assert record.energy_evaluator_id in lineage
     assert record.stop_evaluator_source_sha256 in lineage
     assert record.energy_evaluator_source_sha256 in lineage
+    assert record.support_plane_model_id in lineage
+    assert record.support_height_tolerance_m.hex() in lineage
+    assert record.relief_preservation_required in lineage
     assert record.stop_evaluator_source_sha256 == sha256(
         getsource(record.stop_evaluator).encode("utf-8")
     ).hexdigest()

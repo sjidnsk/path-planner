@@ -11,13 +11,17 @@ from path_planner.v2.contracts import PlatformKindV2
 PLATFORM_PROFILE_SCHEMA_VERSION_V2 = "path-planner-v2-platform-profile/v1"
 WHEEL_RELATIVE_ENERGY_PROXY_ID_V2 = "wheel_relative_motion_energy/v1"
 WHEEL_KINEMATIC_CORRIDOR_SQP_CAPABILITY_V2 = "wheel_kinematic_corridor_sqp/v1"
-LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2 = "simulation_proxy_static_crawl/v1"
+LEGGED_STATIC_CRAWL_CAPABILITY_REVISION_V2 = "simulation_proxy_static_crawl/v2"
 HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2 = (
     "simulation_proxy_lunar_ballistic/v1"
 )
 HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_CAPABILITY_REVISION_V2 = (
-    "simulation_proxy_generic_internal_lunar_ballistic/v2"
+    "simulation_proxy_generic_internal_lunar_ballistic/v3"
 )
+HOPPER_SUPPORT_PLANE_MODEL_ID_V2 = (
+    "hopper_horizontal_same_support_full_envelope_50mm/v1"
+)
+HOPPER_SUPPORT_HEIGHT_TOLERANCE_M_V2 = 0.05
 HOPPER_PROXY_PROFILE_INCOMPLETE_REASON_V2 = "hopper_proxy_profile_incomplete"
 _HOPPER_FORMAL_CAPABILITY_FIELDS_V2 = (
     "body_envelope_radius_m",

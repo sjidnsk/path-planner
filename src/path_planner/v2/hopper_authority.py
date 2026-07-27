@@ -13,6 +13,8 @@ from path_planner.v2.contracts import PlatformKindV2
 from path_planner.v2.profiles import (
     HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_CAPABILITY_REVISION_V2,
     HOPPER_LUNAR_BALLISTIC_CAPABILITY_REVISION_V2,
+    HOPPER_SUPPORT_HEIGHT_TOLERANCE_M_V2,
+    HOPPER_SUPPORT_PLANE_MODEL_ID_V2,
     HopperProfileV2,
     PlatformProfileV2,
     audit_hopper_profile_v2,
@@ -512,9 +514,9 @@ _HOPPER_GENERIC_INTERNAL_ENERGY_EVALUATOR_ID_V1 = (
 _HOPPER_GENERIC_INTERNAL_EVIDENCE_CLASS_V1 = (
     "project_internal_generic_computational_simulation_proxy/v1"
 )
-_HOPPER_GENERIC_INTERNAL_IMPLEMENTATION_SCHEMA_VERSION_V1 = (
+_HOPPER_GENERIC_INTERNAL_IMPLEMENTATION_SCHEMA_VERSION_V2 = (
     "hopper-generic-internal-computational-simulation-proxy-"
-    "implementation-record/v1"
+    "implementation-record/v2"
 )
 _HOPPER_GENERIC_INTERNAL_BODY_ENVELOPE_RADIUS_M = 0.375
 _HOPPER_GENERIC_INTERNAL_LAUNCH_REFERENCE_HEIGHT_M = 0.750
@@ -695,6 +697,9 @@ class HopperGenericInternalSimulationProxyImplementationRecordV2:
     launch_reference_height_m: float
     arc_clearance_margin_m: float
     landing_footprint_radius_m: float
+    support_plane_model_id: str
+    support_height_tolerance_m: float
+    relief_preservation_required: bool
     stop_condition: str
     stop_evaluator_id: str
     stop_evaluator_source_sha256: str
@@ -721,6 +726,7 @@ class HopperGenericInternalSimulationProxyImplementationRecordV2:
                 "capability_revision",
                 HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_CAPABILITY_REVISION_V2,
             ),
+            ("support_plane_model_id", HOPPER_SUPPORT_PLANE_MODEL_ID_V2),
             ("stop_condition", _HOPPER_GENERIC_INTERNAL_STOP_CONDITION_ID_V1),
             (
                 "stop_evaluator_id",
@@ -742,7 +748,7 @@ class HopperGenericInternalSimulationProxyImplementationRecordV2:
             ("evidence_class", _HOPPER_GENERIC_INTERNAL_EVIDENCE_CLASS_V1),
             (
                 "schema_version",
-                _HOPPER_GENERIC_INTERNAL_IMPLEMENTATION_SCHEMA_VERSION_V1,
+                _HOPPER_GENERIC_INTERNAL_IMPLEMENTATION_SCHEMA_VERSION_V2,
             ),
         )
         for name, expected in expected_strings:
@@ -768,6 +774,10 @@ class HopperGenericInternalSimulationProxyImplementationRecordV2:
             (
                 "landing_footprint_radius_m",
                 _HOPPER_GENERIC_INTERNAL_LANDING_FOOTPRINT_RADIUS_M,
+            ),
+            (
+                "support_height_tolerance_m",
+                HOPPER_SUPPORT_HEIGHT_TOLERANCE_M_V2,
             ),
         )
         for name, expected in expected_floats:
@@ -801,6 +811,7 @@ class HopperGenericInternalSimulationProxyImplementationRecordV2:
             )
         expected_flags = (
             ("simulation_proxy", True),
+            ("relief_preservation_required", True),
             ("physical_capability_claimed", False),
             ("hardware_certification_claimed", False),
             ("formal_evidence_eligible", False),
@@ -901,6 +912,9 @@ HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_IMPLEMENTATION_V1 = (
         landing_footprint_radius_m=(
             _HOPPER_GENERIC_INTERNAL_LANDING_FOOTPRINT_RADIUS_M
         ),
+        support_plane_model_id=HOPPER_SUPPORT_PLANE_MODEL_ID_V2,
+        support_height_tolerance_m=HOPPER_SUPPORT_HEIGHT_TOLERANCE_M_V2,
+        relief_preservation_required=True,
         stop_condition=_HOPPER_GENERIC_INTERNAL_STOP_CONDITION_ID_V1,
         stop_evaluator_id=_HOPPER_GENERIC_INTERNAL_STOP_EVALUATOR_ID_V1,
         stop_evaluator_source_sha256=(
@@ -923,7 +937,7 @@ HOPPER_GENERIC_INTERNAL_SIMULATION_PROXY_IMPLEMENTATION_V1 = (
         hardware_certification_claimed=False,
         formal_evidence_eligible=False,
         schema_version=(
-            _HOPPER_GENERIC_INTERNAL_IMPLEMENTATION_SCHEMA_VERSION_V1
+            _HOPPER_GENERIC_INTERNAL_IMPLEMENTATION_SCHEMA_VERSION_V2
         ),
     )
 )
@@ -1004,6 +1018,13 @@ def _generic_internal_parameter_set_record_is_exact_v2(record: object) -> bool:
             and type(record.landing_footprint_radius_m) is float
             and record.landing_footprint_radius_m.hex()
             == _HOPPER_GENERIC_INTERNAL_LANDING_FOOTPRINT_RADIUS_M.hex()
+            and type(record.support_plane_model_id) is str
+            and record.support_plane_model_id == HOPPER_SUPPORT_PLANE_MODEL_ID_V2
+            and type(record.support_height_tolerance_m) is float
+            and record.support_height_tolerance_m.hex()
+            == HOPPER_SUPPORT_HEIGHT_TOLERANCE_M_V2.hex()
+            and type(record.relief_preservation_required) is bool
+            and record.relief_preservation_required is True
             and type(record.stop_condition) is str
             and record.stop_condition
             == _HOPPER_GENERIC_INTERNAL_STOP_CONDITION_ID_V1
@@ -1041,7 +1062,7 @@ def _generic_internal_parameter_set_record_is_exact_v2(record: object) -> bool:
             and record.formal_evidence_eligible is False
             and type(record.schema_version) is str
             and record.schema_version
-            == _HOPPER_GENERIC_INTERNAL_IMPLEMENTATION_SCHEMA_VERSION_V1
+            == _HOPPER_GENERIC_INTERNAL_IMPLEMENTATION_SCHEMA_VERSION_V2
         )
     except (AttributeError, TypeError, ValueError):
         return False
@@ -1156,6 +1177,9 @@ def _hopper_parameter_set_in_memory_token_v2(
         record.launch_reference_height_m.hex(),
         record.arc_clearance_margin_m.hex(),
         record.landing_footprint_radius_m.hex(),
+        record.support_plane_model_id,
+        record.support_height_tolerance_m.hex(),
+        record.relief_preservation_required,
         record.stop_condition,
         record.stop_evaluator_id,
         record.stop_evaluator_source_sha256,
@@ -1182,7 +1206,7 @@ def _hopper_parameter_set_lineage_token_v2(
     in_memory = _hopper_parameter_set_in_memory_token_v2(record)
     if type(record) is HopperParameterSetRecordV2:
         return (*in_memory[:8], *in_memory[10:])
-    return (*in_memory[:10], *in_memory[11:14], *in_memory[15:])
+    return (*in_memory[:13], *in_memory[14:17], *in_memory[18:])
 
 
 HOPPER_PARAMETER_SET_REGISTRY_IN_MEMORY_TOKEN_V2 = tuple(
