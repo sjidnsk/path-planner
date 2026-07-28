@@ -1,0 +1,73 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "lunar-path-planner-v3",
+  "version-string": "0.1.0",
+  "builtin-baseline": "56bb2411609227288b70117ead2c47585ba07713",
+  "dependencies": [
+    {
+      "name": "eigen3",
+      "version>=": "5.0.1"
+    },
+    {
+      "name": "nlohmann-json",
+      "version>=": "3.12.0"
+    },
+    {
+      "name": "double-conversion",
+      "version>=": "3.4.0"
+    },
+    {
+      "name": "picosha2",
+      "version>=": "1.0.1"
+    },
+    {
+      "name": "gtest",
+      "version>=": "1.17.0"
+    },
+    {
+      "name": "benchmark",
+      "version>=": "1.9.5"
+    }
+  ],
+  "features": {
+    "qp": {
+      "description": "Build the bounded OSQP backend",
+      "dependencies": [
+        {
+          "name": "osqp",
+          "version>=": "1.0.0"
+        }
+      ]
+    }
+  },
+  "overrides": [
+    {
+      "name": "eigen3",
+      "version": "5.0.1"
+    },
+    {
+      "name": "nlohmann-json",
+      "version": "3.12.0"
+    },
+    {
+      "name": "double-conversion",
+      "version": "3.4.0"
+    },
+    {
+      "name": "picosha2",
+      "version": "1.0.1"
+    },
+    {
+      "name": "gtest",
+      "version": "1.17.0"
+    },
+    {
+      "name": "benchmark",
+      "version": "1.9.5"
+    },
+    {
+      "name": "osqp",
+      "version": "1.0.0"
+    }
+  ]
+}
