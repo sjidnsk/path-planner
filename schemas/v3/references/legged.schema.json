@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:reference:legged",
+  "title": "Path Planner v3 LeggedBodyReference",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "reference_id",
+    "reference_hash",
+    "platform_type",
+    "reference_point_id",
+    "reference_time_origin",
+    "geometric_path",
+    "time_scaling",
+    "body_frame_velocity_envelope",
+    "terrain_normal_envelope",
+    "roll_pitch_diagnostic_envelope",
+    "safe_stop_anchor",
+    "feasibility_scope",
+    "footstep_feasibility_guaranteed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "path-planner-v3-legged-body-reference/v1"
+    },
+    "reference_id": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+    },
+    "reference_hash": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentHash"
+    },
+    "platform_type": {
+      "const": "LEGGED"
+    },
+    "reference_point_id": {
+      "description": "Versioned fixed body-frame reference point; never the instantaneous dynamic center of mass.",
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+    },
+    "reference_time_origin": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimePoint"
+    },
+    "geometric_path": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/GeometricPath"
+    },
+    "time_scaling": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/MonotoneTimeScaling"
+    },
+    "body_frame_velocity_envelope": {
+      "$ref": "#/$defs/BodyFrameVelocityEnvelope"
+    },
+    "terrain_normal_envelope": {
+      "$ref": "#/$defs/TerrainNormalEnvelope"
+    },
+    "roll_pitch_diagnostic_envelope": {
+      "$ref": "#/$defs/RollPitchDiagnosticEnvelope"
+    },
+    "safe_stop_anchor": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/SafeStopAnchor"
+    },
+    "feasibility_scope": {
+      "const": "body_geometry_and_terrain_thresholds_only"
+    },
+    "footstep_feasibility_guaranteed": {
+      "const": false
+    }
+  },
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "$defs": {
+    "BodyFrameVelocityEnvelope": {
+      "description": "Bounds apply to the fixed reference point in body coordinates. The semantic validator evaluates them along P(s), s(t), and independent yaw.",
+      "type": "object",
+      "required": [
+        "forward_mps",
+        "lateral_mps",
+        "vertical_mps",
+        "yaw_rate_radps"
+      ],
+      "properties": {
+        "forward_mps": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ScalarBounds"
+        },
+        "lateral_mps": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ScalarBounds"
+        },
+        "vertical_mps": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ScalarBounds"
+        },
+        "yaw_rate_radps": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ScalarBounds"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TerrainNormalEnvelope": {
+      "type": "object",
+      "required": [
+        "maximum_normal_deviation_rad",
+        "source_terrain_certification_ref"
+      ],
+      "properties": {
+        "maximum_normal_deviation_rad": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.5707963267948966
+        },
+        "source_terrain_certification_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RollPitchDiagnosticEnvelope": {
+      "description": "Diagnostic only; this is not an executable roll/pitch reference.",
+      "type": "object",
+      "required": [
+        "authority",
+        "roll_rad",
+        "pitch_rad"
+      ],
+      "properties": {
+        "authority": {
+          "const": "NON_AUTHORITATIVE_DIAGNOSTIC"
+        },
+        "roll_rad": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ScalarBounds"
+        },
+        "pitch_rad": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ScalarBounds"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

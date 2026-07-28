@@ -1,0 +1,519 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:reference-bundle",
+  "title": "Path Planner v3 ReferenceBundle",
+  "$comment": "Activation-time semantic validation must join source_map_snapshot_ref to validity.required_map_snapshot_ref and any nested map certificate, and source_safety_capability_ref to validity.required_capability_ref. JSON Schema cannot express cross-field ContentRef equality.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "bundle_id",
+    "bundle_revision",
+    "bundle_hash",
+    "source_request_id",
+    "source_map_snapshot_ref",
+    "source_safety_capability_ref",
+    "source_algorithm_config_ref",
+    "platform_type",
+    "platform_reference",
+    "route_skeleton",
+    "committed_prefix",
+    "preview",
+    "validity",
+    "validation_summary",
+    "generation_evidence"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "path-planner-v3-reference-bundle/v1"
+    },
+    "bundle_id": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+    },
+    "bundle_revision": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Revision"
+    },
+    "bundle_hash": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentHash"
+    },
+    "supersedes_bundle_id": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+    },
+    "source_request_id": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+    },
+    "source_map_snapshot_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "source_safety_capability_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "source_algorithm_config_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "platform_type": {
+      "enum": [
+        "WHEELED",
+        "LEGGED",
+        "HOPPER"
+      ]
+    },
+    "platform_reference": {
+      "oneOf": [
+        {
+          "$ref": "urn:lunar-path-planner:v3:reference:wheeled"
+        },
+        {
+          "$ref": "urn:lunar-path-planner:v3:reference:legged"
+        },
+        {
+          "$ref": "urn:lunar-path-planner:v3:reference:hopper"
+        }
+      ]
+    },
+    "route_skeleton": {
+      "$ref": "#/$defs/RouteSkeletonComponent"
+    },
+    "committed_prefix": {
+      "$ref": "#/$defs/CommittedPrefixComponent"
+    },
+    "preview": {
+      "$ref": "#/$defs/PreviewComponent"
+    },
+    "validity": {
+      "$ref": "#/$defs/ReferenceValidity"
+    },
+    "validation_summary": {
+      "$ref": "#/$defs/ValidationSummary"
+    },
+    "generation_evidence": {
+      "$ref": "#/$defs/GenerationEvidence"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform_type": {
+            "const": "WHEELED"
+          }
+        },
+        "required": [
+          "platform_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "platform_reference": {
+            "$ref": "urn:lunar-path-planner:v3:reference:wheeled"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform_type": {
+            "const": "LEGGED"
+          }
+        },
+        "required": [
+          "platform_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "platform_reference": {
+            "$ref": "urn:lunar-path-planner:v3:reference:legged"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform_type": {
+            "const": "HOPPER"
+          }
+        },
+        "required": [
+          "platform_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "platform_reference": {
+            "$ref": "urn:lunar-path-planner:v3:reference:hopper"
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "$defs": {
+    "RouteSkeletonContent": {
+      "description": "Task-level intent only; never executable or authoritative.",
+      "type": "object",
+      "required": [
+        "authority",
+        "source_reference_id",
+        "source_reference_hash",
+        "waypoints"
+      ],
+      "properties": {
+        "authority": {
+          "const": "NON_AUTHORITATIVE"
+        },
+        "source_reference_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "source_reference_hash": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentHash"
+        },
+        "waypoints": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:lunar-path-planner:v3:common#/$defs/PoseXYZYaw"
+          },
+          "maxItems": 2048
+        },
+        "unresolved_tail": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:lunar-path-planner:v3:common#/$defs/Vector3"
+          },
+          "maxItems": 512
+        }
+      },
+      "additionalProperties": false
+    },
+    "RouteSkeletonComponent": {
+      "type": "object",
+      "required": [
+        "component_id",
+        "component_hash",
+        "content"
+      ],
+      "properties": {
+        "component_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "component_hash": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentHash"
+        },
+        "content": {
+          "$ref": "#/$defs/RouteSkeletonContent"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TimeViewSelector": {
+      "type": "object",
+      "required": [
+        "selector_type",
+        "time_interval"
+      ],
+      "properties": {
+        "selector_type": {
+          "const": "TIME_INTERVAL"
+        },
+        "time_interval": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimeInterval"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SegmentViewSelector": {
+      "type": "object",
+      "required": [
+        "selector_type",
+        "first_segment_index",
+        "past_last_segment_index"
+      ],
+      "properties": {
+        "selector_type": {
+          "const": "SEGMENT_RANGE"
+        },
+        "first_segment_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "past_last_segment_index": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "GroundHoldViewSelector": {
+      "description": "Selects the certified stationary GroundHoldAnchor in a HopperReference. Valid only for a COMMITTED_PREFIX role before jump-boundary lock.",
+      "type": "object",
+      "required": [
+        "selector_type",
+        "anchor_id"
+      ],
+      "properties": {
+        "selector_type": {
+          "const": "GROUND_HOLD"
+        },
+        "anchor_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        }
+      },
+      "additionalProperties": false
+    },
+    "JumpViewSelector": {
+      "type": "object",
+      "required": [
+        "selector_type",
+        "boundary_id",
+        "scope"
+      ],
+      "properties": {
+        "selector_type": {
+          "const": "JUMP_BOUNDARY"
+        },
+        "boundary_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "scope": {
+          "enum": [
+            "NEXT_HOP",
+            "FUTURE_MISSION_PREVIEW"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReferenceViewSelector": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TimeViewSelector"
+        },
+        {
+          "$ref": "#/$defs/SegmentViewSelector"
+        },
+        {
+          "$ref": "#/$defs/GroundHoldViewSelector"
+        },
+        {
+          "$ref": "#/$defs/JumpViewSelector"
+        }
+      ]
+    },
+    "ReferenceViewContent": {
+      "type": "object",
+      "required": [
+        "role",
+        "source_reference_id",
+        "source_reference_hash",
+        "selector"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "COMMITTED_PREFIX",
+            "PREVIEW"
+          ]
+        },
+        "source_reference_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "source_reference_hash": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentHash"
+        },
+        "selector": {
+          "$ref": "#/$defs/ReferenceViewSelector"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CommittedPrefixComponent": {
+      "type": "object",
+      "required": [
+        "component_id",
+        "component_hash",
+        "content"
+      ],
+      "properties": {
+        "component_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "component_hash": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentHash"
+        },
+        "content": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReferenceViewContent"
+            },
+            {
+              "properties": {
+                "role": {
+                  "const": "COMMITTED_PREFIX"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PreviewComponent": {
+      "type": "object",
+      "required": [
+        "component_id",
+        "component_hash",
+        "content"
+      ],
+      "properties": {
+        "component_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "component_hash": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentHash"
+        },
+        "content": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReferenceViewContent"
+            },
+            {
+              "properties": {
+                "role": {
+                  "const": "PREVIEW"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReferenceValidity": {
+      "type": "object",
+      "required": [
+        "valid_from",
+        "required_map_snapshot_ref",
+        "required_capability_ref",
+        "allowed_state_deviation",
+        "invalidation_conditions"
+      ],
+      "properties": {
+        "valid_from": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimePoint"
+        },
+        "valid_until": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimePoint"
+        },
+        "required_map_snapshot_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "required_capability_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "allowed_state_deviation": {
+          "oneOf": [
+            {
+              "$ref": "urn:lunar-path-planner:v3:common#/$defs/WheeledOrLeggedErrorBounds"
+            },
+            {
+              "$ref": "urn:lunar-path-planner:v3:common#/$defs/HopperErrorBounds"
+            }
+          ]
+        },
+        "invalidation_conditions": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "MAP_SAFETY_REVISION_CHANGED",
+              "STATE_DEVIATION_EXCEEDED",
+              "CAPABILITY_REVISION_CHANGED",
+              "REFERENCE_HORIZON_EXHAUSTED"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ValidationSummary": {
+      "type": "object",
+      "required": [
+        "hard_constraints_passed",
+        "continuous_validation_passed",
+        "certificate_refs",
+        "warning_codes"
+      ],
+      "properties": {
+        "hard_constraints_passed": {
+          "const": true
+        },
+        "continuous_validation_passed": {
+          "const": true
+        },
+        "certificate_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+          },
+          "minItems": 1,
+          "maxItems": 128
+        },
+        "warning_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]*$",
+            "maxLength": 128
+          },
+          "maxItems": 64,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "GenerationEvidence": {
+      "description": "Stable, implementation-neutral evidence for how the executable reference was selected. Search graph, corridor, QP and cache internals remain process-local.",
+      "type": "object",
+      "required": [
+        "selected_candidate_id",
+        "generation_mode",
+        "termination_reason",
+        "evidence_refs"
+      ],
+      "properties": {
+        "selected_candidate_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "generation_mode": {
+          "enum": [
+            "SMOOTHED_SPLINE_REFERENCE",
+            "VALIDATED_PRIMITIVE_CHAIN_REFERENCE",
+            "CERTIFIED_BALLISTIC_REFERENCE"
+          ]
+        },
+        "termination_reason": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$",
+          "maxLength": 128
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "learned_cost_snapshot_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

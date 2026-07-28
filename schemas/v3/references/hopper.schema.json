@@ -1,0 +1,381 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:reference:hopper",
+  "title": "Path Planner v3 HopperReference",
+  "$comment": "Cross-object provenance, capability bounds, request-to-ground-hold continuity, ground-hold-to-launch continuity, and error-model joins are mandatory activation-time semantic checks; JSON Schema alone cannot express them.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "reference_id",
+    "reference_hash",
+    "platform_type",
+    "reference_time_origin",
+    "translation_model",
+    "ground_hold_anchor",
+    "next_landing_region",
+    "jump_boundary",
+    "predicted_landing_footprint",
+    "certified_flight_tube",
+    "attitude_boundary",
+    "nominal_aim_point",
+    "physical_certification_ref"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "path-planner-v3-hopper-reference/v1"
+    },
+    "reference_id": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+    },
+    "reference_hash": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentHash"
+    },
+    "platform_type": {
+      "const": "HOPPER"
+    },
+    "reference_time_origin": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimePoint"
+    },
+    "translation_model": {
+      "const": "PURE_BALLISTIC_NO_INFLIGHT_TRANSLATION_CONTROL"
+    },
+    "ground_hold_anchor": {
+      "$ref": "#/$defs/GroundHoldAnchor"
+    },
+    "next_landing_region": {
+      "$ref": "#/$defs/NextLandingRegion"
+    },
+    "jump_boundary": {
+      "$ref": "#/$defs/JumpBoundary"
+    },
+    "predicted_landing_footprint": {
+      "$ref": "#/$defs/PredictedLandingFootprint"
+    },
+    "certified_flight_tube": {
+      "$ref": "#/$defs/CertifiedFlightTube"
+    },
+    "attitude_boundary": {
+      "$ref": "#/$defs/AttitudeBoundary"
+    },
+    "nominal_aim_point": {
+      "$ref": "#/$defs/NominalAimPoint"
+    },
+    "physical_certification_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "future_route_preview": {
+      "$ref": "#/$defs/FutureRoutePreview"
+    }
+  },
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "$defs": {
+    "GroundHoldAnchor": {
+      "description": "Certified stationary pre-lock state. The semantic validator requires zero linear and angular velocity and validates terrain support. It is not an alternate launch command.",
+      "type": "object",
+      "required": [
+        "anchor_id",
+        "hold_state",
+        "allowed_hold_state_error_set",
+        "terrain_certification_ref"
+      ],
+      "properties": {
+        "anchor_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "hold_state": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/HopperKinematicState"
+        },
+        "allowed_hold_state_error_set": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/HopperErrorBounds"
+        },
+        "terrain_certification_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "NextLandingRegion": {
+      "description": "Single deterministic convex safe landing region. It is neither a point nor a probability distribution. The controller may execute only JumpBoundary and may not choose another point in this region.",
+      "type": "object",
+      "required": [
+        "region_id",
+        "frame_id",
+        "landing_plane",
+        "convex_polygon",
+        "allowed_yaw_interval",
+        "terrain_certification_ref",
+        "inward_safety_margin_m"
+      ],
+      "properties": {
+        "region_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "frame_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/FrameId"
+        },
+        "landing_plane": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/LandingPlane"
+        },
+        "convex_polygon": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ConvexPolygonUV"
+        },
+        "allowed_yaw_interval": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/CircularYawInterval"
+        },
+        "terrain_certification_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "inward_safety_margin_m": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "JumpBoundary": {
+      "description": "The unique executable command for the next hop. allowed_launch_state_error_set is a tolerance around this one nominal command, not a second command.",
+      "type": "object",
+      "required": [
+        "boundary_id",
+        "lock_event",
+        "nominal_launch_state",
+        "allowed_launch_state_error_set",
+        "gravity_model_ref",
+        "ballistic_time_origin",
+        "ballistic_flight_time_ns",
+        "actuator_or_impulse_profile_ref"
+      ],
+      "properties": {
+        "boundary_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "lock_event": {
+          "const": "JUMP_BOUNDARY_LOCK"
+        },
+        "nominal_launch_state": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/HopperKinematicState"
+        },
+        "allowed_launch_state_error_set": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/HopperErrorBounds"
+        },
+        "gravity_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "ballistic_time_origin": {
+          "description": "All CertifiedFlightTube section offsets and PredictedLandingFootprint landing-time offsets are relative to the detected ballistic launch event, not the planning response time.",
+          "const": "BALLISTIC_LAUNCH_EVENT"
+        },
+        "ballistic_flight_time_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/PositiveDecimalNanoseconds"
+        },
+        "actuator_or_impulse_profile_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PredictedLandingFootprint": {
+      "description": "Deterministic worst-case outer approximation of actual body-center landing points. The semantic validator proves this polygon plus safety margin is contained in NextLandingRegion.",
+      "type": "object",
+      "required": [
+        "landing_plane",
+        "convex_center_landing_polygon",
+        "landing_time_window",
+        "landing_velocity_bounds",
+        "landing_yaw_interval",
+        "source_error_model_ref",
+        "outer_approximation_margin_m"
+      ],
+      "properties": {
+        "landing_plane": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/LandingPlane"
+        },
+        "convex_center_landing_polygon": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ConvexPolygonUV"
+        },
+        "landing_time_window": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimeInterval"
+        },
+        "landing_velocity_bounds": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Vector3Bounds"
+        },
+        "landing_yaw_interval": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/CircularYawInterval"
+        },
+        "source_error_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "outer_approximation_margin_m": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "FlightTubeSection": {
+      "type": "object",
+      "required": [
+        "time_interval",
+        "envelope"
+      ],
+      "properties": {
+        "time_interval": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimeInterval"
+        },
+        "envelope": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ConvexPolytope3"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CertifiedFlightTube": {
+      "description": "Time-ordered conservative 3D swept tube. The semantic validator checks complete interval coverage, ordering, overlap and collision clearance.",
+      "type": "object",
+      "required": [
+        "frame_id",
+        "sections",
+        "source_map_snapshot_ref",
+        "body_rotation_envelope_ref",
+        "error_model_ref",
+        "minimum_certified_clearance_m"
+      ],
+      "properties": {
+        "frame_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/FrameId"
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FlightTubeSection"
+          },
+          "minItems": 1,
+          "maxItems": 4096
+        },
+        "source_map_snapshot_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "body_rotation_envelope_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "error_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "minimum_certified_clearance_m": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "TargetAttitudeSet": {
+      "type": "object",
+      "required": [
+        "nominal_orientation_body_to_frame",
+        "orientation_error_set",
+        "allowed_yaw_interval"
+      ],
+      "properties": {
+        "nominal_orientation_body_to_frame": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/QuaternionWxyz"
+        },
+        "orientation_error_set": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/RotationVectorBall"
+        },
+        "allowed_yaw_interval": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/CircularYawInterval"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AttitudeBoundary": {
+      "description": "Certified boundary-only attitude contract. It does not publish a full attitude trajectory and grants no center-of-mass translation authority.",
+      "type": "object",
+      "required": [
+        "initial_orientation_error_set",
+        "initial_angular_velocity_error_set_radps",
+        "target_attitude_set",
+        "landing_angular_velocity_bounds_radps",
+        "settle_guard_ns",
+        "center_of_mass_translation_authority",
+        "certification_ref"
+      ],
+      "properties": {
+        "initial_orientation_error_set": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/RotationVectorBall"
+        },
+        "initial_angular_velocity_error_set_radps": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/DeterministicVectorSet3"
+        },
+        "target_attitude_set": {
+          "$ref": "#/$defs/TargetAttitudeSet"
+        },
+        "landing_angular_velocity_bounds_radps": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/DeterministicVectorSet3"
+        },
+        "settle_guard_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "center_of_mass_translation_authority": {
+          "const": "NONE"
+        },
+        "certification_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "NominalAimPoint": {
+      "type": "object",
+      "required": [
+        "authority",
+        "position_m"
+      ],
+      "properties": {
+        "authority": {
+          "const": "NON_AUTHORITATIVE_EXPLANATORY"
+        },
+        "position_m": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Vector3"
+        }
+      },
+      "additionalProperties": false
+    },
+    "FutureRoutePreview": {
+      "description": "Mission-only preview. It authorizes no second hop. SAFE_DEAD_END appears only as reason_code.",
+      "type": "object",
+      "required": [
+        "authority",
+        "future_viability",
+        "reason_code",
+        "candidate_region_ids"
+      ],
+      "properties": {
+        "authority": {
+          "const": "NON_AUTHORITATIVE_MISSION_PREVIEW"
+        },
+        "future_viability": {
+          "enum": [
+            "VIABLE",
+            "UNKNOWN",
+            "NO_CERTIFIED_CONTINUATION"
+          ]
+        },
+        "reason_code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "candidate_region_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+          },
+          "maxItems": 128
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

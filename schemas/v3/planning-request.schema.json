@@ -1,0 +1,390 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:planning-request",
+  "title": "Path Planner v3 PlanningRequest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "request_id",
+    "request_time",
+    "state_time",
+    "frame_id",
+    "platform_type",
+    "current_state",
+    "goal",
+    "map_snapshot",
+    "safety_capability_ref",
+    "algorithm_config_ref"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "path-planner-v3-planning-request/v1"
+    },
+    "request_id": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+    },
+    "request_time": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimePoint"
+    },
+    "state_time": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimePoint"
+    },
+    "frame_id": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/FrameId"
+    },
+    "platform_type": {
+      "enum": [
+        "WHEELED",
+        "LEGGED",
+        "HOPPER"
+      ]
+    },
+    "current_state": {
+      "oneOf": [
+        {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/WheeledOrLeggedState"
+        },
+        {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/HopperState"
+        }
+      ]
+    },
+    "goal": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/GoalRegion"
+    },
+    "map_snapshot": {
+      "$ref": "#/$defs/MapSnapshot"
+    },
+    "safety_capability_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "algorithm_config_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "previous_execution_context": {
+      "$ref": "#/$defs/PreviousExecutionContext"
+    },
+    "learned_cost_snapshot": {
+      "$ref": "#/$defs/LearnedCostSnapshotBinding"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "platform_type": {
+            "const": "WHEELED"
+          }
+        },
+        "required": [
+          "platform_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "current_state": {
+            "$ref": "urn:lunar-path-planner:v3:common#/$defs/WheeledOrLeggedState"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform_type": {
+            "const": "LEGGED"
+          }
+        },
+        "required": [
+          "platform_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "current_state": {
+            "$ref": "urn:lunar-path-planner:v3:common#/$defs/WheeledOrLeggedState"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "platform_type": {
+            "const": "HOPPER"
+          }
+        },
+        "required": [
+          "platform_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "current_state": {
+            "$ref": "urn:lunar-path-planner:v3:common#/$defs/HopperState"
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "$defs": {
+    "MapLayerRef": {
+      "type": "object",
+      "required": [
+        "layer_name",
+        "content_ref"
+      ],
+      "properties": {
+        "layer_name": {
+          "enum": [
+            "KNOWN_MASK",
+            "ELEVATION",
+            "TERRAIN_NORMAL",
+            "ROUGHNESS",
+            "HARD_OBSTACLE",
+            "CONFIDENCE",
+            "ESDF",
+            "STATIC_SPEED_LIMIT"
+          ]
+        },
+        "content_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MapBounds": {
+      "type": "object",
+      "required": [
+        "minimum_m",
+        "maximum_m"
+      ],
+      "properties": {
+        "minimum_m": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Vector3"
+        },
+        "maximum_m": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Vector3"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MapSnapshot": {
+      "description": "All layer refs must belong to one atomic immutable snapshot. immutable_data_handle is an opaque local registry key, never a pointer or remote URL.",
+      "type": "object",
+      "required": [
+        "snapshot_ref",
+        "frame_id",
+        "source_time",
+        "map_revision",
+        "bounds",
+        "resolution_m",
+        "layer_manifest",
+        "immutable_data_handle"
+      ],
+      "properties": {
+        "snapshot_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "frame_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/FrameId"
+        },
+        "source_time": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimePoint"
+        },
+        "map_revision": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Revision"
+        },
+        "bounds": {
+          "$ref": "#/$defs/MapBounds"
+        },
+        "resolution_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "layer_manifest": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MapLayerRef"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "immutable_data_handle": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TimeExecutionCursor": {
+      "type": "object",
+      "required": [
+        "kind",
+        "offset_ns"
+      ],
+      "properties": {
+        "kind": {
+          "const": "TIME_OFFSET"
+        },
+        "offset_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "segment_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        }
+      },
+      "additionalProperties": false
+    },
+    "JumpExecutionCursor": {
+      "type": "object",
+      "required": [
+        "kind",
+        "jump_state"
+      ],
+      "properties": {
+        "kind": {
+          "const": "JUMP_STATE"
+        },
+        "jump_state": {
+          "enum": [
+            "GROUND_HOLD",
+            "JUMP_READY",
+            "JUMP_COMMITTED",
+            "IN_FLIGHT",
+            "LANDED_HOLD"
+          ]
+        },
+        "boundary_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExecutionCursor": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TimeExecutionCursor"
+        },
+        {
+          "$ref": "#/$defs/JumpExecutionCursor"
+        }
+      ]
+    },
+    "TimeCommitBoundary": {
+      "type": "object",
+      "required": [
+        "kind",
+        "committed_until_offset_ns"
+      ],
+      "properties": {
+        "kind": {
+          "const": "TIME"
+        },
+        "committed_until_offset_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        }
+      },
+      "additionalProperties": false
+    },
+    "JumpCommitBoundary": {
+      "type": "object",
+      "required": [
+        "kind",
+        "boundary_id",
+        "locked"
+      ],
+      "properties": {
+        "kind": {
+          "const": "JUMP"
+        },
+        "boundary_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "locked": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CommitBoundary": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TimeCommitBoundary"
+        },
+        {
+          "$ref": "#/$defs/JumpCommitBoundary"
+        }
+      ]
+    },
+    "PreviousExecutionContext": {
+      "type": "object",
+      "required": [
+        "active_bundle_ref",
+        "active_bundle_handle",
+        "commit_boundary",
+        "execution_cursor",
+        "controller_status",
+        "source_map_snapshot_ref",
+        "source_capability_ref"
+      ],
+      "properties": {
+        "active_bundle_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "active_bundle_handle": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "commit_boundary": {
+          "$ref": "#/$defs/CommitBoundary"
+        },
+        "execution_cursor": {
+          "$ref": "#/$defs/ExecutionCursor"
+        },
+        "controller_status": {
+          "enum": [
+            "READY",
+            "EXECUTING",
+            "HOLDING",
+            "COMMITTED",
+            "IN_FLIGHT",
+            "FAULT"
+          ]
+        },
+        "source_map_snapshot_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "source_capability_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LearnedCostSnapshotBinding": {
+      "description": "Reference to an immutable process-local learned-cost snapshot that has already been resolved and validated before the planning call. The full snapshot remains an internal C++ registry object and never grants hard feasibility.",
+      "type": "object",
+      "required": [
+        "snapshot_ref",
+        "registry_handle",
+        "ready_before_request",
+        "hard_feasibility_authority"
+      ],
+      "properties": {
+        "snapshot_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "registry_handle": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "ready_before_request": {
+          "const": true
+        },
+        "hard_feasibility_authority": {
+          "const": "NONE"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

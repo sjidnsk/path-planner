@@ -1,0 +1,929 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:common",
+  "title": "Lunar Path Planner v3 Common Types",
+  "description": "Shared wire types for the v3 planning contracts. Cross-field and geometric invariants marked in descriptions are enforced by the C++ semantic validator.",
+  "type": "object",
+  "maxProperties": 0,
+  "additionalProperties": false,
+  "$defs": {
+    "Identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "Revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "ContentHash": {
+      "description": "Lower-case SHA-256 of RFC 8785 JCS canonical JSON content.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ContentRef": {
+      "type": "object",
+      "required": [
+        "id",
+        "revision",
+        "content_hash"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "revision": {
+          "$ref": "#/$defs/Revision"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/ContentHash"
+        }
+      },
+      "additionalProperties": false
+    },
+    "FrameId": {
+      "$ref": "#/$defs/Identifier"
+    },
+    "DecimalNanoseconds": {
+      "description": "Signed int64 nanoseconds encoded as a base-10 string without a plus sign or leading zeroes, except zero itself.",
+      "type": "string",
+      "pattern": "^(0|-[1-9][0-9]{0,18}|[1-9][0-9]{0,18})$"
+    },
+    "NonNegativeDecimalNanoseconds": {
+      "description": "Non-negative int64 nanoseconds encoded as a base-10 string.",
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,18})$"
+    },
+    "PositiveDecimalNanoseconds": {
+      "description": "Positive int64 nanoseconds encoded as a canonical base-10 string.",
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,18}$"
+    },
+    "TimePoint": {
+      "type": "object",
+      "required": [
+        "clock_id",
+        "tick_ns"
+      ],
+      "properties": {
+        "clock_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "tick_ns": {
+          "$ref": "#/$defs/DecimalNanoseconds"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TimeInterval": {
+      "description": "Offsets are relative to the enclosing declared time origin. The default is reference_time_origin; Hopper flight-tube and landing intervals explicitly use JumpBoundary.ballistic_time_origin = BALLISTIC_LAUNCH_EVENT. The semantic validator enforces end_offset_ns >= start_offset_ns.",
+      "type": "object",
+      "required": [
+        "start_offset_ns",
+        "end_offset_ns"
+      ],
+      "properties": {
+        "start_offset_ns": {
+          "$ref": "#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "end_offset_ns": {
+          "$ref": "#/$defs/NonNegativeDecimalNanoseconds"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Vector2": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "Vector3": {
+      "type": "array",
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "UnitVector3": {
+      "description": "Three finite components; unit norm is a semantic invariant.",
+      "$ref": "#/$defs/Vector3"
+    },
+    "QuaternionWxyz": {
+      "description": "Unit quaternion in explicit w,x,y,z order; normalization is a semantic invariant.",
+      "type": "object",
+      "required": [
+        "w",
+        "x",
+        "y",
+        "z"
+      ],
+      "properties": {
+        "w": {
+          "type": "number"
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "z": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PoseXYZYaw": {
+      "type": "object",
+      "required": [
+        "position_m",
+        "yaw_rad"
+      ],
+      "properties": {
+        "position_m": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "yaw_rad": {
+          "description": "Unwrapped yaw when used in an executable path.",
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HopperKinematicState": {
+      "type": "object",
+      "required": [
+        "position_m",
+        "orientation_body_to_frame",
+        "linear_velocity_mps",
+        "angular_velocity_radps"
+      ],
+      "properties": {
+        "position_m": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "orientation_body_to_frame": {
+          "$ref": "#/$defs/QuaternionWxyz"
+        },
+        "linear_velocity_mps": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "angular_velocity_radps": {
+          "$ref": "#/$defs/Vector3"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AxisAlignedBox3": {
+      "type": "object",
+      "required": [
+        "shape",
+        "center",
+        "half_extent"
+      ],
+      "properties": {
+        "shape": {
+          "const": "axis_aligned_box"
+        },
+        "center": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "half_extent": {
+          "description": "All components must be non-negative.",
+          "$ref": "#/$defs/Vector3"
+        }
+      },
+      "additionalProperties": false
+    },
+    "EuclideanBall3": {
+      "type": "object",
+      "required": [
+        "shape",
+        "center",
+        "radius"
+      ],
+      "properties": {
+        "shape": {
+          "const": "euclidean_ball"
+        },
+        "center": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "radius": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "DeterministicVectorSet3": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AxisAlignedBox3"
+        },
+        {
+          "$ref": "#/$defs/EuclideanBall3"
+        }
+      ]
+    },
+    "SymmetricScalarInterval": {
+      "type": "object",
+      "required": [
+        "shape",
+        "center",
+        "half_width"
+      ],
+      "properties": {
+        "shape": {
+          "const": "symmetric_interval"
+        },
+        "center": {
+          "type": "number"
+        },
+        "half_width": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RotationVectorBall": {
+      "type": "object",
+      "required": [
+        "shape",
+        "radius_rad"
+      ],
+      "properties": {
+        "shape": {
+          "const": "rotation_vector_ball"
+        },
+        "radius_rad": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 3.141592653589793
+        }
+      },
+      "additionalProperties": false
+    },
+    "WheeledOrLeggedErrorBounds": {
+      "type": "object",
+      "required": [
+        "position_bound_m",
+        "yaw_bound_rad",
+        "linear_velocity_bound_mps",
+        "yaw_rate_bound_radps"
+      ],
+      "properties": {
+        "position_bound_m": {
+          "$ref": "#/$defs/DeterministicVectorSet3"
+        },
+        "yaw_bound_rad": {
+          "$ref": "#/$defs/SymmetricScalarInterval"
+        },
+        "linear_velocity_bound_mps": {
+          "$ref": "#/$defs/DeterministicVectorSet3"
+        },
+        "yaw_rate_bound_radps": {
+          "$ref": "#/$defs/SymmetricScalarInterval"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HopperErrorBounds": {
+      "type": "object",
+      "required": [
+        "position_bound_m",
+        "orientation_bound",
+        "linear_velocity_bound_mps",
+        "angular_velocity_bound_radps"
+      ],
+      "properties": {
+        "position_bound_m": {
+          "$ref": "#/$defs/DeterministicVectorSet3"
+        },
+        "orientation_bound": {
+          "$ref": "#/$defs/RotationVectorBall"
+        },
+        "linear_velocity_bound_mps": {
+          "$ref": "#/$defs/DeterministicVectorSet3"
+        },
+        "angular_velocity_bound_radps": {
+          "$ref": "#/$defs/DeterministicVectorSet3"
+        }
+      },
+      "additionalProperties": false
+    },
+    "WheeledOrLeggedState": {
+      "type": "object",
+      "required": [
+        "position_m",
+        "yaw_rad",
+        "linear_velocity_mps",
+        "yaw_rate_radps",
+        "error_bounds"
+      ],
+      "properties": {
+        "position_m": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "yaw_rad": {
+          "type": "number"
+        },
+        "linear_velocity_mps": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "yaw_rate_radps": {
+          "type": "number"
+        },
+        "error_bounds": {
+          "$ref": "#/$defs/WheeledOrLeggedErrorBounds"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HopperState": {
+      "type": "object",
+      "required": [
+        "position_m",
+        "orientation_body_to_frame",
+        "linear_velocity_mps",
+        "angular_velocity_radps",
+        "error_bounds"
+      ],
+      "properties": {
+        "position_m": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "orientation_body_to_frame": {
+          "$ref": "#/$defs/QuaternionWxyz"
+        },
+        "linear_velocity_mps": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "angular_velocity_radps": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "error_bounds": {
+          "$ref": "#/$defs/HopperErrorBounds"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CircularYawInterval": {
+      "description": "Canonical closed circular interval traversed counter-clockwise from start_rad for span_rad. start_rad is in [-pi,pi); span_rad is in [0,2pi]. There is no ambiguous wrap flag.",
+      "type": "object",
+      "required": [
+        "representation",
+        "start_rad",
+        "span_rad",
+        "closed"
+      ],
+      "properties": {
+        "representation": {
+          "const": "canonical_ccw"
+        },
+        "start_rad": {
+          "type": "number",
+          "minimum": -3.141592653589793,
+          "exclusiveMaximum": 3.141592653589793
+        },
+        "span_rad": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 6.283185307179586
+        },
+        "closed": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "LandingPlane": {
+      "description": "The semantic validator enforces unit normal/bases, mutual orthogonality and basis_u cross basis_v aligned with normal.",
+      "type": "object",
+      "required": [
+        "origin_m",
+        "normal",
+        "basis_u",
+        "basis_v",
+        "residual_bound_m"
+      ],
+      "properties": {
+        "origin_m": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "normal": {
+          "$ref": "#/$defs/UnitVector3"
+        },
+        "basis_u": {
+          "$ref": "#/$defs/UnitVector3"
+        },
+        "basis_v": {
+          "$ref": "#/$defs/UnitVector3"
+        },
+        "residual_bound_m": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConvexPolygonUV": {
+      "description": "Vertices are expressed in the enclosing LandingPlane basis and must be strictly convex, non-self-intersecting and CCW.",
+      "type": "object",
+      "required": [
+        "vertices_uv",
+        "winding"
+      ],
+      "properties": {
+        "vertices_uv": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Vector2"
+          },
+          "minItems": 3,
+          "maxItems": 128
+        },
+        "winding": {
+          "const": "CCW"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Halfspace3": {
+      "description": "Closed halfspace normal dot x <= offset_m.",
+      "type": "object",
+      "required": [
+        "normal",
+        "offset_m"
+      ],
+      "properties": {
+        "normal": {
+          "$ref": "#/$defs/UnitVector3"
+        },
+        "offset_m": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConvexPolytope3": {
+      "type": "object",
+      "required": [
+        "representation",
+        "halfspaces"
+      ],
+      "properties": {
+        "representation": {
+          "const": "halfspace_intersection"
+        },
+        "halfspaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Halfspace3"
+          },
+          "minItems": 4,
+          "maxItems": 128
+        }
+      },
+      "additionalProperties": false
+    },
+    "CubicPolynomialSegment": {
+      "description": "coefficients=[a0,a1,a2,a3] define a0+a1*tau_s+a2*tau_s^2+a3*tau_s^3, where tau_s is seconds since start_offset_ns.",
+      "type": "object",
+      "required": [
+        "start_offset_ns",
+        "end_offset_ns",
+        "coefficients",
+        "coefficient_basis"
+      ],
+      "properties": {
+        "start_offset_ns": {
+          "$ref": "#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "end_offset_ns": {
+          "$ref": "#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "coefficients": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "coefficient_basis": {
+          "const": "local_tau_seconds"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PiecewiseCubicScalarTrajectory": {
+      "type": "object",
+      "required": [
+        "representation",
+        "value_semantics",
+        "segments"
+      ],
+      "properties": {
+        "representation": {
+          "const": "piecewise_cubic"
+        },
+        "value_semantics": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CubicPolynomialSegment"
+          },
+          "minItems": 1,
+          "maxItems": 4096
+        }
+      },
+      "additionalProperties": false
+    },
+    "MonotoneTimeScaling": {
+      "description": "Piecewise-cubic s(t). The semantic validator enforces continuity, s(0)=0, s(end)=1 and non-negative derivative.",
+      "type": "object",
+      "required": [
+        "representation",
+        "value_semantics",
+        "monotonicity",
+        "start_value",
+        "end_value",
+        "segments"
+      ],
+      "properties": {
+        "representation": {
+          "const": "piecewise_cubic"
+        },
+        "value_semantics": {
+          "const": "path_parameter_s"
+        },
+        "monotonicity": {
+          "const": "nondecreasing"
+        },
+        "start_value": {
+          "const": 0
+        },
+        "end_value": {
+          "const": 1
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CubicPolynomialSegment"
+          },
+          "minItems": 1,
+          "maxItems": 4096
+        }
+      },
+      "additionalProperties": false
+    },
+    "ClampedCubicBSplinePath": {
+      "description": "Cubic B-spline over P(s)=[x,y,z,yaw]. Knot/control-point cardinality and clamping are semantic invariants.",
+      "type": "object",
+      "required": [
+        "representation",
+        "degree",
+        "clamped",
+        "parameter_start",
+        "parameter_end",
+        "knots",
+        "control_points"
+      ],
+      "properties": {
+        "representation": {
+          "const": "clamped_cubic_bspline"
+        },
+        "degree": {
+          "const": 3
+        },
+        "clamped": {
+          "const": true
+        },
+        "parameter_start": {
+          "const": 0
+        },
+        "parameter_end": {
+          "const": 1
+        },
+        "knots": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 8,
+          "maxItems": 4100
+        },
+        "control_points": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PoseXYZYaw"
+          },
+          "minItems": 4,
+          "maxItems": 4096
+        }
+      },
+      "additionalProperties": false
+    },
+    "ValidatedPrimitive": {
+      "type": "object",
+      "required": [
+        "primitive_id",
+        "capability_primitive_id",
+        "primitive_kind",
+        "start_pose",
+        "end_pose",
+        "nominal_duration_ns",
+        "validation_ref"
+      ],
+      "properties": {
+        "primitive_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "capability_primitive_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "primitive_kind": {
+          "enum": [
+            "DRIVE_FORWARD",
+            "DRIVE_REVERSE",
+            "SPIN_CW",
+            "SPIN_CCW",
+            "STOP_AND_SWITCH",
+            "BODY_TRANSLATION",
+            "BODY_SPIN",
+            "BODY_COUPLED"
+          ]
+        },
+        "start_pose": {
+          "$ref": "#/$defs/PoseXYZYaw"
+        },
+        "end_pose": {
+          "$ref": "#/$defs/PoseXYZYaw"
+        },
+        "nominal_duration_ns": {
+          "$ref": "#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "validation_ref": {
+          "$ref": "#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ValidatedPrimitiveChain": {
+      "type": "object",
+      "required": [
+        "representation",
+        "primitives"
+      ],
+      "properties": {
+        "representation": {
+          "const": "validated_primitive_chain"
+        },
+        "primitives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ValidatedPrimitive"
+          },
+          "minItems": 1,
+          "maxItems": 4096
+        }
+      },
+      "additionalProperties": false
+    },
+    "GeometricPath": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ClampedCubicBSplinePath"
+        },
+        {
+          "$ref": "#/$defs/ValidatedPrimitiveChain"
+        }
+      ]
+    },
+    "ScalarBounds": {
+      "description": "The semantic validator enforces lower <= upper.",
+      "type": "object",
+      "required": [
+        "lower",
+        "upper"
+      ],
+      "properties": {
+        "lower": {
+          "type": "number"
+        },
+        "upper": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Vector3Bounds": {
+      "description": "The semantic validator enforces lower[i] <= upper[i].",
+      "type": "object",
+      "required": [
+        "lower",
+        "upper"
+      ],
+      "properties": {
+        "lower": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "upper": {
+          "$ref": "#/$defs/Vector3"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PointGoal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "position_m",
+        "position_tolerance_m"
+      ],
+      "properties": {
+        "kind": {
+          "const": "POINT_WITH_TOLERANCE"
+        },
+        "position_m": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "position_tolerance_m": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlanarRegionGoal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "plane",
+        "polygon",
+        "normal_tolerance_m"
+      ],
+      "properties": {
+        "kind": {
+          "const": "PLANAR_CONVEX_REGION"
+        },
+        "plane": {
+          "$ref": "#/$defs/LandingPlane"
+        },
+        "polygon": {
+          "$ref": "#/$defs/ConvexPolygonUV"
+        },
+        "normal_tolerance_m": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "GoalRegion": {
+      "type": "object",
+      "required": [
+        "goal_id",
+        "target",
+        "task_metadata"
+      ],
+      "properties": {
+        "goal_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "target": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PointGoal"
+            },
+            {
+              "$ref": "#/$defs/PlanarRegionGoal"
+            }
+          ]
+        },
+        "optional_yaw_interval": {
+          "$ref": "#/$defs/CircularYawInterval"
+        },
+        "mission_direction_hint": {
+          "$ref": "#/$defs/Vector3"
+        },
+        "task_metadata": {
+          "description": "Closed, bounded key/value list; duplicate keys are rejected by the semantic validator.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MetadataEntry"
+          },
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false
+    },
+    "MetadataEntry": {
+      "type": "object",
+      "required": [
+        "key",
+        "value"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "value": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 256
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SafeStopAnchor": {
+      "type": "object",
+      "required": [
+        "anchor_id",
+        "pose",
+        "target_linear_velocity_mps",
+        "target_yaw_rate_radps",
+        "terrain_certification_ref"
+      ],
+      "properties": {
+        "anchor_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "pose": {
+          "$ref": "#/$defs/PoseXYZYaw"
+        },
+        "target_linear_velocity_mps": {
+          "const": 0
+        },
+        "target_yaw_rate_radps": {
+          "const": 0
+        },
+        "terrain_certification_ref": {
+          "$ref": "#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ComponentIdentity": {
+      "type": "object",
+      "required": [
+        "component_id",
+        "component_hash"
+      ],
+      "properties": {
+        "component_id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "component_hash": {
+          "$ref": "#/$defs/ContentHash"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

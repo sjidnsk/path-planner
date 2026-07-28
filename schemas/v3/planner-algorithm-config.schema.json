@@ -1,0 +1,499 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:planner-algorithm-config",
+  "title": "Path Planner v3 PlannerAlgorithmConfig",
+  "description": "Finite algorithm and resource settings. It intentionally contains no one-second wall-clock cutoff or benchmark threshold. content_ref.content_hash is the RFC 8785 JCS SHA-256 of content.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "content_ref",
+    "content"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "path-planner-v3-planner-algorithm-config/v1"
+    },
+    "content_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "content": {
+      "$ref": "#/$defs/AlgorithmContent"
+    }
+  },
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "$defs": {
+    "ResourceCaps": {
+      "type": "object",
+      "required": [
+        "maximum_expanded_states",
+        "maximum_reopened_states",
+        "maximum_generated_candidates",
+        "maximum_open_states",
+        "maximum_memory_bytes"
+      ],
+      "properties": {
+        "maximum_expanded_states": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_reopened_states": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maximum_generated_candidates": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_open_states": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_memory_bytes": {
+          "type": "integer",
+          "minimum": 1048576
+        }
+      },
+      "additionalProperties": false
+    },
+    "AraStarConfig": {
+      "type": "object",
+      "required": [
+        "initial_epsilon",
+        "target_epsilon",
+        "epsilon_decrement",
+        "resource_caps",
+        "termination_policy",
+        "tie_breaking"
+      ],
+      "properties": {
+        "initial_epsilon": {
+          "type": "number",
+          "minimum": 1
+        },
+        "target_epsilon": {
+          "type": "number",
+          "minimum": 1
+        },
+        "epsilon_decrement": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "resource_caps": {
+          "$ref": "#/$defs/ResourceCaps"
+        },
+        "termination_policy": {
+          "const": "TARGET_EPSILON_GRAPH_EXHAUSTION_OR_RESOURCE_CAP"
+        },
+        "tie_breaking": {
+          "const": "DETERMINISTIC_LEXICOGRAPHIC_STATE_KEY"
+        }
+      },
+      "additionalProperties": false
+    },
+    "CorridorConfig": {
+      "type": "object",
+      "required": [
+        "maximum_regions",
+        "maximum_inflation_iterations",
+        "maximum_halfplanes_per_region",
+        "maximum_split_depth",
+        "minimum_overlap_m",
+        "sampling_spacing_m",
+        "failure_policy"
+      ],
+      "properties": {
+        "maximum_regions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_inflation_iterations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_halfplanes_per_region": {
+          "type": "integer",
+          "minimum": 3
+        },
+        "maximum_split_depth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "minimum_overlap_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "sampling_spacing_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "failure_policy": {
+          "const": "FALL_BACK_TO_VALIDATED_DISCRETE_PRIMITIVES"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SmoothingConfig": {
+      "type": "object",
+      "required": [
+        "maximum_scp_iterations",
+        "maximum_trust_region_reductions",
+        "initial_trust_region_m",
+        "minimum_trust_region_m",
+        "constraint_tolerance",
+        "maximum_time_increase_ns",
+        "failure_policy"
+      ],
+      "properties": {
+        "maximum_scp_iterations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_trust_region_reductions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "initial_trust_region_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minimum_trust_region_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "constraint_tolerance": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_time_increase_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "failure_policy": {
+          "const": "REJECT_WHOLE_SMOOTHED_SEGMENT"
+        }
+      },
+      "additionalProperties": false
+    },
+    "TimeScalingConfig": {
+      "type": "object",
+      "required": [
+        "maximum_adaptive_samples",
+        "minimum_parameter_step",
+        "maximum_forward_passes",
+        "maximum_backward_passes",
+        "enable_jerk_smoothing",
+        "maximum_jerk_smoothing_iterations"
+      ],
+      "properties": {
+        "maximum_adaptive_samples": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "minimum_parameter_step": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "maximum_forward_passes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_backward_passes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "enable_jerk_smoothing": {
+          "type": "boolean"
+        },
+        "maximum_jerk_smoothing_iterations": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "GridConfig": {
+      "type": "object",
+      "required": [
+        "xy_resolution_m",
+        "yaw_bin_count",
+        "maximum_terminal_candidates"
+      ],
+      "properties": {
+        "xy_resolution_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "yaw_bin_count": {
+          "type": "integer",
+          "minimum": 4
+        },
+        "maximum_terminal_candidates": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "WheeledAlgorithmConfig": {
+      "type": "object",
+      "required": [
+        "state_lattice",
+        "corridor",
+        "smoothing",
+        "time_scaling",
+        "continuous_validation_maximum_subdivisions"
+      ],
+      "properties": {
+        "state_lattice": {
+          "$ref": "#/$defs/GridConfig"
+        },
+        "corridor": {
+          "$ref": "#/$defs/CorridorConfig"
+        },
+        "smoothing": {
+          "$ref": "#/$defs/SmoothingConfig"
+        },
+        "time_scaling": {
+          "$ref": "#/$defs/TimeScalingConfig"
+        },
+        "continuous_validation_maximum_subdivisions": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "LeggedAlgorithmConfig": {
+      "type": "object",
+      "required": [
+        "pose_lattice",
+        "maximum_height_interval_splits",
+        "corridor",
+        "smoothing",
+        "time_scaling",
+        "continuous_validation_maximum_subdivisions"
+      ],
+      "properties": {
+        "pose_lattice": {
+          "$ref": "#/$defs/GridConfig"
+        },
+        "maximum_height_interval_splits": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "corridor": {
+          "$ref": "#/$defs/CorridorConfig"
+        },
+        "smoothing": {
+          "$ref": "#/$defs/SmoothingConfig"
+        },
+        "time_scaling": {
+          "$ref": "#/$defs/TimeScalingConfig"
+        },
+        "continuous_validation_maximum_subdivisions": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "HopperAlgorithmConfig": {
+      "type": "object",
+      "required": [
+        "maximum_landing_regions",
+        "maximum_graph_nodes",
+        "maximum_graph_out_degree",
+        "yaw_partition_count",
+        "support_direction_count",
+        "maximum_nominal_aim_points_per_region",
+        "maximum_full_certification_attempts",
+        "maximum_interval_subdivision_depth",
+        "maximum_collision_subdivision_depth",
+        "maximum_root_iterations",
+        "maximum_flight_tube_sections",
+        "landing_region_inflation_iterations",
+        "landing_region_maximum_split_depth",
+        "landing_region_maximum_vertices",
+        "future_route_authority"
+      ],
+      "properties": {
+        "maximum_landing_regions": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_graph_nodes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_graph_out_degree": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "yaw_partition_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "support_direction_count": {
+          "type": "integer",
+          "minimum": 4
+        },
+        "maximum_nominal_aim_points_per_region": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_full_certification_attempts": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_interval_subdivision_depth": {
+          "description": "Deterministic interval/root enclosure subdivision cap; it does not govern collision projection.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "maximum_collision_subdivision_depth": {
+          "description": "Deterministic ballistic collision-projection subdivision cap.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "maximum_root_iterations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_flight_tube_sections": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "landing_region_inflation_iterations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "landing_region_maximum_split_depth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "landing_region_maximum_vertices": {
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 128
+        },
+        "future_route_authority": {
+          "const": "MISSION_PREVIEW_ONLY"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LearnedCostPolicy": {
+      "type": "object",
+      "required": [
+        "mode",
+        "maximum_inference_evaluations",
+        "maximum_absolute_energy_correction",
+        "maximum_absolute_nonfatal_risk_correction",
+        "failure_policy",
+        "hard_feasibility_authority"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "DISABLED",
+            "OPTIONAL_BOUNDED_SOFT_COST"
+          ]
+        },
+        "maximum_inference_evaluations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maximum_absolute_energy_correction": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximum_absolute_nonfatal_risk_correction": {
+          "type": "number",
+          "minimum": 0
+        },
+        "failure_policy": {
+          "const": "FALL_BACK_TO_ANALYTIC_COST"
+        },
+        "hard_feasibility_authority": {
+          "const": "NONE"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AlgorithmContent": {
+      "type": "object",
+      "required": [
+        "objective",
+        "time_equivalence_tolerance_ns",
+        "max_input_skew_ns",
+        "error_bound_model_id",
+        "projection_cache_capacity",
+        "ara_star",
+        "wheeled",
+        "legged",
+        "hopper",
+        "learned_cost_policy",
+        "deterministic_execution"
+      ],
+      "properties": {
+        "objective": {
+          "const": "HARD_FEASIBILITY_THEN_EXPECTED_TIME_THEN_ENERGY_RISK_SMOOTHNESS"
+        },
+        "time_equivalence_tolerance_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "max_input_skew_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "error_bound_model_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "projection_cache_capacity": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ara_star": {
+          "$ref": "#/$defs/AraStarConfig"
+        },
+        "wheeled": {
+          "$ref": "#/$defs/WheeledAlgorithmConfig"
+        },
+        "legged": {
+          "$ref": "#/$defs/LeggedAlgorithmConfig"
+        },
+        "hopper": {
+          "$ref": "#/$defs/HopperAlgorithmConfig"
+        },
+        "learned_cost_policy": {
+          "$ref": "#/$defs/LearnedCostPolicy"
+        },
+        "learned_cost_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "deterministic_execution": {
+          "type": "object",
+          "required": [
+            "fixed_thread_count",
+            "stable_candidate_order",
+            "preallocated_memory_pools"
+          ],
+          "properties": {
+            "fixed_thread_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "stable_candidate_order": {
+              "const": true
+            },
+            "preallocated_memory_pools": {
+              "const": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

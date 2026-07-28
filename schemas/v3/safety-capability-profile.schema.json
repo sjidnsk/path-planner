@@ -1,0 +1,585 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:safety-capability-profile",
+  "title": "Path Planner v3 SafetyCapabilityProfile",
+  "description": "Mandatory safety content. No missing hard limit may be supplied by a permissive runtime default. content_ref.content_hash is the RFC 8785 JCS SHA-256 of the content object.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "content_ref",
+    "content"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "path-planner-v3-safety-capability-profile/v1"
+    },
+    "content_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "content": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/WheeledCapability"
+        },
+        {
+          "$ref": "#/$defs/LeggedCapability"
+        },
+        {
+          "$ref": "#/$defs/HopperCapability"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "$defs": {
+    "ExtrudedConvexFootprint": {
+      "description": "Body-frame non-circular convex footprint, CCW in xy, extruded over [minimum_z_m,maximum_z_m].",
+      "type": "object",
+      "required": [
+        "shape",
+        "vertices_xy_m",
+        "winding",
+        "minimum_z_m",
+        "maximum_z_m"
+      ],
+      "properties": {
+        "shape": {
+          "const": "extruded_convex_polygon"
+        },
+        "vertices_xy_m": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:lunar-path-planner:v3:common#/$defs/Vector2"
+          },
+          "minItems": 3,
+          "maxItems": 64
+        },
+        "winding": {
+          "const": "CCW"
+        },
+        "minimum_z_m": {
+          "type": "number"
+        },
+        "maximum_z_m": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "BodyConvexPolytope": {
+      "type": "object",
+      "required": [
+        "shape",
+        "body_frame_halfspaces"
+      ],
+      "properties": {
+        "shape": {
+          "const": "convex_polytope"
+        },
+        "body_frame_halfspaces": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ConvexPolytope3"
+        }
+      },
+      "additionalProperties": false
+    },
+    "WheelHardLimits": {
+      "type": "object",
+      "required": [
+        "maximum_forward_speed_mps",
+        "maximum_reverse_speed_mps",
+        "maximum_spin_rate_radps",
+        "maximum_forward_acceleration_mps2",
+        "maximum_braking_deceleration_mps2",
+        "maximum_yaw_acceleration_radps2",
+        "maximum_lateral_acceleration_mps2",
+        "maximum_drive_curvature_per_m",
+        "maximum_slope_rad",
+        "minimum_clearance_m"
+      ],
+      "properties": {
+        "maximum_forward_speed_mps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_reverse_speed_mps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_spin_rate_radps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_forward_acceleration_mps2": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_braking_deceleration_mps2": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_yaw_acceleration_radps2": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_lateral_acceleration_mps2": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_drive_curvature_per_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_slope_rad": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.5707963267948966
+        },
+        "minimum_clearance_m": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "WheelMotionPrimitive": {
+      "type": "object",
+      "required": [
+        "primitive_id",
+        "kind",
+        "relative_end_pose",
+        "nominal_duration_ns",
+        "swept_geometry_ref"
+      ],
+      "properties": {
+        "primitive_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "kind": {
+          "enum": [
+            "DRIVE_FORWARD_LINE",
+            "DRIVE_FORWARD_ARC",
+            "DRIVE_REVERSE_LINE",
+            "DRIVE_REVERSE_ARC",
+            "SPIN_CW",
+            "SPIN_CCW",
+            "STOP_AND_SWITCH"
+          ]
+        },
+        "relative_end_pose": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/PoseXYZYaw"
+        },
+        "nominal_duration_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "swept_geometry_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "WheeledCapability": {
+      "type": "object",
+      "required": [
+        "platform_type",
+        "frame_id",
+        "collision_envelope",
+        "motion_model_ref",
+        "analytic_cost_model_ref",
+        "hard_limits",
+        "certified_state_error_bounds",
+        "motion_primitives"
+      ],
+      "properties": {
+        "platform_type": {
+          "const": "WHEELED"
+        },
+        "frame_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/FrameId"
+        },
+        "collision_envelope": {
+          "$ref": "#/$defs/ExtrudedConvexFootprint"
+        },
+        "motion_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "analytic_cost_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "hard_limits": {
+          "$ref": "#/$defs/WheelHardLimits"
+        },
+        "certified_state_error_bounds": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/WheeledOrLeggedErrorBounds"
+        },
+        "motion_primitives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WheelMotionPrimitive"
+          },
+          "minItems": 6,
+          "maxItems": 4096
+        }
+      },
+      "additionalProperties": false
+    },
+    "LeggedTerrainThresholds": {
+      "type": "object",
+      "required": [
+        "maximum_slope_rad",
+        "maximum_roughness_m",
+        "maximum_step_height_m",
+        "maximum_gap_width_m",
+        "minimum_confidence",
+        "minimum_body_clearance_m",
+        "minimum_body_height_m",
+        "maximum_body_height_m"
+      ],
+      "properties": {
+        "maximum_slope_rad": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.5707963267948966
+        },
+        "maximum_roughness_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximum_step_height_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximum_gap_width_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimum_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "minimum_body_clearance_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimum_body_height_m": {
+          "type": "number"
+        },
+        "maximum_body_height_m": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LeggedBodyVelocityLimits": {
+      "type": "object",
+      "required": [
+        "forward_mps",
+        "lateral_mps",
+        "vertical_mps",
+        "yaw_rate_radps",
+        "linear_acceleration_mps2",
+        "yaw_acceleration_radps2"
+      ],
+      "properties": {
+        "forward_mps": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ScalarBounds"
+        },
+        "lateral_mps": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ScalarBounds"
+        },
+        "vertical_mps": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ScalarBounds"
+        },
+        "yaw_rate_radps": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ScalarBounds"
+        },
+        "linear_acceleration_mps2": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "yaw_acceleration_radps2": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "LeggedBodyPrimitive": {
+      "type": "object",
+      "required": [
+        "primitive_id",
+        "kind",
+        "body_frame_displacement_m",
+        "yaw_change_rad",
+        "nominal_duration_ns",
+        "sampled_body_sweep_ref"
+      ],
+      "properties": {
+        "primitive_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "kind": {
+          "enum": [
+            "FORWARD",
+            "BACKWARD",
+            "LATERAL",
+            "DIAGONAL",
+            "SPIN",
+            "COUPLED"
+          ]
+        },
+        "body_frame_displacement_m": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Vector3"
+        },
+        "yaw_change_rad": {
+          "type": "number"
+        },
+        "nominal_duration_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "sampled_body_sweep_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        }
+      },
+      "additionalProperties": false
+    },
+    "LeggedCapability": {
+      "type": "object",
+      "required": [
+        "platform_type",
+        "frame_id",
+        "reference_point_id",
+        "reference_point_definition",
+        "collision_envelope",
+        "motion_model_ref",
+        "analytic_cost_model_ref",
+        "terrain_thresholds",
+        "body_velocity_limits",
+        "certified_state_error_bounds",
+        "motion_primitives",
+        "feasibility_scope",
+        "footstep_feasibility_guaranteed"
+      ],
+      "properties": {
+        "platform_type": {
+          "const": "LEGGED"
+        },
+        "frame_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/FrameId"
+        },
+        "reference_point_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "reference_point_definition": {
+          "enum": [
+            "FIXED_BODY_FRAME_POINT",
+            "FIXED_NOMINAL_COM"
+          ]
+        },
+        "collision_envelope": {
+          "$ref": "#/$defs/BodyConvexPolytope"
+        },
+        "motion_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "analytic_cost_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "terrain_thresholds": {
+          "$ref": "#/$defs/LeggedTerrainThresholds"
+        },
+        "body_velocity_limits": {
+          "$ref": "#/$defs/LeggedBodyVelocityLimits"
+        },
+        "certified_state_error_bounds": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/WheeledOrLeggedErrorBounds"
+        },
+        "motion_primitives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LeggedBodyPrimitive"
+          },
+          "minItems": 4,
+          "maxItems": 4096
+        },
+        "feasibility_scope": {
+          "const": "body_geometry_and_terrain_thresholds_only"
+        },
+        "footstep_feasibility_guaranteed": {
+          "const": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "HopperLandingTerrainThresholds": {
+      "description": "Hard deterministic thresholds for constructing a non-degenerate, single-plane safe landing region.",
+      "type": "object",
+      "required": [
+        "maximum_slope_rad",
+        "maximum_roughness_m",
+        "maximum_plane_residual_m",
+        "minimum_overhead_clearance_m",
+        "minimum_lateral_clearance_m",
+        "minimum_landing_region_area_m2"
+      ],
+      "properties": {
+        "maximum_slope_rad": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.5707963267948966
+        },
+        "maximum_roughness_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximum_plane_residual_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimum_overhead_clearance_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimum_lateral_clearance_m": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimum_landing_region_area_m2": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "HopperLaunchLimits": {
+      "type": "object",
+      "required": [
+        "maximum_launch_speed_mps",
+        "maximum_launch_impulse_newton_seconds",
+        "minimum_flight_time_ns",
+        "maximum_flight_time_ns",
+        "maximum_landing_speed_mps",
+        "minimum_downward_impact_speed_mps",
+        "minimum_landing_clearance_m"
+      ],
+      "properties": {
+        "maximum_launch_speed_mps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_launch_impulse_newton_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minimum_flight_time_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "maximum_flight_time_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/PositiveDecimalNanoseconds"
+        },
+        "maximum_landing_speed_mps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minimum_downward_impact_speed_mps": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimum_landing_clearance_m": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ArbitraryAxisAttitudeEnvelope": {
+      "description": "Certified conservative arbitrary-axis capability. Any optional HopperCapability.attitude_tightening_table_ref may only tighten these bounds.",
+      "type": "object",
+      "required": [
+        "capability_kind",
+        "maximum_angular_speed_radps",
+        "maximum_angular_acceleration_radps2",
+        "maximum_initial_angular_speed_radps",
+        "minimum_settle_guard_ns"
+      ],
+      "properties": {
+        "capability_kind": {
+          "const": "CERTIFIED_CONSERVATIVE_ARBITRARY_AXIS"
+        },
+        "maximum_angular_speed_radps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_angular_acceleration_radps2": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "maximum_initial_angular_speed_radps": {
+          "type": "number",
+          "minimum": 0
+        },
+        "minimum_settle_guard_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HopperCapability": {
+      "type": "object",
+      "required": [
+        "platform_type",
+        "frame_id",
+        "collision_envelope",
+        "motion_model_ref",
+        "analytic_cost_model_ref",
+        "gravity_model_ref",
+        "landing_terrain_thresholds",
+        "launch_limits",
+        "attitude_envelope",
+        "certified_state_error_bounds",
+        "translation_model"
+      ],
+      "properties": {
+        "platform_type": {
+          "const": "HOPPER"
+        },
+        "frame_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/FrameId"
+        },
+        "collision_envelope": {
+          "$ref": "#/$defs/BodyConvexPolytope"
+        },
+        "motion_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "analytic_cost_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "gravity_model_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "landing_terrain_thresholds": {
+          "$ref": "#/$defs/HopperLandingTerrainThresholds"
+        },
+        "launch_limits": {
+          "$ref": "#/$defs/HopperLaunchLimits"
+        },
+        "attitude_envelope": {
+          "$ref": "#/$defs/ArbitraryAxisAttitudeEnvelope"
+        },
+        "attitude_tightening_table_ref": {
+          "description": "Optional certified lookup table. The semantic validator must prove every table entry is no less conservative than attitude_envelope; it may never expand the base envelope.",
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "certified_state_error_bounds": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/HopperErrorBounds"
+        },
+        "translation_model": {
+          "const": "PURE_BALLISTIC_NO_INFLIGHT_TRANSLATION_CONTROL"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

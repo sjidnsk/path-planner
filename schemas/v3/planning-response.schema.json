@@ -1,0 +1,339 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:planning-response",
+  "title": "Path Planner v3 PlanningResponse",
+  "description": "Runtime response. BenchmarkProfile and BenchmarkReport references are deliberately absent and therefore rejected.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "request_id",
+    "response_time",
+    "planning_outcome",
+    "execution_directive",
+    "reason_code",
+    "call_diagnostics"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "path-planner-v3-planning-response/v1"
+    },
+    "request_id": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+    },
+    "response_time": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimePoint"
+    },
+    "planning_outcome": {
+      "enum": [
+        "NEW_REFERENCE_READY",
+        "SAFE_FRONTIER_REFERENCE_READY",
+        "NO_KNOWN_SAFE_ROUTE",
+        "GOAL_INFEASIBLE",
+        "INVALID_REQUEST",
+        "STALE_INPUT",
+        "NUMERICAL_FAILURE",
+        "RESOURCE_LIMIT",
+        "ACTIVE_REFERENCE_INVALIDATED"
+      ]
+    },
+    "execution_directive": {
+      "enum": [
+        "ACTIVATE_NEW_BUNDLE",
+        "CONTINUE_ACTIVE_BUNDLE",
+        "HOLD_STATIONARY",
+        "CONTINUE_COMMITTED_JUMP",
+        "NO_SAFE_PLANNER_REFERENCE"
+      ]
+    },
+    "reason_code": {
+      "description": "Detailed reason such as SAFE_DEAD_END. SAFE_DEAD_END is never a planning_outcome.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Z][A-Z0-9_]*$"
+    },
+    "active_bundle_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "new_reference_bundle": {
+      "$ref": "urn:lunar-path-planner:v3:reference-bundle"
+    },
+    "call_diagnostics": {
+      "$ref": "#/$defs/CallDiagnostics"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "execution_directive": {
+            "const": "ACTIVATE_NEW_BUNDLE"
+          }
+        },
+        "required": [
+          "execution_directive"
+        ]
+      },
+      "then": {
+        "required": [
+          "new_reference_bundle"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "new_reference_bundle"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "execution_directive": {
+            "enum": [
+              "CONTINUE_ACTIVE_BUNDLE",
+              "CONTINUE_COMMITTED_JUMP"
+            ]
+          }
+        },
+        "required": [
+          "execution_directive"
+        ]
+      },
+      "then": {
+        "required": [
+          "active_bundle_ref"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "active_bundle_ref"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "planning_outcome": {
+            "enum": [
+              "NEW_REFERENCE_READY",
+              "SAFE_FRONTIER_REFERENCE_READY"
+            ]
+          }
+        },
+        "required": [
+          "planning_outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "execution_directive": {
+            "const": "ACTIVATE_NEW_BUNDLE"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "execution_directive": {
+            "const": "ACTIVATE_NEW_BUNDLE"
+          }
+        },
+        "required": [
+          "execution_directive"
+        ]
+      },
+      "then": {
+        "properties": {
+          "planning_outcome": {
+            "enum": [
+              "NEW_REFERENCE_READY",
+              "SAFE_FRONTIER_REFERENCE_READY"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "execution_directive": {
+            "const": "HOLD_STATIONARY"
+          }
+        },
+        "required": [
+          "execution_directive"
+        ]
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "new_reference_bundle"
+              ]
+            },
+            {
+              "properties": {
+                "planning_outcome": {
+                  "enum": [
+                    "NEW_REFERENCE_READY",
+                    "SAFE_FRONTIER_REFERENCE_READY"
+                  ]
+                }
+              },
+              "required": [
+                "planning_outcome"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "planning_outcome": {
+            "const": "ACTIVE_REFERENCE_INVALIDATED"
+          }
+        },
+        "required": [
+          "planning_outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "execution_directive": {
+            "enum": [
+              "HOLD_STATIONARY",
+              "CONTINUE_COMMITTED_JUMP",
+              "NO_SAFE_PLANNER_REFERENCE"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "$defs": {
+    "CallDiagnostics": {
+      "description": "Per-call observations and algorithm diagnostics only. Benchmark target comparison and independence checks belong exclusively to BenchmarkReport.",
+      "type": "object",
+      "required": [
+        "api_latency_ns",
+        "termination_reason",
+        "expanded_state_count",
+        "candidate_count",
+        "resource_limit_hit",
+        "learned_cost_usage"
+      ],
+      "properties": {
+        "api_latency_ns": {
+          "description": "Observed API duration only; the planner does not branch on this value.",
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "termination_reason": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$",
+          "maxLength": 128
+        },
+        "final_epsilon": {
+          "type": "number",
+          "minimum": 1
+        },
+        "expected_execution_time_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "secondary_costs": {
+          "$ref": "#/$defs/SecondaryCosts"
+        },
+        "expanded_state_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reopened_state_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidate_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resource_limit_hit": {
+          "type": "boolean"
+        },
+        "learned_cost_usage": {
+          "enum": [
+            "DISABLED",
+            "USED_BOUNDED_SOFT_COST",
+            "FELL_BACK_TO_ANALYTIC"
+          ]
+        },
+        "learned_cost_snapshot_ref": {
+          "description": "The request-fixed snapshot attempted by this call. Required for USED_BOUNDED_SOFT_COST and FELL_BACK_TO_ANALYTIC; forbidden for DISABLED.",
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "message_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]*$",
+            "maxLength": 128
+          },
+          "maxItems": 64,
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "learned_cost_usage": {
+                "const": "DISABLED"
+              }
+            },
+            "required": [
+              "learned_cost_usage"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "learned_cost_snapshot_ref"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "learned_cost_snapshot_ref"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "SecondaryCosts": {
+      "type": "object",
+      "properties": {
+        "energy": {
+          "type": "number",
+          "minimum": 0
+        },
+        "nonfatal_risk": {
+          "type": "number",
+          "minimum": 0
+        },
+        "smoothness": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

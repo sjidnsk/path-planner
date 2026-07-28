@@ -1,0 +1,217 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:benchmark-report",
+  "title": "Path Planner v3 BenchmarkReport",
+  "description": "Experiment-only latency report. Each platform result joins its exact safety capability; the report joins the shared algorithm and benchmark contents used by the run.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "report_id",
+    "report_revision",
+    "generated_at",
+    "algorithm_config_ref",
+    "benchmark_profile_ref",
+    "platform_results"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "path-planner-v3-benchmark-report/v1"
+    },
+    "report_id": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+    },
+    "report_revision": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Revision"
+    },
+    "generated_at": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimePoint"
+    },
+    "algorithm_config_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "benchmark_profile_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "platform_results": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PlatformBenchmarkResult"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "allOf": [
+        {
+          "contains": {
+            "required": [
+              "platform_type"
+            ],
+            "properties": {
+              "platform_type": {
+                "const": "WHEELED"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "required": [
+              "platform_type"
+            ],
+            "properties": {
+              "platform_type": {
+                "const": "LEGGED"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "required": [
+              "platform_type"
+            ],
+            "properties": {
+              "platform_type": {
+                "const": "HOPPER"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "$defs": {
+    "LatencyStatistics": {
+      "description": "Integer-nanosecond statistics encoded as decimal strings. mean_ns is deterministically rounded to the nearest nanosecond using ties-to-even.",
+      "type": "object",
+      "required": [
+        "mean_ns",
+        "median_ns",
+        "p95_ns",
+        "p99_ns",
+        "maximum_ns",
+        "sample_count"
+      ],
+      "properties": {
+        "mean_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "median_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "p95_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "p99_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "maximum_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ColdStartStatistics": {
+      "type": "object",
+      "required": [
+        "first_call_ns",
+        "sample_count"
+      ],
+      "properties": {
+        "first_call_ns": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/NonNegativeDecimalNanoseconds"
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ModuleTiming": {
+      "type": "object",
+      "required": [
+        "module_name",
+        "statistics"
+      ],
+      "properties": {
+        "module_name": {
+          "enum": [
+            "SCHEMA_AND_CONTRACT_VALIDATION",
+            "SAFE_PROJECTION_AND_TERMINAL_RESOLUTION",
+            "PLATFORM_SEARCH",
+            "CONTINUOUS_REFERENCE_GENERATION",
+            "CONTINUOUS_VALIDATION",
+            "BUNDLE_PACKAGING_AND_SERIALIZATION"
+          ]
+        },
+        "statistics": {
+          "$ref": "#/$defs/LatencyStatistics"
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlatformBenchmarkResult": {
+      "type": "object",
+      "required": [
+        "platform_type",
+        "safety_capability_ref",
+        "latency",
+        "p95_latency_target_ns",
+        "p95_latency_target_met",
+        "cold_start",
+        "module_timings",
+        "result_independence_check_passed"
+      ],
+      "properties": {
+        "platform_type": {
+          "enum": [
+            "WHEELED",
+            "LEGGED",
+            "HOPPER"
+          ]
+        },
+        "safety_capability_ref": {
+          "description": "Exact platform-specific SafetyCapabilityProfile used for this result.",
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "latency": {
+          "$ref": "#/$defs/LatencyStatistics"
+        },
+        "p95_latency_target_ns": {
+          "description": "Exclusive upper bound copied from BenchmarkProfile; p95_latency_target_met is true iff p95_ns is strictly smaller.",
+          "const": "1000000000"
+        },
+        "p95_latency_target_met": {
+          "type": "boolean"
+        },
+        "cold_start": {
+          "$ref": "#/$defs/ColdStartStatistics"
+        },
+        "module_timings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModuleTiming"
+          },
+          "maxItems": 6
+        },
+        "result_independence_check_passed": {
+          "description": "True only if changing/removing the benchmark target did not alter the planner result for identical runtime inputs and algorithm config.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

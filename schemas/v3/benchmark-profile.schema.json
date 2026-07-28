@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:benchmark-profile",
+  "title": "Path Planner v3 BenchmarkProfile",
+  "description": "Experiment-only benchmark configuration. Runtime planning requests and responses do not consume this schema. content_ref.content_hash is the RFC 8785 JCS SHA-256 of content.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "content_ref",
+    "content"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "path-planner-v3-benchmark-profile/v1"
+    },
+    "content_ref": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+    },
+    "content": {
+      "$ref": "#/$defs/BenchmarkContent"
+    }
+  },
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "$defs": {
+    "HardwareProfile": {
+      "type": "object",
+      "required": [
+        "cpu_model",
+        "physical_core_count",
+        "logical_core_count",
+        "memory_bytes",
+        "os_name",
+        "os_version",
+        "compiler_id",
+        "compiler_version",
+        "build_type"
+      ],
+      "properties": {
+        "cpu_model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "physical_core_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "logical_core_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_bytes": {
+          "type": "integer",
+          "minimum": 1073741824
+        },
+        "os_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "os_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "compiler_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "compiler_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "build_type": {
+          "enum": [
+            "RELEASE",
+            "RELWITHDEBINFO"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "TimingBoundary": {
+      "type": "object",
+      "required": [
+        "starts_before",
+        "ends_after",
+        "included",
+        "excluded",
+        "cold_start_reported_separately"
+      ],
+      "properties": {
+        "starts_before": {
+          "const": "REQUEST_SCHEMA_AND_SNAPSHOT_VALIDATION"
+        },
+        "ends_after": {
+          "const": "PLANNING_RESPONSE_SERIALIZATION"
+        },
+        "included": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "const": "SCHEMA_AND_CONTRACT_VALIDATION"
+            },
+            {
+              "const": "SAFE_PROJECTION_AND_TERMINAL_RESOLUTION"
+            },
+            {
+              "const": "PLATFORM_SEARCH"
+            },
+            {
+              "const": "CONTINUOUS_REFERENCE_GENERATION"
+            },
+            {
+              "const": "CONTINUOUS_VALIDATION"
+            },
+            {
+              "const": "BUNDLE_PACKAGING_AND_SERIALIZATION"
+            }
+          ],
+          "minItems": 6,
+          "maxItems": 6
+        },
+        "excluded": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "const": "RAW_SENSOR_MAPPING"
+            },
+            {
+              "const": "PROCESS_STARTUP"
+            },
+            {
+              "const": "REMOTE_RPC_OR_DISK_IO"
+            }
+          ],
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "cold_start_reported_separately": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ScenarioEntry": {
+      "type": "object",
+      "required": [
+        "scenario_ref",
+        "weight"
+      ],
+      "properties": {
+        "scenario_ref": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "weight": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlatformSuite": {
+      "type": "object",
+      "required": [
+        "platform_type",
+        "safety_capability_ref",
+        "scenario_mix"
+      ],
+      "properties": {
+        "platform_type": {
+          "enum": [
+            "WHEELED",
+            "LEGGED",
+            "HOPPER"
+          ]
+        },
+        "safety_capability_ref": {
+          "description": "Exact platform-specific SafetyCapabilityProfile used for this suite.",
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "scenario_mix": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScenarioEntry"
+          },
+          "minItems": 1,
+          "maxItems": 256
+        }
+      },
+      "additionalProperties": false
+    },
+    "BenchmarkContent": {
+      "type": "object",
+      "required": [
+        "hardware",
+        "algorithm_config_ref",
+        "planner_thread_count",
+        "warmup_sample_count",
+        "measured_sample_count_per_platform",
+        "p95_latency_target_ns",
+        "platform_suites",
+        "timing_boundary",
+        "record_module_timings",
+        "planner_result_must_be_independent_of_latency_target"
+      ],
+      "properties": {
+        "hardware": {
+          "$ref": "#/$defs/HardwareProfile"
+        },
+        "algorithm_config_ref": {
+          "description": "Exact PlannerAlgorithmConfig shared by all three platform suites.",
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentRef"
+        },
+        "planner_thread_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "warmup_sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "measured_sample_count_per_platform": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "p95_latency_target_ns": {
+          "description": "Exclusive upper bound: the benchmark passes only when measured P95 is strictly less than this value.",
+          "const": "1000000000"
+        },
+        "platform_suites": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlatformSuite"
+          },
+          "minItems": 3,
+          "maxItems": 3,
+          "allOf": [
+            {
+              "contains": {
+                "required": [
+                  "platform_type"
+                ],
+                "properties": {
+                  "platform_type": {
+                    "const": "WHEELED"
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "required": [
+                  "platform_type"
+                ],
+                "properties": {
+                  "platform_type": {
+                    "const": "LEGGED"
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "required": [
+                  "platform_type"
+                ],
+                "properties": {
+                  "platform_type": {
+                    "const": "HOPPER"
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
+        },
+        "timing_boundary": {
+          "$ref": "#/$defs/TimingBoundary"
+        },
+        "record_module_timings": {
+          "type": "boolean"
+        },
+        "planner_result_must_be_independent_of_latency_target": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

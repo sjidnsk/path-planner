@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:lunar-path-planner:v3:reference:wheeled",
+  "title": "Path Planner v3 WheeledReference",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "reference_id",
+    "reference_hash",
+    "platform_type",
+    "reference_time_origin",
+    "segments",
+    "safe_stop_anchor"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "path-planner-v3-wheeled-reference/v1"
+    },
+    "reference_id": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+    },
+    "reference_hash": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/ContentHash"
+    },
+    "platform_type": {
+      "const": "WHEELED"
+    },
+    "reference_time_origin": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimePoint"
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/DriveSegment"
+          },
+          {
+            "$ref": "#/$defs/SpinSegment"
+          }
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 4096
+    },
+    "safe_stop_anchor": {
+      "$ref": "urn:lunar-path-planner:v3:common#/$defs/SafeStopAnchor"
+    }
+  },
+  "additionalProperties": false,
+  "unevaluatedProperties": false,
+  "$defs": {
+    "DerivedKinematicCaches": {
+      "description": "Derived caches are non-authoritative and must reproduce the derivative of P(s) and s(t) within the declared tolerance.",
+      "type": "object",
+      "required": [
+        "cache_authority",
+        "consistency_tolerance",
+        "signed_body_forward_speed_mps",
+        "yaw_rate_radps"
+      ],
+      "properties": {
+        "cache_authority": {
+          "const": "DERIVED_NON_AUTHORITATIVE"
+        },
+        "consistency_tolerance": {
+          "type": "number",
+          "minimum": 0
+        },
+        "signed_body_forward_speed_mps": {
+          "allOf": [
+            {
+              "$ref": "urn:lunar-path-planner:v3:common#/$defs/PiecewiseCubicScalarTrajectory"
+            },
+            {
+              "properties": {
+                "value_semantics": {
+                  "const": "signed_body_forward_speed_mps"
+                }
+              }
+            }
+          ]
+        },
+        "yaw_rate_radps": {
+          "allOf": [
+            {
+              "$ref": "urn:lunar-path-planner:v3:common#/$defs/PiecewiseCubicScalarTrajectory"
+            },
+            {
+              "properties": {
+                "value_semantics": {
+                  "const": "yaw_rate_radps"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DriveSegment": {
+      "type": "object",
+      "required": [
+        "segment_type",
+        "segment_id",
+        "time_interval",
+        "direction",
+        "geometric_path",
+        "time_scaling"
+      ],
+      "properties": {
+        "segment_type": {
+          "const": "DRIVE"
+        },
+        "segment_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "time_interval": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimeInterval"
+        },
+        "direction": {
+          "enum": [
+            "FORWARD",
+            "REVERSE"
+          ]
+        },
+        "geometric_path": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/GeometricPath"
+        },
+        "time_scaling": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/MonotoneTimeScaling"
+        },
+        "derived_caches": {
+          "$ref": "#/$defs/DerivedKinematicCaches"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SpinSegment": {
+      "description": "A zero-translation spin. The semantic validator enforces zero linear speed and zero yaw rate at direction/spin mode boundaries.",
+      "type": "object",
+      "required": [
+        "segment_type",
+        "segment_id",
+        "time_interval",
+        "fixed_position_m",
+        "unwrapped_yaw_rad"
+      ],
+      "properties": {
+        "segment_type": {
+          "const": "SPIN"
+        },
+        "segment_id": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Identifier"
+        },
+        "time_interval": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/TimeInterval"
+        },
+        "fixed_position_m": {
+          "$ref": "urn:lunar-path-planner:v3:common#/$defs/Vector3"
+        },
+        "unwrapped_yaw_rad": {
+          "allOf": [
+            {
+              "$ref": "urn:lunar-path-planner:v3:common#/$defs/PiecewiseCubicScalarTrajectory"
+            },
+            {
+              "properties": {
+                "value_semantics": {
+                  "const": "unwrapped_yaw_rad"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
