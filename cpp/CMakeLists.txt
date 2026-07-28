@@ -51,6 +51,16 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_contracts_tests
     TEST_PREFIX "lpp_v3_contracts.")
+
+  add_executable(
+    lpp_v3_references_tests tests/contracts/reference_bundle_test.cpp)
+  target_link_libraries(
+    lpp_v3_references_tests
+    PRIVATE lpp_v3_contracts GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_references_tests
+    TEST_PREFIX "lpp_v3_references.")
 endif()
 
 if(LPP_V3_BUILD_BENCHMARKS)
