@@ -21,6 +21,14 @@ include(cmake/CompilerWarnings.cmake)
 lpp_v3_set_project_options(lpp_v3_project_options)
 lpp_v3_set_project_warnings(lpp_v3_project_warnings)
 
+add_library(lpp_v3_contracts src/contracts/base_types.cpp)
+target_include_directories(
+  lpp_v3_contracts
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_contracts
+  PRIVATE Eigen3::Eigen lpp_v3_project_options lpp_v3_project_warnings)
+
 if(LPP_V3_BUILD_TESTS)
   enable_testing()
   find_package(GTest 1.17.0 EXACT CONFIG REQUIRED)
@@ -33,6 +41,16 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_toolchain_tests
     TEST_PREFIX "lpp_v3_toolchain.")
+
+  add_executable(
+    lpp_v3_contracts_tests tests/contracts/planning_request_test.cpp)
+  target_link_libraries(
+    lpp_v3_contracts_tests
+    PRIVATE lpp_v3_contracts GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_contracts_tests
+    TEST_PREFIX "lpp_v3_contracts.")
 endif()
 
 if(LPP_V3_BUILD_BENCHMARKS)
