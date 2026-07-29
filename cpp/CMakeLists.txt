@@ -46,13 +46,13 @@ target_link_libraries(
           lpp_v3_project_options lpp_v3_project_warnings)
 
 add_library(
-  lpp_v3_map
+  lpp_v3_map_snapshot
   src/map/immutable_snapshot.cpp)
 target_include_directories(
-  lpp_v3_map
+  lpp_v3_map_snapshot
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(
-  lpp_v3_map
+  lpp_v3_map_snapshot
   PUBLIC lpp_v3_contracts lpp_v3_wire_primitives
          nlohmann_json::nlohmann_json
   PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
@@ -65,7 +65,29 @@ target_include_directories(
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(
   lpp_v3_cost
-  PUBLIC lpp_v3_contracts lpp_v3_map
+  PUBLIC lpp_v3_contracts lpp_v3_map_snapshot
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
+  lpp_v3_map
+  src/map/safe_projection.cpp)
+target_include_directories(
+  lpp_v3_map
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_map
+  PUBLIC lpp_v3_contracts lpp_v3_cost lpp_v3_map_snapshot
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
+  lpp_v3_search
+  src/search/candidate_ranker.cpp)
+target_include_directories(
+  lpp_v3_search
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_search
+  PUBLIC lpp_v3_contracts
   PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
 
 add_library(
@@ -116,7 +138,9 @@ if(LPP_V3_BUILD_TESTS)
     TEST_PREFIX "lpp_v3_references.")
 
   add_executable(
-    lpp_v3_map_tests tests/map/immutable_snapshot_test.cpp)
+    lpp_v3_map_tests
+    tests/map/immutable_snapshot_test.cpp
+    tests/map/safe_projection_test.cpp)
   target_link_libraries(
     lpp_v3_map_tests
     PRIVATE lpp_v3_map GTest::gtest_main
@@ -134,6 +158,18 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_cost_tests
     TEST_PREFIX "lpp_v3_cost.")
+
+  add_executable(
+    lpp_v3_search_tests
+    tests/search/ara_star_test.cpp
+    tests/search/candidate_ranker_test.cpp)
+  target_link_libraries(
+    lpp_v3_search_tests
+    PRIVATE lpp_v3_search GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_search_tests
+    TEST_PREFIX "lpp_v3_search.")
 
   add_executable(
     lpp_v3_crypto_tests tests/crypto/sha256_test.cpp)
