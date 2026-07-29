@@ -162,3 +162,33 @@ def test_high_frontier_panel_labels_nominal_goal_and_safe_frontier() -> None:
         assert "Proxy obstacle" in labels
     finally:
         plt.close(figure)
+
+
+def test_overview_legend_includes_high_frontier_only_elements(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The figure-level legend must include labels emitted outside the first panel."""
+    plotter = runpy.run_path(str(SCRIPT))
+    record = {
+        "scale": "TEN_METER",
+        "scene": "G1_HIGH_FRONTIER",
+        "platform": "WHEELED",
+        "map_bounds": {"minimum_xy_m": [0.0, 0.0], "maximum_xy_m": [10.0, 10.0]},
+        "start_xy_m": [1.0, 1.0],
+        "goal_xy_m": [9.0, 9.0],
+        "regions": [
+            {
+                "kind": "SYNTHETIC_TERRAIN_OBSTACLE_PROXY",
+                "provenance": {"source_kind": "synthetic_terrain_obstacle_proxy/v1"},
+                "polygon_xy_m": [[2.0, 7.0], [3.0, 7.0], [3.0, 8.0], [2.0, 8.0]],
+            },
+            {"kind": "UNKNOWN", "polygon_xy_m": [[4.0, 4.0], [9.5, 4.0], [9.5, 9.5], [4.0, 9.5]]},
+        ],
+        "reference_polyline_xy_m": [[1.0, 1.0], [3.0, 3.0]],
+    }
+    original_close = plt.close
+    monkeypatch.setattr(plt, "close", lambda _figure: None)
+    try:
+        plotter["plot_scenario_overview"]([record], tmp_path / "overview.png")
+        labels = [text.get_text() for text in plt.gcf().legends[0].get_texts()]
+        assert {"Nominal goal", "Safe frontier", "Unknown region", "Proxy obstacle"} <= set(labels)
+    finally:
+        original_close(plt.gcf())

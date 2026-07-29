@@ -181,9 +181,20 @@ def plot_scenario_overview(records: list[dict[str, Any]], output_path: Path) -> 
     for row, scene in enumerate(SCENES):
         for column, scale in enumerate(SCALES):
             _draw_scenario_panel(axes[row, column], records, scale, scene)
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    if handles:
-        figure.legend(handles, labels, loc="upper center", ncol=5, fontsize=8, frameon=False)
+    legend_items: dict[str, Any] = {}
+    for axis in axes.flat:
+        handles, labels = axis.get_legend_handles_labels()
+        for handle, label in zip(handles, labels, strict=True):
+            legend_items.setdefault(label, handle)
+    if legend_items:
+        figure.legend(
+            legend_items.values(),
+            legend_items.keys(),
+            loc="upper center",
+            ncol=5,
+            fontsize=8,
+            frameon=False,
+        )
     figure.savefig(output_path, dpi=180)
     plt.close(figure)
 
