@@ -58,6 +58,17 @@ target_link_libraries(
   PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
 
 add_library(
+  lpp_v3_cost
+  src/cost/learned_cost_snapshot.cpp)
+target_include_directories(
+  lpp_v3_cost
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_cost
+  PUBLIC lpp_v3_contracts lpp_v3_map
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
   lpp_v3_codec
   src/codec/json_codec.cpp
   src/codec/semantic_validator.cpp)
@@ -66,7 +77,8 @@ target_include_directories(
   PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(
   lpp_v3_codec
-  PUBLIC lpp_v3_contracts lpp_v3_map lpp_v3_wire_primitives
+  PUBLIC lpp_v3_contracts lpp_v3_cost lpp_v3_map
+         lpp_v3_wire_primitives
          nlohmann_json::nlohmann_json
   PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
 
@@ -112,6 +124,16 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_map_tests
     TEST_PREFIX "lpp_v3_map.")
+
+  add_executable(
+    lpp_v3_cost_tests tests/cost/learned_cost_snapshot_test.cpp)
+  target_link_libraries(
+    lpp_v3_cost_tests
+    PRIVATE lpp_v3_cost GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_cost_tests
+    TEST_PREFIX "lpp_v3_cost.")
 
   add_executable(
     lpp_v3_crypto_tests tests/crypto/sha256_test.cpp)
