@@ -30,8 +30,8 @@ namespace {
 
 using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
+using system_test::G1ReferenceScenario;
 using system_test::MapScale;
-using system_test::MapScenario;
 using multiscale_experiment_internal::LatencyStatistics;
 
 constexpr std::string_view kManifestSchema =
@@ -48,7 +48,13 @@ constexpr std::size_t kBallisticSampleCount = 21U;
 struct Combination final {
   PlatformType platform;
   MapScale scale;
-  MapScenario scene;
+  G1ReferenceScenario scene;
+};
+
+struct G1ReferenceProvenance final {
+  std::string_view source_scenario_id;
+  std::string_view source_scenario_hash;
+  std::string_view density_profile;
 };
 
 struct Sample final {
@@ -94,14 +100,14 @@ ExperimentMatrix() {
         MapScale::kThousandMeter,
     };
     constexpr std::array scenes{
-        MapScenario::kOpenKnown,
-        MapScenario::kDetour,
-        MapScenario::kUnknownGoalWithSafeFrontier,
+        G1ReferenceScenario::kLowKnown,
+        G1ReferenceScenario::kMediumKnown,
+        G1ReferenceScenario::kHighFrontier,
     };
     std::size_t index = 0U;
     for (const PlatformType platform : platforms) {
       for (const MapScale scale : scales) {
-        for (const MapScenario scene : scenes) {
+        for (const G1ReferenceScenario scene : scenes) {
           result[index++] = {platform, scale, scene};
         }
       }
@@ -135,18 +141,62 @@ ExperimentMatrix() {
   throw std::invalid_argument{"unsupported scale"};
 }
 
-[[nodiscard]] std::string_view SceneName(const MapScenario scene) {
+[[nodiscard]] std::string_view SceneName(
+    const G1ReferenceScenario scene) {
   switch (scene) {
-    case MapScenario::kOpenKnown:
-      return "OPEN";
-    case MapScenario::kDetour:
-      return "DETOUR";
-    case MapScenario::kUnknownGoalWithSafeFrontier:
-      return "FRONTIER";
-    case MapScenario::kKnownObstacleAtGoal:
-      break;
+    case G1ReferenceScenario::kLowKnown:
+      return "G1_LOW_KNOWN";
+    case G1ReferenceScenario::kMediumKnown:
+      return "G1_MEDIUM_KNOWN";
+    case G1ReferenceScenario::kHighFrontier:
+      return "G1_HIGH_FRONTIER";
   }
   throw std::invalid_argument{"unsupported scene"};
+}
+
+[[nodiscard]] G1ReferenceProvenance G1ReferenceFor(
+    const G1ReferenceScenario scene) {
+  switch (scene) {
+    case G1ReferenceScenario::kLowKnown:
+      return {
+          .source_scenario_id =
+              "validation/scenario-0027/standard-proxy/v1",
+          .source_scenario_hash =
+              "564835143c269d1ef4fb8d01cb7517cf4efb674bb1554c36467a1d59eb39f16c",
+          .density_profile = "low",
+      };
+    case G1ReferenceScenario::kMediumKnown:
+      return {
+          .source_scenario_id =
+              "validation/scenario-0007/standard-proxy/v1",
+          .source_scenario_hash =
+              "6f754169bb3c4837978e3e852258493f4b1c971e8a59148a9a8269fb306a95bc",
+          .density_profile = "medium",
+      };
+    case G1ReferenceScenario::kHighFrontier:
+      return {
+          .source_scenario_id =
+              "validation/scenario-0116/standard-proxy/v1",
+          .source_scenario_hash =
+              "49e4254dc8e5602be67cc2e9eb68af65093ec049b463e3581edfc9b5f352b554",
+          .density_profile = "high",
+      };
+  }
+  throw std::invalid_argument{"scene is not a G1 reference"};
+}
+
+[[nodiscard]] Json G1ReferenceJson(
+    const G1ReferenceScenario scene) {
+  const G1ReferenceProvenance provenance = G1ReferenceFor(scene);
+  return {
+      {"source_scenario_id", provenance.source_scenario_id},
+      {"source_scenario_hash", provenance.source_scenario_hash},
+      {"density_profile", provenance.density_profile},
+      {"derivation", "g1_validation_reference_scaled/v1"},
+      {"synthetic_source_kind",
+       "synthetic_terrain_obstacle_proxy/v1"},
+      {"physical_obstacle_cells_written", false},
+  };
 }
 
 [[nodiscard]] std::string_view OutcomeName(
@@ -177,7 +227,7 @@ ExperimentMatrix() {
 [[nodiscard]] PlanningOutcome ExpectedOutcome(
     const Combination& combination) {
   if (combination.scene ==
-          MapScenario::kUnknownGoalWithSafeFrontier &&
+          G1ReferenceScenario::kHighFrontier &&
       combination.platform != PlatformType::kHopper) {
     return PlanningOutcome::kSafeFrontierReferenceReady;
   }
@@ -340,6 +390,10 @@ void AppendPath(
       case system_test::ScenarioRegion::Kind::kHardObstacle:
         kind = "HARD_OBSTACLE";
         break;
+      case system_test::ScenarioRegion::Kind::
+          kSyntheticTerrainObstacleProxy:
+        kind = "SYNTHETIC_TERRAIN_OBSTACLE_PROXY";
+        break;
       case system_test::ScenarioRegion::Kind::kUnknown:
         kind = "UNKNOWN";
         break;
@@ -354,9 +408,18 @@ void AppendPath(
     for (const Vec2 vertex : region.polygon_xy_m) {
       polygon.push_back(Vec2Json(vertex));
     }
-    result.push_back(
-        {{"kind", std::string{kind}},
-         {"polygon_xy_m", std::move(polygon)}});
+    Json encoded_region{
+        {"kind", std::string{kind}},
+        {"polygon_xy_m", std::move(polygon)},
+    };
+    if (region.kind ==
+        system_test::ScenarioRegion::Kind::
+            kSyntheticTerrainObstacleProxy) {
+      encoded_region["source_kind"] =
+          "synthetic_terrain_obstacle_proxy/v1";
+      encoded_region["physical_obstacle_cells_written"] = false;
+    }
+    result.push_back(std::move(encoded_region));
   }
   return result;
 }
@@ -431,6 +494,8 @@ void AppendPath(
       {"goal_xy_m", Vec2Json(representative.description.goal_xy_m)},
       {"regions", RegionsJson(representative.description.regions)},
       {"reference_polyline_xy_m", std::move(polyline)},
+      {"g1_reference",
+       G1ReferenceJson(representative.combination.scene)},
       {"planning_outcome",
        OutcomeName(representative.response.planning_outcome)},
       {"reason_code", representative.response.reason_code},
@@ -465,6 +530,8 @@ void AppendPath(
   Json matrix = Json::array();
   for (const Representative& representative : representatives) {
     Json combination = CombinationJson(representative.combination);
+    combination["g1_reference"] =
+        G1ReferenceJson(representative.combination.scene);
     combination["map_dimensions"] = {
         {"width_m", representative.description.width_m},
         {"height_m", representative.description.height_m},

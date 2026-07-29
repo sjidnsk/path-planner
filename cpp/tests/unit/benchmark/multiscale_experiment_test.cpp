@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -120,7 +121,7 @@ TEST(MultiscaleExperimentConfigTest,
 }
 
 TEST(MultiscaleExperimentArtifactTest,
-     TinyRealRunWritesFourParseableArtifacts) {
+     TinyRealRunWritesParseableG1ReferenceArtifacts) {
   const std::filesystem::path output_root = TemporaryOutputRoot();
   const MultiscaleExperimentConfig config{
       .warmup_count = 0U,
@@ -155,10 +156,80 @@ TEST(MultiscaleExperimentArtifactTest,
   EXPECT_EQ(summary.at("platform_results").size(), 3U);
   EXPECT_EQ(latency_samples.size(), 54U);
   EXPECT_EQ(responses.size(), 27U);
+  const std::map<std::string, nlohmann::json> expected_references{
+      {"G1_LOW_KNOWN",
+       {
+           {"source_scenario_id",
+            "validation/scenario-0027/standard-proxy/v1"},
+           {"source_scenario_hash",
+            "564835143c269d1ef4fb8d01cb7517cf4efb674bb1554c36467a1d59eb39f16c"},
+           {"density_profile", "low"},
+           {"derivation", "g1_validation_reference_scaled/v1"},
+           {"synthetic_source_kind",
+            "synthetic_terrain_obstacle_proxy/v1"},
+           {"physical_obstacle_cells_written", false},
+       }},
+      {"G1_MEDIUM_KNOWN",
+       {
+           {"source_scenario_id",
+            "validation/scenario-0007/standard-proxy/v1"},
+           {"source_scenario_hash",
+            "6f754169bb3c4837978e3e852258493f4b1c971e8a59148a9a8269fb306a95bc"},
+           {"density_profile", "medium"},
+           {"derivation", "g1_validation_reference_scaled/v1"},
+           {"synthetic_source_kind",
+            "synthetic_terrain_obstacle_proxy/v1"},
+           {"physical_obstacle_cells_written", false},
+       }},
+      {"G1_HIGH_FRONTIER",
+       {
+           {"source_scenario_id",
+            "validation/scenario-0116/standard-proxy/v1"},
+           {"source_scenario_hash",
+            "49e4254dc8e5602be67cc2e9eb68af65093ec049b463e3581edfc9b5f352b554"},
+           {"density_profile", "high"},
+           {"derivation", "g1_validation_reference_scaled/v1"},
+           {"synthetic_source_kind",
+            "synthetic_terrain_obstacle_proxy/v1"},
+           {"physical_obstacle_cells_written", false},
+       }},
+  };
+  std::map<std::string, std::size_t> manifest_scene_counts;
+  for (const auto& entry : manifest.at("matrix")) {
+    const std::string scene = entry.at("scene").get<std::string>();
+    const auto expected = expected_references.find(scene);
+    EXPECT_NE(expected, expected_references.end());
+    if (expected != expected_references.end()) {
+      EXPECT_EQ(entry.at("g1_reference"), expected->second);
+      ++manifest_scene_counts[scene];
+    }
+  }
+  for (const auto& [scene, provenance] : expected_references) {
+    static_cast<void>(provenance);
+    EXPECT_EQ(manifest_scene_counts[scene], 9U);
+  }
+  std::size_t proxy_region_count = 0U;
   for (const auto& record : responses) {
     EXPECT_TRUE(record.contains("map_bounds"));
     EXPECT_TRUE(record.contains("reference_polyline_xy_m"));
     EXPECT_TRUE(record.contains("response_hash"));
+    const std::string scene = record.at("scene").get<std::string>();
+    const auto expected = expected_references.find(scene);
+    EXPECT_NE(expected, expected_references.end());
+    if (expected != expected_references.end()) {
+      EXPECT_EQ(record.at("g1_reference"), expected->second);
+    }
+    for (const auto& region : record.at("regions")) {
+      if (region.at("kind") ==
+          "SYNTHETIC_TERRAIN_OBSTACLE_PROXY") {
+        ++proxy_region_count;
+        EXPECT_EQ(
+            region.at("source_kind"),
+            "synthetic_terrain_obstacle_proxy/v1");
+        EXPECT_FALSE(
+            region.at("physical_obstacle_cells_written"));
+      }
+    }
     if (record.at("platform") == "HOPPER") {
       EXPECT_TRUE(record.contains("ballistic_arc_xz_m"));
       EXPECT_TRUE(record.contains("landing_polygon_xy_m"));
@@ -167,6 +238,7 @@ TEST(MultiscaleExperimentArtifactTest,
       EXPECT_FALSE(record.contains("landing_polygon_xy_m"));
     }
   }
+  EXPECT_GT(proxy_region_count, 0U);
 
   RemoveRunArtifacts(paths);
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,12 @@ enum class MapScenario {
   kUnknownGoalWithSafeFrontier,
 };
 
+enum class G1ReferenceScenario {
+  kLowKnown,
+  kMediumKnown,
+  kHighFrontier,
+};
+
 enum class ExpectedExperimentOutcome {
   kNewReferenceReady,
   kSafeFrontierReferenceReady,
@@ -31,6 +38,7 @@ enum class ExpectedExperimentOutcome {
 struct ScenarioRegion final {
   enum class Kind {
     kHardObstacle,
+    kSyntheticTerrainObstacleProxy,
     kUnknown,
     kHighSlope,
     kHighRoughness,
@@ -40,9 +48,21 @@ struct ScenarioRegion final {
   std::vector<Vec2> polygon_xy_m;
 };
 
+struct G1ReferenceProvenance final {
+  G1ReferenceScenario reference{G1ReferenceScenario::kLowKnown};
+  std::string source_scenario_id;
+  std::string source_scenario_hash;
+  std::string proxy_seed_hex;
+  double source_hard_obstacle_fraction{};
+  std::string source_kind;
+  bool physical_obstacle_cells_written{};
+  std::string derivation;
+};
+
 struct ScenarioDescription final {
   MapScale scale{MapScale::kTenMeter};
   MapScenario scene{MapScenario::kOpenKnown};
+  std::optional<G1ReferenceProvenance> g1_reference;
   double width_m{};
   double height_m{};
   Vec2 start_xy_m;
@@ -75,6 +95,11 @@ struct SystemScenario final {
     PlatformType platform_type,
     MapScale map_scale,
     MapScenario map_scenario);
+
+[[nodiscard]] SystemScenario MakeMultiscaleSystemScenario(
+    PlatformType platform_type,
+    MapScale map_scale,
+    G1ReferenceScenario reference_scenario);
 
 [[nodiscard]] std::unique_ptr<PlannerV3> MakePlanner(
     SystemScenario& scenario);

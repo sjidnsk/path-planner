@@ -1,9 +1,12 @@
 #include "fixtures/system/planner_v3_system_fixture.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <numbers>
 #include <sstream>
@@ -39,6 +42,57 @@ struct DetourLayout final {
   std::size_t gap_end_y;
 };
 
+struct G1ReferenceSpec final {
+  std::string_view scenario_id;
+  std::string_view scenario_hash;
+  std::string_view proxy_seed_hex;
+  double hard_obstacle_fraction;
+};
+
+struct G1HopperEndpoints final {
+  std::size_t start_x;
+  std::size_t start_y;
+  std::size_t goal_x;
+  std::size_t goal_y;
+};
+
+[[nodiscard]] std::vector<std::uint8_t>
+GenerateG1ProxyObstacleMask(
+    MapScale scale, G1ReferenceScenario reference,
+    bool reserve_hopper_endpoints);
+
+[[nodiscard]] G1HopperEndpoints
+SelectG1HopperEndpoints(
+    MapScale scale, G1ReferenceScenario reference);
+
+[[nodiscard]] constexpr G1ReferenceSpec G1ReferenceFor(
+    const G1ReferenceScenario reference) {
+  switch (reference) {
+    case G1ReferenceScenario::kLowKnown:
+      return {
+          "validation/scenario-0027/standard-proxy/v1",
+          "564835143c269d1ef4fb8d01cb7517cf4efb674bb1554c36467a1d59eb39f16c",
+          "0647281ae562cc9fac85a745a0c183c2",
+          0.006683349609375,
+      };
+    case G1ReferenceScenario::kMediumKnown:
+      return {
+          "validation/scenario-0007/standard-proxy/v1",
+          "6f754169bb3c4837978e3e852258493f4b1c971e8a59148a9a8269fb306a95bc",
+          "6b6d97f83a6183e4119cbd01f8e0e25e",
+          0.01348876953125,
+      };
+    case G1ReferenceScenario::kHighFrontier:
+      return {
+          "validation/scenario-0116/standard-proxy/v1",
+          "49e4254dc8e5602be67cc2e9eb68af65093ec049b463e3581edfc9b5f352b554",
+          "9ded9466c337bbf7037cd239265150d5",
+          0.03814697265625,
+      };
+  }
+  throw std::invalid_argument{"unsupported G1 reference scenario"};
+}
+
 [[nodiscard]] MultiscaleDimensions DimensionsFor(
     const MapScale map_scale) {
   switch (map_scale) {
@@ -63,6 +117,39 @@ struct DetourLayout final {
       return 10.0;
   }
   throw std::invalid_argument{"unsupported multiscale map scale"};
+}
+
+[[nodiscard]] std::size_t G1UnknownBeginX(
+    const MapScale map_scale) {
+  const MultiscaleDimensions dimensions = DimensionsFor(map_scale);
+  const double primitive_m = GroundPrimitiveDistanceFor(map_scale);
+  const double known_distance_m =
+      std::floor(
+          0.6 * dimensions.ground_distance_m / primitive_m) *
+      primitive_m;
+  const std::size_t ground_frontier_x =
+      2U + static_cast<std::size_t>(
+                   known_distance_m / dimensions.resolution_m);
+  if (map_scale == MapScale::kTenMeter) {
+    return ground_frontier_x;
+  }
+  const double physical_height_m =
+      static_cast<double>(dimensions.height) *
+      dimensions.resolution_m;
+  const double hopper_start_x =
+      map_scale == MapScale::kTenMeter
+          ? 4.5 * dimensions.resolution_m
+          : std::floor(
+                (physical_height_m / 2.0 -
+                 dimensions.hopper_distance_m / 2.0) /
+                dimensions.resolution_m) *
+                    dimensions.resolution_m +
+                dimensions.resolution_m / 2.0;
+  const std::size_t hopper_goal_x =
+      static_cast<std::size_t>(
+          (hopper_start_x + dimensions.hopper_distance_m) /
+          dimensions.resolution_m);
+  return std::max(ground_frontier_x, hopper_goal_x + 1U);
 }
 
 [[nodiscard]] ScenarioRegion RectangleRegion(
@@ -202,6 +289,100 @@ struct DetourLayout final {
     const double unknown_begin_x = static_cast<double>(
         UnknownBeginX(platform_type, description)) *
         dimensions.resolution_m;
+    description.regions.push_back(RectangleRegion(
+        ScenarioRegion::Kind::kUnknown,
+        unknown_begin_x, 0.0, description.width_m,
+        description.height_m));
+  }
+  return description;
+}
+
+[[nodiscard]] ScenarioDescription DescribeG1MultiscaleScenario(
+    const PlatformType platform_type,
+    const MapScale map_scale,
+    const G1ReferenceScenario reference) {
+  const MultiscaleDimensions dimensions = DimensionsFor(map_scale);
+  const G1ReferenceSpec source = G1ReferenceFor(reference);
+  const bool hopper = platform_type == PlatformType::kHopper;
+  const double distance =
+      hopper ? dimensions.hopper_distance_m
+             : dimensions.ground_distance_m;
+  const double resolution_m = dimensions.resolution_m;
+  const double physical_height_m =
+      static_cast<double>(dimensions.height) * resolution_m;
+  const bool vertical_hopper_frontier =
+      hopper && map_scale == MapScale::kTenMeter &&
+      reference == G1ReferenceScenario::kHighFrontier;
+  const std::optional<G1HopperEndpoints> derived_hopper =
+      hopper && map_scale != MapScale::kTenMeter
+          ? std::optional<G1HopperEndpoints>{
+                SelectG1HopperEndpoints(map_scale, reference)}
+          : std::nullopt;
+  const double start_x =
+      derived_hopper.has_value()
+          ? (static_cast<double>(derived_hopper->start_x) + 0.5) *
+                resolution_m
+          : (hopper ? 4.5 * resolution_m
+                    : 1.5 * resolution_m);
+  const double start_y =
+      derived_hopper.has_value()
+          ? (static_cast<double>(derived_hopper->start_y) + 0.5) *
+                resolution_m
+          : (vertical_hopper_frontier
+                 ? 7.5 * resolution_m
+                 : physical_height_m / 2.0 -
+                       resolution_m / 2.0);
+  const double goal_x =
+      derived_hopper.has_value()
+          ? (static_cast<double>(derived_hopper->goal_x) + 0.5) *
+                resolution_m
+          : (vertical_hopper_frontier
+                 ? start_x
+                 : start_x + distance);
+  const double goal_y =
+      derived_hopper.has_value()
+          ? (static_cast<double>(derived_hopper->goal_y) + 0.5) *
+                resolution_m
+          : (vertical_hopper_frontier
+                 ? start_y + distance
+                 : start_y);
+  ScenarioDescription description{
+      .scale = map_scale,
+      .scene =
+          reference == G1ReferenceScenario::kHighFrontier
+              ? MapScenario::kUnknownGoalWithSafeFrontier
+              : MapScenario::kOpenKnown,
+      .g1_reference =
+          G1ReferenceProvenance{
+              .reference = reference,
+              .source_scenario_id = std::string{source.scenario_id},
+              .source_scenario_hash = std::string{source.scenario_hash},
+              .proxy_seed_hex = std::string{source.proxy_seed_hex},
+              .source_hard_obstacle_fraction =
+                  source.hard_obstacle_fraction,
+              .source_kind =
+                  "synthetic_terrain_obstacle_proxy/v1",
+              .physical_obstacle_cells_written = false,
+              .derivation =
+                  "g1_validation_reference_scaled/v1",
+          },
+      .width_m =
+          static_cast<double>(dimensions.width) * resolution_m,
+      .height_m = physical_height_m,
+      .start_xy_m = {start_x, start_y},
+      .goal_xy_m = {goal_x, goal_y},
+      .nominal_plan_distance_m = distance,
+      .expected_outcome =
+          reference == G1ReferenceScenario::kHighFrontier &&
+                  !hopper
+              ? ExpectedExperimentOutcome::
+                    kSafeFrontierReferenceReady
+              : ExpectedExperimentOutcome::kNewReferenceReady,
+  };
+  if (reference == G1ReferenceScenario::kHighFrontier) {
+    const double unknown_begin_x =
+        static_cast<double>(G1UnknownBeginX(map_scale)) *
+        resolution_m;
     description.regions.push_back(RectangleRegion(
         ScenarioRegion::Kind::kUnknown,
         unknown_begin_x, 0.0, description.width_m,
@@ -451,12 +632,437 @@ template <class T>
   return input;
 }
 
+class ProxyCellGenerator final {
+ public:
+  ProxyCellGenerator(
+      const std::string_view seed_hex,
+      const MapScale scale) {
+    state_ = 1469598103934665603ULL;
+    for (const char value : seed_hex) {
+      state_ ^= static_cast<std::uint64_t>(
+          static_cast<unsigned char>(value));
+      state_ *= 1099511628211ULL;
+    }
+    state_ ^= static_cast<std::uint64_t>(
+        static_cast<unsigned int>(scale) + 1U) *
+        0x9e3779b97f4a7c15ULL;
+    if (state_ == 0U) {
+      state_ = 0x6a09e667f3bcc909ULL;
+    }
+  }
+
+  [[nodiscard]] std::uint64_t Next() {
+    state_ ^= state_ >> 12U;
+    state_ ^= state_ << 25U;
+    state_ ^= state_ >> 27U;
+    return state_ * 2685821657736338717ULL;
+  }
+
+ private:
+  std::uint64_t state_{};
+};
+
+[[nodiscard]] bool G1ProtectedCell(
+    const std::size_t x, const std::size_t y,
+    const MultiscaleDimensions& dimensions,
+    const MapScale scale,
+    const G1ReferenceScenario reference) {
+  const std::size_t ground_start_x = 1U;
+  const std::size_t ground_y = dimensions.height / 2U - 1U;
+  const std::size_t ground_goal_x =
+      ground_start_x +
+      static_cast<std::size_t>(
+          dimensions.ground_distance_m /
+          dimensions.resolution_m);
+  const std::size_t hopper_start_x = 4U;
+  const std::size_t hopper_goal_x =
+      scale == MapScale::kTenMeter &&
+              reference == G1ReferenceScenario::kHighFrontier
+          ? hopper_start_x
+          : hopper_start_x +
+                static_cast<std::size_t>(
+                    dimensions.hopper_distance_m /
+                    dimensions.resolution_m);
+  const std::size_t hopper_start_y =
+      scale == MapScale::kTenMeter &&
+              reference == G1ReferenceScenario::kHighFrontier
+          ? 7U
+          : ground_y;
+  const std::size_t hopper_goal_y =
+      scale == MapScale::kTenMeter &&
+              reference == G1ReferenceScenario::kHighFrontier
+          ? hopper_start_y +
+                static_cast<std::size_t>(
+                    dimensions.hopper_distance_m /
+                    dimensions.resolution_m)
+          : ground_y;
+  const auto near = [x, y](
+                        const std::size_t protected_x,
+                        const std::size_t protected_y,
+                        const std::size_t radius) {
+    const std::size_t dx =
+        x > protected_x ? x - protected_x : protected_x - x;
+    const std::size_t dy =
+        y > protected_y ? y - protected_y : protected_y - y;
+    return dx <= radius && dy <= radius;
+  };
+  const std::size_t protected_ground_goal_x =
+      reference == G1ReferenceScenario::kHighFrontier
+          ? std::min(
+                ground_goal_x,
+                G1UnknownBeginX(scale) - 1U)
+          : ground_goal_x;
+  const bool ground_corridor =
+      x >= ground_start_x && x <= protected_ground_goal_x &&
+      (y > ground_y ? y - ground_y : ground_y - y) <= 1U;
+  const bool ten_meter_hopper_corridor =
+      scale == MapScale::kTenMeter &&
+      reference == G1ReferenceScenario::kHighFrontier &&
+      x >= hopper_start_x - 1U &&
+      x <= hopper_start_x + 1U &&
+      y >= hopper_start_y && y <= hopper_goal_y;
+  return ground_corridor || ten_meter_hopper_corridor ||
+         near(ground_start_x, ground_y, 1U) ||
+         near(ground_goal_x, ground_y, 1U) ||
+         (scale == MapScale::kTenMeter &&
+          (near(hopper_start_x, hopper_start_y, 3U) ||
+           near(hopper_goal_x, hopper_goal_y, 1U)));
+}
+
+[[nodiscard]] std::vector<std::uint8_t>
+GenerateG1ProxyObstacleMask(
+    const MapScale scale,
+    const G1ReferenceScenario reference,
+    const bool reserve_hopper_endpoints) {
+  constexpr std::array<std::array<int, 2U>, 9U> offsets{{
+      {0, 0},
+      {1, 0},
+      {0, 1},
+      {-1, 0},
+      {0, -1},
+      {1, 1},
+      {-1, 1},
+      {-1, -1},
+      {1, -1},
+  }};
+  const MultiscaleDimensions dimensions = DimensionsFor(scale);
+  const G1ReferenceSpec source = G1ReferenceFor(reference);
+  const std::size_t cell_count =
+      dimensions.width * dimensions.height;
+  const std::size_t target_count =
+      static_cast<std::size_t>(std::llround(
+          source.hard_obstacle_fraction *
+          static_cast<double>(cell_count)));
+  const std::size_t eligible_width =
+      reference == G1ReferenceScenario::kHighFrontier
+          ? G1UnknownBeginX(scale)
+          : dimensions.width;
+  std::vector<std::uint8_t> mask(cell_count, 0U);
+  ProxyCellGenerator generator(source.proxy_seed_hex, scale);
+  std::size_t placed = 0U;
+  const std::size_t maximum_attempts =
+      cell_count * 16U + target_count * 64U;
+  for (std::size_t attempt = 0U;
+       attempt < maximum_attempts && placed < target_count;
+       ++attempt) {
+    const std::size_t anchor_x =
+        static_cast<std::size_t>(
+            generator.Next() % eligible_width);
+    const std::size_t anchor_y =
+        static_cast<std::size_t>(
+            generator.Next() % dimensions.height);
+    const std::size_t cluster_size =
+        5U + static_cast<std::size_t>(generator.Next() % 5U);
+    const std::size_t rotation =
+        static_cast<std::size_t>(
+            generator.Next() % (offsets.size() - 1U));
+    for (std::size_t member = 0U;
+         member < cluster_size && placed < target_count;
+         ++member) {
+      const auto& offset =
+          member == 0U
+              ? offsets.front()
+              : offsets[
+                    1U +
+                    (rotation + member - 1U) %
+                        (offsets.size() - 1U)];
+      const auto candidate_x =
+          static_cast<std::ptrdiff_t>(anchor_x) + offset[0];
+      const auto candidate_y =
+          static_cast<std::ptrdiff_t>(anchor_y) + offset[1];
+      if (candidate_x < 0 || candidate_y < 0 ||
+          candidate_x >= static_cast<std::ptrdiff_t>(eligible_width) ||
+          candidate_y >=
+              static_cast<std::ptrdiff_t>(dimensions.height)) {
+        continue;
+      }
+      const std::size_t x =
+          static_cast<std::size_t>(candidate_x);
+      const std::size_t y =
+          static_cast<std::size_t>(candidate_y);
+      const std::size_t index = y * dimensions.width + x;
+      if (mask[index] != 0U ||
+          G1ProtectedCell(
+              x, y, dimensions, scale, reference)) {
+        continue;
+      }
+      mask[index] = 1U;
+      ++placed;
+    }
+  }
+  std::optional<G1HopperEndpoints> reserved_hopper;
+  if (reserve_hopper_endpoints &&
+      scale != MapScale::kTenMeter) {
+    reserved_hopper =
+        SelectG1HopperEndpoints(scale, reference);
+    for (std::size_t y = 0U; y < dimensions.height; ++y) {
+      for (std::size_t x = 0U; x < eligible_width; ++x) {
+        const std::size_t minimum_x =
+            reserved_hopper->start_x > 1U
+                ? reserved_hopper->start_x - 1U
+                : 0U;
+        const std::size_t maximum_x =
+            std::min(
+                reserved_hopper->goal_x + 1U,
+                eligible_width - 1U);
+        const std::size_t minimum_y =
+            reserved_hopper->start_y > 1U
+                ? reserved_hopper->start_y - 1U
+                : 0U;
+        const std::size_t maximum_y =
+            std::min(
+                reserved_hopper->start_y + 1U,
+                dimensions.height - 1U);
+        const std::size_t index = y * dimensions.width + x;
+        if (x >= minimum_x && x <= maximum_x &&
+            y >= minimum_y && y <= maximum_y &&
+            mask[index] != 0U) {
+          mask[index] = 0U;
+          --placed;
+        }
+      }
+    }
+  }
+  const std::size_t fallback_offset =
+      static_cast<std::size_t>(generator.Next() % cell_count);
+  for (std::size_t step = 0U;
+       step < cell_count && placed < target_count;
+       ++step) {
+    const std::size_t index =
+        (fallback_offset + step) % cell_count;
+    const std::size_t x = index % dimensions.width;
+    const std::size_t y = index / dimensions.width;
+    const bool hopper_reserved =
+        reserved_hopper.has_value() &&
+        x + 1U >= reserved_hopper->start_x &&
+        x <= reserved_hopper->goal_x + 1U &&
+        y + 1U >= reserved_hopper->start_y &&
+        y <= reserved_hopper->start_y + 1U;
+    if (x >= eligible_width || mask[index] != 0U ||
+        hopper_reserved ||
+        G1ProtectedCell(
+            x, y, dimensions, scale, reference)) {
+      continue;
+    }
+    mask[index] = 1U;
+    ++placed;
+  }
+  if (placed != target_count) {
+    throw std::runtime_error{
+        "G1 proxy obstacle placement exhausted"};
+  }
+  return mask;
+}
+
+[[nodiscard]] G1HopperEndpoints
+SelectG1HopperEndpoints(
+    const MapScale scale,
+    const G1ReferenceScenario reference) {
+  const MultiscaleDimensions dimensions = DimensionsFor(scale);
+  const std::vector<std::uint8_t> hard_obstacles =
+      GenerateG1ProxyObstacleMask(scale, reference, false);
+  const std::size_t known_width =
+      reference == G1ReferenceScenario::kHighFrontier
+          ? G1UnknownBeginX(scale)
+          : dimensions.width;
+  const std::size_t hop_cells =
+      static_cast<std::size_t>(
+          dimensions.hopper_distance_m /
+          dimensions.resolution_m);
+  std::vector<std::uint8_t> safe(
+      dimensions.width * dimensions.height, 0U);
+  for (std::size_t y = 1U; y + 1U < dimensions.height; ++y) {
+    for (std::size_t x = 1U; x + 1U < known_width; ++x) {
+      bool footprint_safe = true;
+      for (std::size_t covered_y = y - 1U;
+           covered_y <= y + 1U && footprint_safe;
+           ++covered_y) {
+        for (std::size_t covered_x = x - 1U;
+             covered_x <= x + 1U; ++covered_x) {
+          if (hard_obstacles[
+                  covered_y * dimensions.width + covered_x] != 0U) {
+            footprint_safe = false;
+            break;
+          }
+        }
+      }
+      if (footprint_safe) {
+        safe[y * dimensions.width + x] = 1U;
+      }
+    }
+  }
+  std::vector<std::array<std::size_t, 2U>> unsafe_cells;
+  unsafe_cells.reserve(safe.size());
+  for (std::size_t y = 0U; y < dimensions.height; ++y) {
+    for (std::size_t x = 0U; x < known_width; ++x) {
+      if (safe[y * dimensions.width + x] == 0U) {
+        unsafe_cells.push_back({x, y});
+      }
+    }
+  }
+  std::optional<G1HopperEndpoints> selected;
+  double selected_clearance_squared = -1.0;
+  for (std::size_t y = 1U; y + 1U < dimensions.height; ++y) {
+    for (std::size_t x = 1U;
+         x + hop_cells + 1U < known_width; ++x) {
+      const std::size_t goal_x = x + hop_cells;
+      if (safe[y * dimensions.width + x] == 0U ||
+          safe[y * dimensions.width + goal_x] == 0U) {
+        continue;
+      }
+      double clearance_squared =
+          std::numeric_limits<double>::infinity();
+      for (const auto& unsafe : unsafe_cells) {
+        for (const std::size_t endpoint_x : {x, goal_x}) {
+          const double dx =
+              static_cast<double>(endpoint_x) -
+              static_cast<double>(unsafe[0]);
+          const double dy =
+              static_cast<double>(y) -
+              static_cast<double>(unsafe[1]);
+          clearance_squared = std::min(
+              clearance_squared, dx * dx + dy * dy);
+        }
+      }
+      if (clearance_squared > selected_clearance_squared) {
+        selected_clearance_squared = clearance_squared;
+        selected = G1HopperEndpoints{x, y, goal_x, y};
+      }
+    }
+  }
+  if (!selected.has_value()) {
+    throw std::runtime_error{
+        "G1 proxy mask has no Hopper landing pair"};
+  }
+  return *selected;
+}
+
+[[nodiscard]] MapSnapshotInput G1MultiscaleMapInput(
+    const PlatformType platform_type,
+    const ScenarioDescription& description) {
+  if (!description.g1_reference.has_value()) {
+    throw std::invalid_argument{
+        "G1 multiscale map requires provenance"};
+  }
+  ScenarioDescription all_known = description;
+  all_known.scene = MapScenario::kOpenKnown;
+  all_known.regions.clear();
+  MapSnapshotInput input =
+      MultiscaleMapInput(platform_type, all_known);
+  const char platform_digit =
+      platform_type == PlatformType::kWheeled
+          ? '1'
+          : (platform_type == PlatformType::kLegged ? '2' : '3');
+  const auto reference =
+      description.g1_reference->reference;
+  input.snapshot_ref =
+      Ref(
+          "multiscale-g1-map-" +
+              std::to_string(static_cast<int>(platform_type)) +
+              "-" +
+              std::to_string(static_cast<int>(description.scale)) +
+              "-" +
+              std::to_string(static_cast<int>(reference)),
+          platform_digit);
+  input.immutable_data_handle =
+      "multiscale-g1-map-handle-" +
+      std::to_string(static_cast<int>(platform_type)) +
+      "-" +
+      std::to_string(static_cast<int>(description.scale)) +
+      "-" +
+      std::to_string(static_cast<int>(reference));
+  input.hard_obstacle_mask =
+      GenerateG1ProxyObstacleMask(
+          description.scale, reference, true);
+  if (reference == G1ReferenceScenario::kHighFrontier) {
+    const MultiscaleDimensions dimensions =
+        DimensionsFor(description.scale);
+    const std::size_t unknown_begin_x =
+        G1UnknownBeginX(description.scale);
+    for (std::size_t y = 0U; y < dimensions.height; ++y) {
+      for (std::size_t x = unknown_begin_x;
+           x < dimensions.width; ++x) {
+        const std::size_t index = y * dimensions.width + x;
+        input.known_mask[index] = 0U;
+        input.confidence[index] = 0.0F;
+        input.hard_obstacle_mask[index] = 0U;
+      }
+    }
+  }
+  return input;
+}
+
+void AddG1ProxyRegions(
+    ScenarioDescription& description,
+    const MapSnapshotInput& input) {
+  const GridGeometry& geometry = input.geometry;
+  for (std::size_t y = 0U; y < geometry.height; ++y) {
+    for (std::size_t x = 0U; x < geometry.width; ++x) {
+      const std::size_t index = y * geometry.width + x;
+      if (input.hard_obstacle_mask[index] == 0U) {
+        continue;
+      }
+      const double minimum_x =
+          geometry.origin_m.x +
+          static_cast<double>(x) * geometry.resolution_m;
+      const double minimum_y =
+          geometry.origin_m.y +
+          static_cast<double>(y) * geometry.resolution_m;
+      description.regions.push_back(RectangleRegion(
+          ScenarioRegion::Kind::
+              kSyntheticTerrainObstacleProxy,
+          minimum_x, minimum_y,
+          minimum_x + geometry.resolution_m,
+          minimum_y + geometry.resolution_m));
+    }
+  }
+}
+
 [[nodiscard]] std::shared_ptr<const ImmutableMapSnapshot>
 MakeMap(
     const PlatformType platform_type,
     const MapScenario map_scenario) {
   auto created = ImmutableMapSnapshot::Create(
       BaseMapInput(platform_type, map_scenario));
+  if (!IsOk(created)) {
+    const Error& error = std::get<Error>(created);
+    throw std::runtime_error{
+        error.field_path + ": " + error.message};
+  }
+  return std::get<
+      std::shared_ptr<const ImmutableMapSnapshot>>(
+      std::move(created));
+}
+
+[[nodiscard]] std::shared_ptr<const ImmutableMapSnapshot>
+MakeG1MultiscaleMap(
+    const PlatformType platform_type,
+    ScenarioDescription& description) {
+  MapSnapshotInput input =
+      G1MultiscaleMapInput(platform_type, description);
+  AddG1ProxyRegions(description, input);
+  auto created =
+      ImmutableMapSnapshot::Create(std::move(input));
   if (!IsOk(created)) {
     const Error& error = std::get<Error>(created);
     throw std::runtime_error{
@@ -909,6 +1515,8 @@ MakeMultiscaleAlgorithmConfig(
       DimensionsFor(map_scale).resolution_m;
   config.wheeled.state_lattice.xy_resolution_m = resolution_m;
   config.legged.pose_lattice.xy_resolution_m = resolution_m;
+  config.hopper.maximum_landing_regions = 64U;
+  config.hopper.maximum_graph_nodes = 64U;
   return std::make_shared<const PlannerAlgorithmConfig>(
       std::move(config));
 }
@@ -955,7 +1563,7 @@ MakeMultiscaleAlgorithmConfig(
               {
                   .center = {},
                   .half_extent =
-                      {1000.0, 1000.0, 1000.0},
+                      {2000.0, 2000.0, 2000.0},
               },
           .valid_from =
               ClockStamp{
@@ -1473,6 +2081,60 @@ SystemScenario MakeMultiscaleSystemScenario(
           std::to_string(static_cast<int>(map_scale)) +
           "-" +
           std::to_string(static_cast<int>(map_scenario)),
+      .request_time =
+          ClockStamp{
+              "mission", std::chrono::nanoseconds{100}},
+      .state_time =
+          ClockStamp{
+              "mission", std::chrono::nanoseconds{100}},
+      .frame_id = "map",
+      .platform_type = platform_type,
+      .current_state =
+          MultiscaleStateFor(platform_type, description),
+      .goal = MultiscaleGoalFor(platform_type, description),
+      .map_snapshot = std::move(map),
+      .safety_capability = std::move(capability),
+      .algorithm_config = std::move(config),
+      .capability_bindings = std::move(bindings),
+  };
+  const std::size_t cache_capacity =
+      request.algorithm_config->projection_cache_capacity;
+  return {
+      .request = std::move(request),
+      .registry = std::move(registry),
+      .projection_cache =
+          std::make_unique<SafeProjectionCache>(
+              cache_capacity),
+      .description = std::move(description),
+  };
+}
+
+SystemScenario MakeMultiscaleSystemScenario(
+    const PlatformType platform_type,
+    const MapScale map_scale,
+    const G1ReferenceScenario reference_scenario) {
+  ScenarioDescription description =
+      DescribeG1MultiscaleScenario(
+          platform_type, map_scale, reference_scenario);
+  auto map =
+      MakeG1MultiscaleMap(platform_type, description);
+  auto capability =
+      MakeMultiscaleCapability(platform_type, map_scale);
+  auto config =
+      MakeMultiscaleAlgorithmConfig(platform_type, map_scale);
+  ResolvedCapabilityBindings bindings =
+      MakeBindings(*capability, platform_type);
+  auto registry =
+      std::make_shared<const FixedSystemRegistry>(
+          map, capability, config, bindings, RegistryFault::kNone);
+  PlanningRequest request{
+      .request_id =
+          "multiscale-g1-request-" +
+          std::to_string(static_cast<int>(platform_type)) +
+          "-" +
+          std::to_string(static_cast<int>(map_scale)) +
+          "-" +
+          std::to_string(static_cast<int>(reference_scenario)),
       .request_time =
           ClockStamp{
               "mission", std::chrono::nanoseconds{100}},
