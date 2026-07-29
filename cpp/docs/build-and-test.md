@@ -148,3 +148,24 @@ Release benchmark 输出写入 D 盘。共享核心基准示例：
 
 benchmark wrapper 可以读取 `steady_clock`；运行时规划器、能力配置和请求合同
 均不得携带 clock deadline、剩余时长或 benchmark profile。
+
+## 多尺度 PlannerV3 重复实验
+
+Release 构建会生成独立的多尺度实验 runner。它覆盖 Wheel、Legged、Hopper
+三类平台，10 m、100 m、1000 m 三档尺度，以及 open、detour、frontier
+三类场景，共 27 个组合。默认每个组合执行一次 cold call、3 次 warmup 和
+30 次 measured call；1 秒 P95 目标只在所有调用自然结束后统计，不是 deadline。
+
+```powershell
+& 'D:/APP/CMake/bin/cmake.exe' --build `
+  'D:/xunce/build/path-planner-v3/windows-msvc-release' `
+  --target lpp_v3_multiscale_experiment
+
+& 'D:/xunce/build/path-planner-v3/windows-msvc-release/lpp_v3_multiscale_experiment.exe' `
+  --output-root D:/xunce/out/planner-v3-multiscale
+```
+
+runner 在输出根目录写入 `manifest.json`、`latency-samples.jsonl`、
+`summary.json` 和 `responses.jsonl`。计时区间从调用
+`planner->Plan(request)` 前立即开始，到
+`JsonCodec::EncodePlanningResponse(response)` 完成后才结束。

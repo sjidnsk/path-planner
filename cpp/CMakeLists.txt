@@ -328,6 +328,19 @@ target_link_libraries(
   PUBLIC lpp_v3_api lpp_v3_benchmark_report
   PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
 
+add_library(
+  lpp_v3_multiscale_experiment_lib
+  benchmarks/multiscale_experiment.cpp
+  tests/fixtures/system/planner_v3_system_fixture.cpp)
+target_include_directories(
+  lpp_v3_multiscale_experiment_lib
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks"
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+target_link_libraries(
+  lpp_v3_multiscale_experiment_lib
+  PUBLIC lpp_v3_api
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
 set_target_properties(
   lpp_v3_project_options PROPERTIES EXPORT_NAME project_options)
 set_target_properties(
@@ -738,6 +751,26 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_multiscale_scenario_tests
     TEST_PREFIX "lpp_v3_multiscale_scenario.")
+
+  add_executable(
+    lpp_v3_multiscale_experiment_tests
+    tests/unit/benchmark/multiscale_experiment_test.cpp)
+  target_include_directories(
+    lpp_v3_multiscale_experiment_tests
+    PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+  target_link_libraries(
+    lpp_v3_multiscale_experiment_tests
+    PRIVATE lpp_v3_multiscale_experiment_lib GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  set_target_properties(
+    lpp_v3_multiscale_experiment_tests
+    PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+  gtest_discover_tests(
+    lpp_v3_multiscale_experiment_tests
+    TEST_PREFIX "lpp_v3_multiscale_experiment.")
 endif()
 
 if(LPP_V3_BUILD_BENCHMARKS)
@@ -758,6 +791,14 @@ if(LPP_V3_BUILD_BENCHMARKS)
     lpp_v3_api_benchmark
     PROPERTIES
       RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/benchmarks")
+
+  add_executable(
+    lpp_v3_multiscale_experiment
+    benchmarks/multiscale_planner_experiment.cpp)
+  target_link_libraries(
+    lpp_v3_multiscale_experiment
+    PRIVATE lpp_v3_multiscale_experiment_lib
+            lpp_v3_project_options lpp_v3_project_warnings)
 
   add_executable(
     lpp_v3_shared_core_benchmark benchmarks/shared_core_benchmark.cpp)
