@@ -719,6 +719,25 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_benchmark_tests
     TEST_PREFIX "lpp_v3_benchmark.")
+
+  add_executable(
+    lpp_v3_multiscale_scenario_tests
+    tests/fixtures/system/planner_v3_system_fixture.cpp
+    tests/unit/benchmark/multiscale_scenario_test.cpp)
+  target_include_directories(
+    lpp_v3_multiscale_scenario_tests
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+  target_link_libraries(
+    lpp_v3_multiscale_scenario_tests
+    PRIVATE lpp_v3_api GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  set_target_properties(
+    lpp_v3_multiscale_scenario_tests
+    PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+  gtest_discover_tests(
+    lpp_v3_multiscale_scenario_tests
+    TEST_PREFIX "lpp_v3_multiscale_scenario.")
 endif()
 
 if(LPP_V3_BUILD_BENCHMARKS)

@@ -25,6 +25,191 @@ using namespace std::chrono_literals;
 constexpr std::size_t kGroundWidth = 12U;
 constexpr std::size_t kGroundHeight = 8U;
 
+struct MultiscaleDimensions final {
+  std::size_t width;
+  std::size_t height;
+  double resolution_m;
+  double ground_distance_m;
+  double hopper_distance_m;
+};
+
+struct DetourLayout final {
+  std::size_t barrier_x;
+  std::size_t gap_begin_y;
+  std::size_t gap_end_y;
+};
+
+[[nodiscard]] MultiscaleDimensions DimensionsFor(
+    const MapScale map_scale) {
+  switch (map_scale) {
+    case MapScale::kTenMeter:
+      return {24U, 24U, 0.5, 8.0, 4.0};
+    case MapScale::kHundredMeter:
+      return {60U, 40U, 2.0, 80.0, 8.0};
+    case MapScale::kThousandMeter:
+      return {240U, 40U, 5.0, 500.0, 10.0};
+  }
+  throw std::invalid_argument{"unsupported multiscale map scale"};
+}
+
+[[nodiscard]] double GroundPrimitiveDistanceFor(
+    const MapScale map_scale) {
+  switch (map_scale) {
+    case MapScale::kTenMeter:
+      return 1.0;
+    case MapScale::kHundredMeter:
+      return 4.0;
+    case MapScale::kThousandMeter:
+      return 10.0;
+  }
+  throw std::invalid_argument{"unsupported multiscale map scale"};
+}
+
+[[nodiscard]] ScenarioRegion RectangleRegion(
+    const ScenarioRegion::Kind kind,
+    const double minimum_x, const double minimum_y,
+    const double maximum_x, const double maximum_y) {
+  return {
+      .kind = kind,
+      .polygon_xy_m =
+          {
+              {minimum_x, minimum_y},
+              {maximum_x, minimum_y},
+              {maximum_x, maximum_y},
+              {minimum_x, maximum_y},
+          },
+  };
+}
+
+[[nodiscard]] DetourLayout DetourFor(
+    const PlatformType platform_type,
+    const ScenarioDescription& description) {
+  const MultiscaleDimensions dimensions =
+      DimensionsFor(description.scale);
+  const std::size_t height = dimensions.height;
+  const std::size_t center_y =
+      static_cast<std::size_t>(
+          description.start_xy_m.y / dimensions.resolution_m);
+  const std::size_t gap_begin_y =
+      std::min(
+          center_y > 0U ? center_y - 1U : 0U,
+          height - 3U);
+  return {
+      .barrier_x =
+          platform_type == PlatformType::kHopper
+              ? 0U
+              : static_cast<std::size_t>(
+                    (description.start_xy_m.x +
+                     description.goal_xy_m.x) /
+                    (2.0 * dimensions.resolution_m)),
+      .gap_begin_y = gap_begin_y,
+      .gap_end_y = gap_begin_y + 3U,
+  };
+}
+
+[[nodiscard]] std::size_t UnknownBeginX(
+    const PlatformType platform_type,
+    const ScenarioDescription& description) {
+  const MultiscaleDimensions dimensions =
+      DimensionsFor(description.scale);
+  if (platform_type == PlatformType::kHopper) {
+    return static_cast<std::size_t>(
+               description.goal_xy_m.x / dimensions.resolution_m) +
+           2U;
+  }
+  const double primitive_m =
+      GroundPrimitiveDistanceFor(description.scale);
+  const double known_distance_m =
+      std::floor(
+          0.6 * description.nominal_plan_distance_m /
+          primitive_m) *
+      primitive_m;
+  return 2U + static_cast<std::size_t>(
+                  known_distance_m / dimensions.resolution_m);
+}
+
+[[nodiscard]] ScenarioDescription DescribeMultiscaleScenario(
+    const PlatformType platform_type,
+    const MapScale map_scale,
+    const MapScenario map_scenario) {
+  const MultiscaleDimensions dimensions = DimensionsFor(map_scale);
+  const bool hopper = platform_type == PlatformType::kHopper;
+  const double distance =
+      hopper ? dimensions.hopper_distance_m
+             : dimensions.ground_distance_m;
+  const double physical_height_m =
+      static_cast<double>(dimensions.height) *
+      dimensions.resolution_m;
+  double start_x = 1.5 * dimensions.resolution_m;
+  double start_y =
+      physical_height_m / 2.0 - dimensions.resolution_m / 2.0;
+  if (hopper) {
+    if (map_scenario ==
+        MapScenario::kUnknownGoalWithSafeFrontier) {
+      start_x =
+          distance + 2.5 * dimensions.resolution_m;
+      start_y = start_x;
+    } else {
+      start_x =
+          std::floor(
+              (physical_height_m / 2.0 - distance / 2.0) /
+              dimensions.resolution_m) *
+              dimensions.resolution_m +
+          dimensions.resolution_m / 2.0;
+    }
+  }
+  ScenarioDescription description{
+      .scale = map_scale,
+      .scene = map_scenario,
+      .width_m =
+          static_cast<double>(dimensions.width) *
+          dimensions.resolution_m,
+      .height_m = physical_height_m,
+      .start_xy_m = {start_x, start_y},
+      .goal_xy_m = {start_x + distance, start_y},
+      .nominal_plan_distance_m = distance,
+      .expected_outcome =
+          map_scenario ==
+                      MapScenario::kUnknownGoalWithSafeFrontier &&
+                  !hopper
+              ? ExpectedExperimentOutcome::
+                    kSafeFrontierReferenceReady
+              : ExpectedExperimentOutcome::kNewReferenceReady,
+  };
+
+  if (map_scenario == MapScenario::kDetour) {
+    const DetourLayout layout =
+        DetourFor(platform_type, description);
+    const double barrier_x =
+        static_cast<double>(layout.barrier_x) *
+        dimensions.resolution_m;
+    description.regions.push_back(RectangleRegion(
+        ScenarioRegion::Kind::kHardObstacle,
+        barrier_x, 0.0,
+        barrier_x + dimensions.resolution_m,
+        static_cast<double>(layout.gap_begin_y) *
+            dimensions.resolution_m));
+    description.regions.push_back(RectangleRegion(
+        ScenarioRegion::Kind::kHardObstacle,
+        barrier_x,
+        static_cast<double>(layout.gap_end_y) *
+            dimensions.resolution_m,
+        barrier_x + dimensions.resolution_m,
+        description.height_m));
+  } else if (
+      map_scenario ==
+      MapScenario::kUnknownGoalWithSafeFrontier) {
+    const double unknown_begin_x = static_cast<double>(
+        UnknownBeginX(platform_type, description)) *
+        dimensions.resolution_m;
+    description.regions.push_back(RectangleRegion(
+        ScenarioRegion::Kind::kUnknown,
+        unknown_begin_x, 0.0, description.width_m,
+        description.height_m));
+  }
+  return description;
+}
+
 [[nodiscard]] ContentRef Ref(
     std::string id, const char digit) {
   return {
@@ -170,12 +355,124 @@ template <class T>
   return input;
 }
 
+[[nodiscard]] MapSnapshotInput MultiscaleMapInput(
+    const PlatformType platform_type,
+    const ScenarioDescription& description) {
+  const MultiscaleDimensions dimensions =
+      DimensionsFor(description.scale);
+  const std::size_t width = dimensions.width;
+  const std::size_t height = dimensions.height;
+  const std::size_t count = width * height;
+  const char platform_digit =
+      platform_type == PlatformType::kWheeled
+          ? '1'
+          : (platform_type == PlatformType::kLegged ? '2' : '3');
+  MapSnapshotInput input{
+      .snapshot_ref =
+          Ref("multiscale-map-" +
+                  std::to_string(
+                      static_cast<int>(platform_type)) +
+                  "-" +
+                  std::to_string(
+                      static_cast<int>(description.scale)) +
+                  "-" +
+                  std::to_string(
+                      static_cast<int>(description.scene)),
+              platform_digit),
+      .map_revision = 1U,
+      .immutable_data_handle =
+          "multiscale-map-handle-" +
+          std::to_string(static_cast<int>(platform_type)) +
+          "-" +
+          std::to_string(static_cast<int>(description.scale)) +
+          "-" +
+          std::to_string(static_cast<int>(description.scene)),
+      .source_time =
+          ClockStamp{"mission", std::chrono::nanoseconds{100}},
+      .bounds =
+          {
+              .minimum_m = {0.0, 0.0, -2.0},
+              .maximum_m =
+                  {
+                      description.width_m,
+                      description.height_m,
+                      8.0,
+                  },
+          },
+      .geometry =
+          {
+              .width = width,
+              .height = height,
+              .resolution_m = dimensions.resolution_m,
+              .origin_m = {0.0, 0.0},
+              .frame_id = "map",
+          },
+      .layer_manifest =
+          {
+              {LayerKind::kKnownMask, Ref("multiscale-known", '4')},
+              {LayerKind::kElevation, Ref("multiscale-elevation", '5')},
+              {LayerKind::kTerrainNormal, Ref("multiscale-normal", '6')},
+              {LayerKind::kRoughness, Ref("multiscale-roughness", '7')},
+              {LayerKind::kHardObstacle, Ref("multiscale-obstacle", '8')},
+              {LayerKind::kConfidence, Ref("multiscale-confidence", '9')},
+          },
+      .known_mask = std::vector<std::uint8_t>(count, 1U),
+      .elevation_m = std::vector<float>(count, 0.0F),
+      .normal_x = std::vector<float>(count, 0.0F),
+      .normal_y = std::vector<float>(count, 0.0F),
+      .normal_z = std::vector<float>(count, 1.0F),
+      .roughness_m = std::vector<float>(count, 0.0F),
+      .hard_obstacle_mask =
+          std::vector<std::uint8_t>(count, 0U),
+      .confidence = std::vector<float>(count, 1.0F),
+  };
+
+  if (description.scene == MapScenario::kDetour) {
+    const DetourLayout layout =
+        DetourFor(platform_type, description);
+    for (std::size_t y = 0U; y < height; ++y) {
+      if (y < layout.gap_begin_y || y >= layout.gap_end_y) {
+        input.hard_obstacle_mask[y * width + layout.barrier_x] = 1U;
+      }
+    }
+  } else if (
+      description.scene ==
+      MapScenario::kUnknownGoalWithSafeFrontier) {
+    const std::size_t unknown_begin_x =
+        UnknownBeginX(platform_type, description);
+    for (std::size_t y = 0U; y < height; ++y) {
+      for (std::size_t x = unknown_begin_x; x < width; ++x) {
+        const std::size_t index = y * width + x;
+        input.known_mask[index] = 0U;
+        input.confidence[index] = 0.0F;
+      }
+    }
+  }
+  return input;
+}
+
 [[nodiscard]] std::shared_ptr<const ImmutableMapSnapshot>
 MakeMap(
     const PlatformType platform_type,
     const MapScenario map_scenario) {
   auto created = ImmutableMapSnapshot::Create(
       BaseMapInput(platform_type, map_scenario));
+  if (!IsOk(created)) {
+    const Error& error = std::get<Error>(created);
+    throw std::runtime_error{
+        error.field_path + ": " + error.message};
+  }
+  return std::get<
+      std::shared_ptr<const ImmutableMapSnapshot>>(
+      std::move(created));
+}
+
+[[nodiscard]] std::shared_ptr<const ImmutableMapSnapshot>
+MakeMultiscaleMap(
+    const PlatformType platform_type,
+    const ScenarioDescription& description) {
+  auto created = ImmutableMapSnapshot::Create(
+      MultiscaleMapInput(platform_type, description));
   if (!IsOk(created)) {
     const Error& error = std::get<Error>(created);
     throw std::runtime_error{
@@ -432,6 +729,57 @@ MakeCapability(const PlatformType platform_type) {
       std::move(capability));
 }
 
+[[nodiscard]] std::shared_ptr<const SafetyCapabilityProfile>
+MakeMultiscaleCapability(
+    const PlatformType platform_type,
+    const MapScale map_scale) {
+  if (platform_type == PlatformType::kHopper) {
+    return MakeCapability(platform_type);
+  }
+  const double primitive_m =
+      GroundPrimitiveDistanceFor(map_scale);
+  SafetyCapabilityProfile capability =
+      platform_type == PlatformType::kWheeled
+          ? WheelCapability()
+          : LeggedCapabilityProfile();
+  if (platform_type == PlatformType::kWheeled) {
+    auto& wheel = std::get<WheeledCapability>(capability.content);
+    for (WheelMotionPrimitive& primitive :
+         wheel.motion_primitives) {
+      using Kind = WheelMotionPrimitive::Kind;
+      if (primitive.kind == Kind::kDriveForwardLine ||
+          primitive.kind == Kind::kDriveForwardArc ||
+          primitive.kind == Kind::kDriveReverseLine ||
+          primitive.kind == Kind::kDriveReverseArc) {
+        primitive.relative_end_pose.position_m.x *= primitive_m;
+        primitive.relative_end_pose.position_m.y *= primitive_m;
+        primitive.relative_end_pose.position_m.z *= primitive_m;
+        primitive.nominal_duration = DurationNanoseconds{
+            std::chrono::milliseconds{
+                static_cast<std::int64_t>(
+                    primitive_m * 1250.0)}};
+      }
+    }
+  } else {
+    auto& legged = std::get<LeggedCapability>(capability.content);
+    for (LeggedBodyPrimitive& primitive :
+         legged.motion_primitives) {
+      if (primitive.kind !=
+          LeggedBodyPrimitive::Kind::kSpin) {
+        primitive.body_frame_displacement_m.x *= primitive_m;
+        primitive.body_frame_displacement_m.y *= primitive_m;
+        primitive.body_frame_displacement_m.z *= primitive_m;
+        primitive.nominal_duration = DurationNanoseconds{
+            std::chrono::seconds{
+                static_cast<std::int64_t>(
+                    primitive_m * 2.0)}};
+      }
+    }
+  }
+  return std::make_shared<const SafetyCapabilityProfile>(
+      std::move(capability));
+}
+
 [[nodiscard]] CorridorConfig ValidCorridor() {
   return {
       .maximum_regions = 16U,
@@ -547,6 +895,20 @@ MakeAlgorithmConfig(const PlatformType) {
               .preallocated_memory_pools = true,
           },
   };
+  return std::make_shared<const PlannerAlgorithmConfig>(
+      std::move(config));
+}
+
+[[nodiscard]] std::shared_ptr<const PlannerAlgorithmConfig>
+MakeMultiscaleAlgorithmConfig(
+    const PlatformType platform_type,
+    const MapScale map_scale) {
+  PlannerAlgorithmConfig config =
+      *MakeAlgorithmConfig(platform_type);
+  const double resolution_m =
+      DimensionsFor(map_scale).resolution_m;
+  config.wheeled.state_lattice.xy_resolution_m = resolution_m;
+  config.legged.pose_lattice.xy_resolution_m = resolution_m;
   return std::make_shared<const PlannerAlgorithmConfig>(
       std::move(config));
 }
@@ -944,6 +1306,40 @@ class FixedSystemRegistry final
   };
 }
 
+[[nodiscard]] GoalRegion MultiscaleGoalFor(
+    const PlatformType platform_type,
+    const ScenarioDescription& description) {
+  GoalRegion goal{
+      .goal_id =
+          platform_type == PlatformType::kWheeled
+              ? "multiscale-wheel-goal"
+              : (platform_type == PlatformType::kLegged
+                     ? "multiscale-legged-goal"
+                     : "multiscale-hopper-goal"),
+      .target =
+          PointGoal{
+              .position_m =
+                  {
+                      description.goal_xy_m.x,
+                      description.goal_xy_m.y,
+                      0.0,
+                  },
+              .position_tolerance_m =
+                  platform_type == PlatformType::kHopper
+                      ? 0.5
+                      : 0.2,
+          },
+  };
+  if (platform_type == PlatformType::kHopper) {
+    goal.optional_yaw_interval =
+        CircularYawInterval{
+            .start_rad = 0.0,
+            .span_rad = 0.0,
+        };
+  }
+  return goal;
+}
+
 [[nodiscard]] PlatformState StateFor(
     const PlatformType platform_type) {
   if (platform_type == PlatformType::kHopper) {
@@ -961,6 +1357,40 @@ class FixedSystemRegistry final
           {
               2.5,
               3.5,
+              platform_type == PlatformType::kLegged
+                  ? 0.5
+                  : 0.0,
+          },
+      .yaw_rad = 0.0,
+      .linear_velocity_mps = {},
+      .yaw_rate_radps = 0.0,
+      .error_bounds = ZeroGroundError(),
+  };
+}
+
+[[nodiscard]] PlatformState MultiscaleStateFor(
+    const PlatformType platform_type,
+    const ScenarioDescription& description) {
+  if (platform_type == PlatformType::kHopper) {
+    return HopperState{
+        .position_m =
+            {
+                description.start_xy_m.x,
+                description.start_xy_m.y,
+                0.5,
+            },
+        .orientation_body_to_frame =
+            {1.0, 0.0, 0.0, 0.0},
+        .linear_velocity_mps = {},
+        .angular_velocity_radps = {},
+        .error_bounds = ZeroHopperError(),
+    };
+  }
+  return WheeledOrLeggedState{
+      .position_m =
+          {
+              description.start_xy_m.x,
+              description.start_xy_m.y,
               platform_type == PlatformType::kLegged
                   ? 0.5
                   : 0.0,
@@ -1015,6 +1445,59 @@ SystemScenario MakeSystemScenario(
       .projection_cache =
           std::make_unique<SafeProjectionCache>(
               cache_capacity),
+      .description = {},
+  };
+}
+
+SystemScenario MakeMultiscaleSystemScenario(
+    const PlatformType platform_type,
+    const MapScale map_scale,
+    const MapScenario map_scenario) {
+  ScenarioDescription description = DescribeMultiscaleScenario(
+      platform_type, map_scale, map_scenario);
+  auto map = MakeMultiscaleMap(platform_type, description);
+  auto capability =
+      MakeMultiscaleCapability(platform_type, map_scale);
+  auto config =
+      MakeMultiscaleAlgorithmConfig(platform_type, map_scale);
+  ResolvedCapabilityBindings bindings =
+      MakeBindings(*capability, platform_type);
+  auto registry =
+      std::make_shared<const FixedSystemRegistry>(
+          map, capability, config, bindings, RegistryFault::kNone);
+  PlanningRequest request{
+      .request_id =
+          "multiscale-request-" +
+          std::to_string(static_cast<int>(platform_type)) +
+          "-" +
+          std::to_string(static_cast<int>(map_scale)) +
+          "-" +
+          std::to_string(static_cast<int>(map_scenario)),
+      .request_time =
+          ClockStamp{
+              "mission", std::chrono::nanoseconds{100}},
+      .state_time =
+          ClockStamp{
+              "mission", std::chrono::nanoseconds{100}},
+      .frame_id = "map",
+      .platform_type = platform_type,
+      .current_state =
+          MultiscaleStateFor(platform_type, description),
+      .goal = MultiscaleGoalFor(platform_type, description),
+      .map_snapshot = std::move(map),
+      .safety_capability = std::move(capability),
+      .algorithm_config = std::move(config),
+      .capability_bindings = std::move(bindings),
+  };
+  const std::size_t cache_capacity =
+      request.algorithm_config->projection_cache_capacity;
+  return {
+      .request = std::move(request),
+      .registry = std::move(registry),
+      .projection_cache =
+          std::make_unique<SafeProjectionCache>(
+              cache_capacity),
+      .description = std::move(description),
   };
 }
 
