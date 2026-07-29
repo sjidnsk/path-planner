@@ -181,7 +181,27 @@ target_link_libraries(
     lpp_v3_cache)
 
 add_library(
+  lpp_v3_wheel
+  src/wheel/wheel_capability.cpp
+  src/wheel/wheel_corridor.cpp
+  src/wheel/wheel_lattice.cpp
+  src/wheel/wheel_planner.cpp
+  src/wheel/wheel_primitive.cpp
+  src/wheel/wheel_search.cpp
+  src/wheel/wheel_spline_optimizer.cpp
+  src/wheel/wheel_sweep_validator.cpp
+  src/wheel/wheel_timing.cpp)
+target_include_directories(
+  lpp_v3_wheel
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_wheel
+  PUBLIC lpp_v3_common
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
   lpp_v3_api
+  src/api/execution_arbitrator.cpp
   src/api/reference_bundle_builder.cpp)
 target_include_directories(
   lpp_v3_api
@@ -355,7 +375,31 @@ if(LPP_V3_BUILD_TESTS)
     TEST_PREFIX "lpp_v3_integration.")
 
   add_executable(
+    lpp_v3_wheel_tests
+    tests/unit/wheel/wheel_corridor_test.cpp
+    tests/unit/wheel/wheel_lattice_test.cpp
+    tests/unit/wheel/wheel_primitive_test.cpp
+    tests/unit/wheel/wheel_spline_optimizer_test.cpp
+    tests/unit/wheel/wheel_sweep_validator_test.cpp
+    tests/unit/wheel/wheel_timing_test.cpp
+    tests/integration/wheel/wheel_fault_matrix_test.cpp
+    tests/integration/wheel/wheel_planner_test.cpp
+    tests/integration/wheel/wheel_search_test.cpp
+    tests/property/wheel/wheel_reference_property_test.cpp)
+  target_include_directories(
+    lpp_v3_wheel_tests
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+  target_link_libraries(
+    lpp_v3_wheel_tests
+    PRIVATE lpp_v3_wheel GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_wheel_tests
+    TEST_PREFIX "lpp_v3_wheel.")
+
+  add_executable(
     lpp_v3_api_tests
+    tests/unit/api/execution_arbitrator_test.cpp
     tests/unit/api/reference_bundle_builder_test.cpp)
   target_link_libraries(
     lpp_v3_api_tests
@@ -373,5 +417,12 @@ if(LPP_V3_BUILD_BENCHMARKS)
   target_link_libraries(
     lpp_v3_shared_core_benchmark
     PRIVATE benchmark::benchmark lpp_v3_common
+            lpp_v3_project_options)
+
+  add_executable(
+    lpp_v3_wheel_benchmark benchmarks/wheel_planner_benchmark.cpp)
+  target_link_libraries(
+    lpp_v3_wheel_benchmark
+    PRIVATE benchmark::benchmark lpp_v3_wheel
             lpp_v3_project_options)
 endif()

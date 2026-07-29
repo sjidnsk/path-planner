@@ -1,0 +1,33 @@
+{
+  "schema_version": "path-planner-v3-wheel-benchmark-fixture/v1",
+  "suite_id": "wheel-declared-suite",
+  "platform_type": "WHEELED",
+  "map": {
+    "width": 12,
+    "height": 12,
+    "resolution_m": 1.0,
+    "known_fraction": 1.0,
+    "obstacle_density": 0.0
+  },
+  "route": {
+    "start_m": [4.5, 4.5, 0.0],
+    "goal_m": [5.5, 4.5, 0.0],
+    "straight_line_distance_m": 1.0
+  },
+  "determinism": {
+    "fixed_thread_count": 1,
+    "stable_candidate_order": true
+  },
+  "capability_config_ref": {
+    "id": "wheel-capability",
+    "revision": 1,
+    "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "algorithm_config_ref": {
+    "id": "wheel-algorithm",
+    "revision": 1,
+    "content_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "runtime_deadline": null,
+  "note": "Measures raw per-sample planning latency; no runtime cutoff is passed to WheelPlanner."
+}
