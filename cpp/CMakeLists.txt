@@ -11,6 +11,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Eigen3 5.0.1 EXACT CONFIG REQUIRED)
 find_package(nlohmann_json 3.12.0 EXACT CONFIG REQUIRED)
+find_package(double-conversion 3.4.0 EXACT CONFIG REQUIRED)
+find_path(LPP_V3_PICOSHA2_INCLUDE_DIR NAMES picosha2.h REQUIRED)
 
 add_library(lpp_v3_project_options INTERFACE)
 target_compile_features(lpp_v3_project_options INTERFACE cxx_std_20)
@@ -28,6 +30,45 @@ target_include_directories(
 target_link_libraries(
   lpp_v3_contracts
   PRIVATE Eigen3::Eigen lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
+  lpp_v3_wire_primitives
+  src/codec/jcs_canonicalizer.cpp
+  src/crypto/sha256.cpp)
+target_include_directories(
+  lpp_v3_wire_primitives
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  PRIVATE "${LPP_V3_PICOSHA2_INCLUDE_DIR}")
+target_link_libraries(
+  lpp_v3_wire_primitives
+  PUBLIC lpp_v3_contracts nlohmann_json::nlohmann_json
+  PRIVATE double-conversion::double-conversion
+          lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
+  lpp_v3_map
+  src/map/immutable_snapshot.cpp)
+target_include_directories(
+  lpp_v3_map
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_map
+  PUBLIC lpp_v3_contracts lpp_v3_wire_primitives
+         nlohmann_json::nlohmann_json
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
+  lpp_v3_codec
+  src/codec/json_codec.cpp
+  src/codec/semantic_validator.cpp)
+target_include_directories(
+  lpp_v3_codec
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_codec
+  PUBLIC lpp_v3_contracts lpp_v3_map lpp_v3_wire_primitives
+         nlohmann_json::nlohmann_json
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
 
 if(LPP_V3_BUILD_TESTS)
   enable_testing()
@@ -61,6 +102,44 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_references_tests
     TEST_PREFIX "lpp_v3_references.")
+
+  add_executable(
+    lpp_v3_map_tests tests/map/immutable_snapshot_test.cpp)
+  target_link_libraries(
+    lpp_v3_map_tests
+    PRIVATE lpp_v3_map GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_map_tests
+    TEST_PREFIX "lpp_v3_map.")
+
+  add_executable(
+    lpp_v3_crypto_tests tests/crypto/sha256_test.cpp)
+  target_link_libraries(
+    lpp_v3_crypto_tests
+    PRIVATE lpp_v3_wire_primitives GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_crypto_tests
+    TEST_PREFIX "lpp_v3_crypto.")
+
+  add_executable(
+    lpp_v3_codec_tests
+    tests/codec/jcs_canonicalizer_test.cpp
+    tests/codec/json_codec_test.cpp
+    tests/codec/semantic_validator_test.cpp)
+  target_compile_definitions(
+    lpp_v3_codec_tests
+    PRIVATE
+      LPP_V3_SCHEMA_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../schemas/v3")
+  target_link_libraries(
+    lpp_v3_codec_tests
+    PRIVATE lpp_v3_codec GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  add_dependencies(lpp_v3_codec_tests lpp_v3_crypto_tests)
+  gtest_discover_tests(
+    lpp_v3_codec_tests
+    TEST_PREFIX "lpp_v3_codec.")
 endif()
 
 if(LPP_V3_BUILD_BENCHMARKS)

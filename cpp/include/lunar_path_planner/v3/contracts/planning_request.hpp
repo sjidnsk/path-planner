@@ -8,6 +8,7 @@
 
 #include "lunar_path_planner/v3/contracts/profiles.hpp"
 #include "lunar_path_planner/v3/contracts/status.hpp"
+#include "lunar_path_planner/v3/map/immutable_snapshot.hpp"
 
 namespace lunar::planning::v3 {
 
@@ -66,7 +67,6 @@ struct GoalRegion final {
   std::vector<MetadataEntry> task_metadata;
 };
 
-class ImmutableMapSnapshot;
 class LearnedCostSnapshot;
 class MotionModel;
 class AnalyticCostModel;
