@@ -17,7 +17,7 @@ from matplotlib.patches import Polygon
 
 
 SCALES = ("TEN_METER", "HUNDRED_METER", "THOUSAND_METER")
-SCENES = ("OPEN", "DETOUR", "FRONTIER")
+SCENES = ("G1_LOW_KNOWN", "G1_MEDIUM_KNOWN", "G1_HIGH_FRONTIER")
 PLATFORM_STYLES = {
     "WHEELED": {"color": "#0072B2", "linestyle": "-", "marker": "o"},
     "LEGGED": {"color": "#D55E00", "linestyle": "--", "marker": "^"},
@@ -61,15 +61,32 @@ def _region_polygons(regions: Any, key: str) -> list[list[tuple[float, float]]]:
     aliases = {
         "known": {"known", "known_terrain"},
         "unknown": {"unknown", "unknown_region"},
-        "obstacles": {"obstacle", "obstacles"},
+        "obstacles": {"obstacle", "obstacles", "hard_obstacle"},
+        "proxy_obstacles": {"synthetic_terrain_obstacle_proxy"},
     }[key]
     return [
         points
         for region in regions
         if isinstance(region, dict)
         and str(region.get("kind", "")).lower() in aliases
+        and (key != "proxy_obstacles" or _is_synthetic_proxy(region))
         and (points := _polygon_points(region.get("polygon_xy_m", [])))
     ]
+
+
+def _is_synthetic_proxy(region: dict[str, Any]) -> bool:
+    provenance = region.get("provenance", region.get("source_kind"))
+    if isinstance(provenance, dict):
+        provenance = provenance.get("source_kind", provenance.get("micro_source_kind"))
+    return provenance == "synthetic_terrain_obstacle_proxy/v1"
+
+
+def _merged_region_polygons(records: list[dict[str, Any]], key: str) -> list[list[tuple[float, float]]]:
+    unique: dict[tuple[tuple[float, float], ...], list[tuple[float, float]]] = {}
+    for record in records:
+        for points in _region_polygons(record.get("regions", []), key):
+            unique.setdefault(tuple(points), points)
+    return list(unique.values())
 
 
 def _map_bounds(value: Any) -> tuple[float, float, float, float]:
@@ -96,13 +113,15 @@ def _draw_scenario_panel(ax: Any, records: list[dict[str, Any]], scale: str, sce
 
     xmin, xmax, ymin, ymax = _map_bounds(source.get("map_bounds"))
     ax.set_facecolor("#f2ead6")
-    regions = source.get("regions", {})
-    for points in _region_polygons(regions, "known"):
-        ax.add_patch(Polygon(points, closed=True, facecolor="#d9c7a2", edgecolor="#8c795a", alpha=0.65))
-    for points in _region_polygons(regions, "unknown"):
-        ax.add_patch(Polygon(points, closed=True, facecolor="#e6e6e6", edgecolor="#888888", hatch="//", alpha=0.9))
-    for points in _region_polygons(regions, "obstacles"):
-        ax.add_patch(Polygon(points, closed=True, facecolor="#4d4d4d", edgecolor="#222222"))
+    region_records = panel_records or [source]
+    for points in _merged_region_polygons(region_records, "known"):
+        ax.add_patch(Polygon(points, closed=True, facecolor="#d9c7a2", edgecolor="#8c795a", alpha=0.65, label="Known terrain"))
+    for points in _merged_region_polygons(region_records, "unknown"):
+        ax.add_patch(Polygon(points, closed=True, facecolor="#e6e6e6", edgecolor="#888888", hatch="//", alpha=0.9, label="Unknown region"))
+    for points in _merged_region_polygons(region_records, "obstacles"):
+        ax.add_patch(Polygon(points, closed=True, facecolor="#6b6259", edgecolor="#222222", label="Hard obstacle"))
+    for points in _merged_region_polygons(region_records, "proxy_obstacles"):
+        ax.add_patch(Polygon(points, closed=True, facecolor="#4d4d4d", edgecolor="#222222", label="Proxy obstacle"))
 
     reference_records = panel_records or [source]
     seen_platforms: set[str] = set()
@@ -123,13 +142,24 @@ def _draw_scenario_panel(ax: Any, records: list[dict[str, Any]], scale: str, sce
     if start:
         ax.scatter(*start[0], color="#111111", marker="o", s=28, zorder=5, label="Start")
     if goal:
-        label = "Frontier" if scene == "FRONTIER" else "Goal"
+        label = "Nominal goal" if scene == "G1_HIGH_FRONTIER" else "Goal"
         ax.scatter(*goal[0], color="#cc3311", marker="*", s=56, zorder=5, label=label)
-    landing = _polygon_points(source.get("landing_polygon_xy_m", []))
-    if landing:
-        ax.add_patch(Polygon(landing, closed=True, fill=False, edgecolor="#009E73", linewidth=1.2, linestyle="--"))
+    if scene == "G1_HIGH_FRONTIER":
+        for record in reference_records:
+            if str(record.get("platform")) not in {"WHEELED", "LEGGED"}:
+                continue
+            points = _polygon_points(record.get("reference_polyline_xy_m", []))
+            if points:
+                ax.scatter(*points[-1], color="#6a3d9a", marker="D", s=28, zorder=6, label="Safe frontier")
 
-    arc = _polygon_points(source.get("ballistic_arc_xz_m", []))
+    hopper = next((record for record in reference_records if str(record.get("platform")) == "HOPPER"), None)
+    if hopper is None and str(source.get("platform")) == "HOPPER":
+        hopper = source
+    landing = _polygon_points(hopper.get("landing_polygon_xy_m", [])) if hopper else []
+    if landing:
+        ax.add_patch(Polygon(landing, closed=True, fill=False, edgecolor="#009E73", linewidth=1.2, linestyle="--", label="Hopper landing region"))
+
+    arc = _polygon_points(hopper.get("ballistic_arc_xz_m", [])) if hopper else []
     if arc:
         inset = ax.inset_axes([0.62, 0.62, 0.32, 0.27])
         arc_x, arc_z = zip(*arc)
@@ -141,7 +171,8 @@ def _draw_scenario_panel(ax: Any, records: list[dict[str, Any]], scale: str, sce
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.set_aspect("equal", adjustable="box")
-    ax.set_title(f"{scene} · {scale.replace('_METER', '').replace('_', ' ').title()}", fontsize=10)
+    scene_label = scene.replace("G1_", "G1 ").replace("_", " ").title()
+    ax.set_title(f"{scene_label} · {scale.replace('_METER', '').replace('_', ' ').title()}", fontsize=10)
     ax.tick_params(labelsize=7)
 
 

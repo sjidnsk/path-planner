@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import runpy
 import subprocess
 import sys
 from pathlib import Path
 
 import matplotlib.image as mpimg
+import matplotlib.pyplot as plt
 import pytest
 
 
@@ -19,7 +21,7 @@ def _write_artifacts(root: Path, *, include_measured_call_count: bool = True) ->
         "scenario_results": [
             {
                 "scale": "TEN_METER",
-                "scene": "OPEN",
+                "scene": "G1_HIGH_FRONTIER",
                 "platform": "WHEELED",
                 "sample_count": 4,
                 "correct_count": 4,
@@ -50,21 +52,33 @@ def _write_artifacts(root: Path, *, include_measured_call_count: bool = True) ->
     (root / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
     record = {
         "scale": "TEN_METER",
-        "scene": "OPEN",
-        "platform": "HOPPER",
+        "scene": "G1_HIGH_FRONTIER",
+        "platform": "WHEELED",
         "map_bounds": {"minimum_xy_m": [0.0, 0.0], "maximum_xy_m": [10.0, 10.0]},
         "start_xy_m": [1.0, 1.0],
         "goal_xy_m": [9.0, 9.0],
         "regions": [
-            {"kind": "known_terrain", "polygon_xy_m": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]]},
-            {"kind": "unknown_region", "polygon_xy_m": [[4.0, 4.0], [6.0, 4.0], [6.0, 6.0], [4.0, 6.0]]},
-            {"kind": "obstacle", "polygon_xy_m": [[2.0, 7.0], [3.0, 7.0], [3.0, 8.0], [2.0, 8.0]]},
+            {
+                "kind": "SYNTHETIC_TERRAIN_OBSTACLE_PROXY",
+                "provenance": {"source_kind": "synthetic_terrain_obstacle_proxy/v1"},
+                "polygon_xy_m": [[2.0, 7.0], [3.0, 7.0], [3.0, 8.0], [2.0, 8.0]],
+            },
+            {"kind": "UNKNOWN", "polygon_xy_m": [[4.0, 4.0], [9.5, 4.0], [9.5, 9.5], [4.0, 9.5]]},
         ],
-        "reference_polyline_xy_m": [[1.0, 1.0], [5.0, 3.0], [9.0, 9.0]],
-        "ballistic_arc_xz_m": [[1.0, 0.0], [5.0, 3.0], [9.0, 0.0]],
-        "landing_polygon_xy_m": [[8.5, 8.5], [9.5, 8.5], [9.5, 9.5], [8.5, 9.5]],
+        "reference_polyline_xy_m": [[1.0, 1.0], [3.0, 3.0]],
     }
-    (root / "responses.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    legged = {**record, "platform": "LEGGED", "reference_polyline_xy_m": [[1.0, 1.0], [3.2, 3.0]]}
+    hopper = {
+        **record,
+        "platform": "HOPPER",
+        "reference_polyline_xy_m": [[1.0, 1.0], [3.4, 3.0]],
+        "ballistic_arc_xz_m": [[1.0, 0.0], [2.0, 2.0], [3.0, 0.0]],
+        "landing_polygon_xy_m": [[2.5, 2.5], [3.5, 2.5], [3.5, 3.5], [2.5, 3.5]],
+    }
+    (root / "responses.jsonl").write_text(
+        "\n".join(json.dumps(item) for item in (record, legged, hopper)) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _run_plotter(input_root: Path, output_dir: Path) -> subprocess.CompletedProcess[str]:
@@ -89,8 +103,8 @@ def test_plotter_writes_nonempty_contract_figures(tmp_path: Path) -> None:
         assert figure.is_file()
         assert figure.stat().st_size > 0
     image = mpimg.imread(output_dir / "scenario-overview.png")
-    known_terrain_rgb = (217 / 255, 199 / 255, 162 / 255)
-    assert ((image[:, :, :3] - known_terrain_rgb) ** 2).sum(axis=2).min() < 0.001
+    proxy_obstacle_rgb = (77 / 255, 77 / 255, 77 / 255)
+    assert ((image[:, :, :3] - proxy_obstacle_rgb) ** 2).sum(axis=2).min() < 0.001
 
 
 def test_plotter_rejects_summary_without_measured_call_count(tmp_path: Path) -> None:
@@ -101,3 +115,50 @@ def test_plotter_rejects_summary_without_measured_call_count(tmp_path: Path) -> 
 
     assert result.returncode != 0
     assert "measured_call_count" in result.stderr
+
+
+def test_region_polygons_accepts_runtime_proxy_kind_and_provenance() -> None:
+    """The proxy kind must retain its synthetic provenance instead of becoming physical terrain."""
+    region_polygons = runpy.run_path(str(SCRIPT))["_region_polygons"]
+    regions = [
+        {
+            "kind": "SYNTHETIC_TERRAIN_OBSTACLE_PROXY",
+            "provenance": {"source_kind": "synthetic_terrain_obstacle_proxy/v1"},
+            "polygon_xy_m": [[1.0, 2.0], [3.0, 2.0], [3.0, 4.0], [1.0, 4.0]],
+        }
+    ]
+
+    assert region_polygons(regions, "proxy_obstacles") == [
+        [(1.0, 2.0), (3.0, 2.0), (3.0, 4.0), (1.0, 4.0)]
+    ]
+
+
+def test_high_frontier_panel_labels_nominal_goal_and_safe_frontier() -> None:
+    """A frontier panel must distinguish an unreachable nominal goal from its safe route endpoint."""
+    plotter = runpy.run_path(str(SCRIPT))
+    record = {
+        "scale": "TEN_METER",
+        "scene": "G1_HIGH_FRONTIER",
+        "platform": "WHEELED",
+        "map_bounds": {"minimum_xy_m": [0.0, 0.0], "maximum_xy_m": [10.0, 10.0]},
+        "start_xy_m": [1.0, 1.0],
+        "goal_xy_m": [9.0, 9.0],
+        "regions": [
+            {
+                "kind": "SYNTHETIC_TERRAIN_OBSTACLE_PROXY",
+                "provenance": {"source_kind": "synthetic_terrain_obstacle_proxy/v1"},
+                "polygon_xy_m": [[2.0, 7.0], [3.0, 7.0], [3.0, 8.0], [2.0, 8.0]],
+            },
+            {"kind": "UNKNOWN", "polygon_xy_m": [[4.0, 4.0], [9.5, 4.0], [9.5, 9.5], [4.0, 9.5]]},
+        ],
+        "reference_polyline_xy_m": [[1.0, 1.0], [3.0, 3.0]],
+    }
+    figure, axis = plt.subplots()
+    try:
+        plotter["_draw_scenario_panel"](axis, [record], "TEN_METER", "G1_HIGH_FRONTIER")
+        labels = axis.get_legend_handles_labels()[1]
+        assert "Nominal goal" in labels
+        assert "Safe frontier" in labels
+        assert "Proxy obstacle" in labels
+    finally:
+        plt.close(figure)
