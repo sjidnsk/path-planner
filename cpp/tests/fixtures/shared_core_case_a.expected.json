@@ -1,0 +1,127 @@
+{
+  "schema_version": "path-planner-v3-shared-core-evidence/v1",
+  "safe_projection": {
+    "source_map_snapshot_ref": {
+      "id": "case-a-map",
+      "revision": 7,
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "source_capability_ref": {
+      "id": "case-a-wheel-capability",
+      "revision": 3,
+      "content_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "hard_mask_sha256": "286de21e673cbad3870230c50b1b5d98beca7530ba41e64179cbcf5ccac4845b",
+    "learned_cost_source": "ANALYTIC_PLUS_PINNED_LEARNED",
+    "learned_cost_snapshot_ref": {
+      "id": "case-a-learned-snapshot",
+      "revision": 2,
+      "content_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  },
+  "terminal": {
+    "kind": "SAFE_FRONTIER",
+    "reason_code": "known_safe_frontier_before_unknown_space",
+    "candidates": [
+      {
+        "stable_id": "terminal-cell/v1/6549c959dfeef9febd9c3b0723b1f957c2d332fa12194a656918d13cbe884068",
+        "cell": [5, 3],
+        "requires_zero_speed": true
+      }
+    ],
+    "unresolved_tail_reason": "mission_intent_clipped_at_known_boundary"
+  },
+  "search": {
+    "status": "SOLVED",
+    "achieved_epsilon": 1.0,
+    "expanded_states": 1,
+    "candidates": [
+      {
+        "stable_id": "fnv1a64:8df0b54f9625ae73",
+        "total_time_ns": "2000000000",
+        "fully_hard_validated": true
+      },
+      {
+        "stable_id": "fnv1a64:8df0b64f9625b026",
+        "total_time_ns": "2050000000",
+        "fully_hard_validated": true
+      }
+    ]
+  },
+  "time_equivalent_pool": {
+    "minimum_validated_time_ns": "2000000000",
+    "tolerance_ns": "100000000",
+    "ordered_candidate_ids": [
+      "fnv1a64:8df0b64f9625b026",
+      "fnv1a64:8df0b54f9625ae73"
+    ]
+  },
+  "corridor": {
+    "status": "CERTIFIED",
+    "reason_code": "certified",
+    "cells": [
+      {
+        "stable_id": "corridor-cell-0-06c511c5d14a9e7a",
+        "centerline_s_begin_m": 0.0,
+        "centerline_s_end_m": 1.0,
+        "half_planes": [
+          {
+            "normal": [-1.0, 0.0],
+            "upper_offset_m": -0.39999999999999997
+          },
+          {
+            "normal": [0.0, -1.0],
+            "upper_offset_m": -1.9
+          },
+          {
+            "normal": [0.0, 1.0],
+            "upper_offset_m": 5.1
+          },
+          {
+            "normal": [1.0, 0.0],
+            "upper_offset_m": 3.1
+          }
+        ]
+      },
+      {
+        "stable_id": "corridor-cell-1-e55e12056a63c582",
+        "centerline_s_begin_m": 2.0,
+        "centerline_s_end_m": 4.0,
+        "half_planes": [
+          {
+            "normal": [-1.0, 0.0],
+            "upper_offset_m": -0.8999999999999999
+          },
+          {
+            "normal": [0.0, -1.0],
+            "upper_offset_m": -0.8999999999999999
+          },
+          {
+            "normal": [0.0, 1.0],
+            "upper_offset_m": 6.1
+          },
+          {
+            "normal": [0.8320502943378437, -0.5547001962252291],
+            "upper_offset_m": 3.4829013735766043
+          },
+          {
+            "normal": [0.8320502943378437, 0.5547001962252291],
+            "upper_offset_m": 7.365802747153208
+          },
+          {
+            "normal": [0.9486832980505139, -0.316227766016838],
+            "upper_offset_m": 4.34341649025257
+          },
+          {
+            "normal": [0.9486832980505139, 0.316227766016838],
+            "upper_offset_m": 6.557010852370435
+          },
+          {
+            "normal": [1.0, 0.0],
+            "upper_offset_m": 5.6
+          }
+        ]
+      }
+    ]
+  }
+}

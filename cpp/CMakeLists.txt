@@ -331,6 +331,17 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_codec_tests
     TEST_PREFIX "lpp_v3_codec.")
+
+  add_executable(
+    lpp_v3_integration_tests
+    tests/integration/shared_core_pipeline_test.cpp)
+  target_link_libraries(
+    lpp_v3_integration_tests
+    PRIVATE lpp_v3_common GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_integration_tests
+    TEST_PREFIX "lpp_v3_integration.")
 endif()
 
 if(LPP_V3_BUILD_BENCHMARKS)
@@ -339,5 +350,6 @@ if(LPP_V3_BUILD_BENCHMARKS)
     lpp_v3_shared_core_benchmark benchmarks/shared_core_benchmark.cpp)
   target_link_libraries(
     lpp_v3_shared_core_benchmark
-    PRIVATE benchmark::benchmark_main lpp_v3_project_options)
+    PRIVATE benchmark::benchmark lpp_v3_common
+            lpp_v3_project_options)
 endif()
