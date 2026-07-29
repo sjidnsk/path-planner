@@ -166,6 +166,20 @@ target_link_libraries(
          nlohmann_json::nlohmann_json
   PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
 
+add_library(lpp_v3_common INTERFACE)
+target_link_libraries(
+  lpp_v3_common
+  INTERFACE
+    lpp_v3_contracts
+    lpp_v3_codec
+    lpp_v3_map
+    lpp_v3_cost
+    lpp_v3_goal
+    lpp_v3_search
+    lpp_v3_corridor
+    lpp_v3_optimization
+    lpp_v3_cache)
+
 if(LPP_V3_BUILD_TESTS)
   enable_testing()
   find_package(GTest 1.17.0 EXACT CONFIG REQUIRED)

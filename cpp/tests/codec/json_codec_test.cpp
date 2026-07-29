@@ -564,6 +564,32 @@ TEST(JsonCodec, WheeledActivationBundleRoundTripsAllInlineComponents) {
             lpp::ReferenceViewContent::Role::kPreview);
 }
 
+TEST(JsonCodec, CanonicalReferenceHashOmitsOnlyItsOwnHashField) {
+  auto response = MakeWheeledActivationResponse();
+  ASSERT_TRUE(response.new_reference_bundle.has_value());
+  auto& reference = std::get<lpp::WheeledReference>(
+      response.new_reference_bundle->platform_reference);
+
+  const auto first = lpp::CanonicalReferenceHash(
+      lpp::PlatformReference{reference});
+  ASSERT_TRUE(lpp::IsOk(first));
+  EXPECT_EQ(std::get<lpp::Sha256Digest>(first).size(), 64U);
+
+  reference.reference_hash = RepeatedHash('1');
+  const auto changed_self_hash = lpp::CanonicalReferenceHash(
+      lpp::PlatformReference{reference});
+  ASSERT_TRUE(lpp::IsOk(changed_self_hash));
+  EXPECT_EQ(std::get<lpp::Sha256Digest>(changed_self_hash),
+            std::get<lpp::Sha256Digest>(first));
+
+  reference.reference_id = "wheel-reference-2";
+  const auto changed_content = lpp::CanonicalReferenceHash(
+      lpp::PlatformReference{reference});
+  ASSERT_TRUE(lpp::IsOk(changed_content));
+  EXPECT_NE(std::get<lpp::Sha256Digest>(changed_content),
+            std::get<lpp::Sha256Digest>(first));
+}
+
 TEST(JsonCodec, RejectsUnknownNestedPlatformReferenceKey) {
   FixtureRegistry registry;
   lpp::PlanningRequest request{};

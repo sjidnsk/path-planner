@@ -130,4 +130,7 @@ class JsonCodec final {
       std::string_view json_string);
 };
 
+[[nodiscard]] Result<Sha256Digest> CanonicalReferenceHash(
+    const PlatformReference& reference);
+
 }  // namespace lunar::planning::v3

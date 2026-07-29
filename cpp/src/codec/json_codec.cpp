@@ -21,6 +21,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lunar_path_planner/v3/codec/jcs_canonicalizer.hpp"
+#include "lunar_path_planner/v3/crypto/sha256.hpp"
 #include "lunar_path_planner/v3/map/immutable_snapshot.hpp"
 
 namespace lunar::planning::v3 {
@@ -4816,6 +4818,29 @@ std::string JsonCodec::EncodePlanningResponse(
   } catch (const DecodeFailure& failure) {
     throw std::invalid_argument{
         failure.error().field_path + ": " + failure.error().message};
+  }
+}
+
+Result<Sha256Digest> CanonicalReferenceHash(
+    const PlatformReference& reference) {
+  try {
+    Json encoded = EncodePlatformReference(reference);
+    encoded.erase("reference_hash");
+    CheckFiniteJsonTree(encoded, "$");
+
+    const auto canonical = JcsCanonicalizer::Canonicalize(encoded);
+    if (!IsOk(canonical)) {
+      return std::get<Error>(canonical);
+    }
+    return Sha256Hex(std::get<std::string>(canonical));
+  } catch (const DecodeFailure& failure) {
+    return failure.error();
+  } catch (const std::exception& exception) {
+    return Error{
+        ErrorCode::kInvalidArgument,
+        "platform_reference",
+        exception.what(),
+    };
   }
 }
 
