@@ -91,6 +91,68 @@ target_link_libraries(
   PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
 
 add_library(
+  lpp_v3_goal
+  src/goal/terminal_resolver.cpp)
+target_include_directories(
+  lpp_v3_goal
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_goal
+  PUBLIC lpp_v3_contracts lpp_v3_map lpp_v3_search
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
+  lpp_v3_corridor
+  src/corridor/convex_corridor.cpp)
+target_include_directories(
+  lpp_v3_corridor
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_corridor
+  PUBLIC lpp_v3_contracts lpp_v3_map
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
+  lpp_v3_optimization
+  src/optimization/bounded_qp_solver.cpp)
+target_include_directories(
+  lpp_v3_optimization
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_optimization
+  PUBLIC Eigen3::Eigen lpp_v3_contracts
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(lpp_v3_cache INTERFACE)
+target_include_directories(
+  lpp_v3_cache
+  INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_cache
+  INTERFACE lpp_v3_contracts lpp_v3_project_options)
+
+if(LPP_V3_ENABLE_OSQP)
+  # The vcpkg manifest and override pin OSQP to 1.0.0. Its upstream
+  # generated package-version file reports 0.0.0 when built from the
+  # release archive, so version enforcement must remain at the registry
+  # boundary instead of using find_package(... EXACT).
+  find_package(osqp CONFIG REQUIRED)
+  add_library(
+    lpp_v3_osqp_backend
+    src/optimization/osqp_bounded_qp_solver.cpp)
+  target_compile_definitions(
+    lpp_v3_osqp_backend
+    PUBLIC LPP_V3_HAS_OSQP=1)
+  target_include_directories(
+    lpp_v3_osqp_backend
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(
+    lpp_v3_osqp_backend
+    PUBLIC lpp_v3_optimization osqp::osqp
+    PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+endif()
+
+add_library(
   lpp_v3_codec
   src/codec/json_codec.cpp
   src/codec/semantic_validator.cpp)
@@ -170,6 +232,63 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_search_tests
     TEST_PREFIX "lpp_v3_search.")
+
+  add_executable(
+    lpp_v3_goal_tests
+    tests/goal/terminal_resolver_test.cpp)
+  target_link_libraries(
+    lpp_v3_goal_tests
+    PRIVATE lpp_v3_goal GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_goal_tests
+    TEST_PREFIX "lpp_v3_goal.")
+
+  add_executable(
+    lpp_v3_corridor_tests
+    tests/corridor/convex_corridor_test.cpp)
+  target_link_libraries(
+    lpp_v3_corridor_tests
+    PRIVATE lpp_v3_corridor GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_corridor_tests
+    TEST_PREFIX "lpp_v3_corridor.")
+
+  add_executable(
+    lpp_v3_optimization_tests
+    tests/optimization/bounded_qp_solver_test.cpp)
+  target_link_libraries(
+    lpp_v3_optimization_tests
+    PRIVATE lpp_v3_optimization GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_optimization_tests
+    TEST_PREFIX "lpp_v3_optimization.")
+
+  add_executable(
+    lpp_v3_cache_tests
+    tests/cache/deterministic_cache_test.cpp)
+  target_link_libraries(
+    lpp_v3_cache_tests
+    PRIVATE lpp_v3_cache GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_cache_tests
+    TEST_PREFIX "lpp_v3_cache.")
+
+  if(LPP_V3_ENABLE_OSQP)
+    add_executable(
+      lpp_v3_osqp_tests
+      tests/optimization/osqp_bounded_qp_solver_test.cpp)
+    target_link_libraries(
+      lpp_v3_osqp_tests
+      PRIVATE lpp_v3_osqp_backend GTest::gtest_main
+              lpp_v3_project_options lpp_v3_project_warnings)
+    gtest_discover_tests(
+      lpp_v3_osqp_tests
+      TEST_PREFIX "lpp_v3_osqp.")
+  endif()
 
   add_executable(
     lpp_v3_crypto_tests tests/crypto/sha256_test.cpp)

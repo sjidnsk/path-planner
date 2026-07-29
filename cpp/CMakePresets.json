@@ -35,6 +35,14 @@
       }
     },
     {
+      "name": "windows-msvc-debug-osqp",
+      "inherits": "windows-msvc-debug",
+      "cacheVariables": {
+        "LPP_V3_ENABLE_OSQP": "ON",
+        "VCPKG_MANIFEST_FEATURES": "qp"
+      }
+    },
+    {
       "name": "linux-gcc-debug",
       "inherits": "base",
       "binaryDir": "/tmp/xunce/build/path-planner-v3/${presetName}",
@@ -46,6 +54,14 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "VCPKG_TARGET_TRIPLET": "x64-linux"
+      }
+    },
+    {
+      "name": "linux-gcc-debug-osqp",
+      "inherits": "linux-gcc-debug",
+      "cacheVariables": {
+        "LPP_V3_ENABLE_OSQP": "ON",
+        "VCPKG_MANIFEST_FEATURES": "qp"
       }
     },
     {
@@ -69,8 +85,16 @@
       "configurePreset": "windows-msvc-debug"
     },
     {
+      "name": "windows-msvc-debug-osqp",
+      "configurePreset": "windows-msvc-debug-osqp"
+    },
+    {
       "name": "linux-gcc-debug",
       "configurePreset": "linux-gcc-debug"
+    },
+    {
+      "name": "linux-gcc-debug-osqp",
+      "configurePreset": "linux-gcc-debug-osqp"
     },
     {
       "name": "windows-msvc-release",
@@ -86,8 +110,22 @@
       }
     },
     {
+      "name": "windows-msvc-debug-osqp",
+      "configurePreset": "windows-msvc-debug-osqp",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
       "name": "linux-gcc-debug",
       "configurePreset": "linux-gcc-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-debug-osqp",
+      "configurePreset": "linux-gcc-debug-osqp",
       "output": {
         "outputOnFailure": true
       }
