@@ -133,4 +133,13 @@ class JsonCodec final {
 [[nodiscard]] Result<Sha256Digest> CanonicalReferenceHash(
     const PlatformReference& reference);
 
+[[nodiscard]] Result<Sha256Digest> CanonicalComponentHash(
+    const RouteSkeletonContent& content);
+
+[[nodiscard]] Result<Sha256Digest> CanonicalComponentHash(
+    const ReferenceViewContent& content);
+
+[[nodiscard]] Result<Sha256Digest> CanonicalBundleHash(
+    const ReferenceBundle& bundle);
+
 }  // namespace lunar::planning::v3

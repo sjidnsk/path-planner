@@ -180,6 +180,17 @@ target_link_libraries(
     lpp_v3_optimization
     lpp_v3_cache)
 
+add_library(
+  lpp_v3_api
+  src/api/reference_bundle_builder.cpp)
+target_include_directories(
+  lpp_v3_api
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_api
+  PUBLIC lpp_v3_common
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
 if(LPP_V3_BUILD_TESTS)
   enable_testing()
   find_package(GTest 1.17.0 EXACT CONFIG REQUIRED)
@@ -342,6 +353,17 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_integration_tests
     TEST_PREFIX "lpp_v3_integration.")
+
+  add_executable(
+    lpp_v3_api_tests
+    tests/unit/api/reference_bundle_builder_test.cpp)
+  target_link_libraries(
+    lpp_v3_api_tests
+    PRIVATE lpp_v3_api GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_api_tests
+    TEST_PREFIX "lpp_v3_api.")
 endif()
 
 if(LPP_V3_BUILD_BENCHMARKS)

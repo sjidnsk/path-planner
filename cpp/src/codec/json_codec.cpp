@@ -4821,18 +4821,38 @@ std::string JsonCodec::EncodePlanningResponse(
   }
 }
 
-Result<Sha256Digest> CanonicalReferenceHash(
-    const PlatformReference& reference) {
-  try {
-    Json encoded = EncodePlatformReference(reference);
-    encoded.erase("reference_hash");
-    CheckFiniteJsonTree(encoded, "$");
+namespace {
 
+[[nodiscard]] Result<Sha256Digest> HashCanonicalJson(
+    Json encoded,
+    std::string_view field_path) {
+  try {
+    CheckFiniteJsonTree(encoded, "$");
     const auto canonical = JcsCanonicalizer::Canonicalize(encoded);
     if (!IsOk(canonical)) {
       return std::get<Error>(canonical);
     }
     return Sha256Hex(std::get<std::string>(canonical));
+  } catch (const DecodeFailure& failure) {
+    return failure.error();
+  } catch (const std::exception& exception) {
+    return Error{
+        ErrorCode::kInvalidArgument,
+        std::string{field_path},
+        exception.what(),
+    };
+  }
+}
+
+}  // namespace
+
+Result<Sha256Digest> CanonicalReferenceHash(
+    const PlatformReference& reference) {
+  try {
+    Json encoded = EncodePlatformReference(reference);
+    encoded.erase("reference_hash");
+    return HashCanonicalJson(
+        std::move(encoded), "platform_reference");
   } catch (const DecodeFailure& failure) {
     return failure.error();
   } catch (const std::exception& exception) {
@@ -4967,6 +4987,57 @@ std::string JsonCodec::EncodePlanningRequest(
   } catch (const DecodeFailure& failure) {
     throw std::invalid_argument{
         failure.error().field_path + ": " + failure.error().message};
+  }
+}
+
+Result<Sha256Digest> CanonicalComponentHash(
+    const RouteSkeletonContent& content) {
+  try {
+    return HashCanonicalJson(
+        EncodeRouteSkeletonContent(content),
+        "route_skeleton.content");
+  } catch (const DecodeFailure& failure) {
+    return failure.error();
+  } catch (const std::exception& exception) {
+    return Error{
+        ErrorCode::kInvalidArgument,
+        "route_skeleton.content",
+        exception.what(),
+    };
+  }
+}
+
+Result<Sha256Digest> CanonicalComponentHash(
+    const ReferenceViewContent& content) {
+  try {
+    return HashCanonicalJson(
+        EncodeReferenceViewContent(content),
+        "reference_view.content");
+  } catch (const DecodeFailure& failure) {
+    return failure.error();
+  } catch (const std::exception& exception) {
+    return Error{
+        ErrorCode::kInvalidArgument,
+        "reference_view.content",
+        exception.what(),
+    };
+  }
+}
+
+Result<Sha256Digest> CanonicalBundleHash(
+    const ReferenceBundle& bundle) {
+  try {
+    Json encoded = EncodeReferenceBundle(bundle);
+    encoded.erase("bundle_hash");
+    return HashCanonicalJson(std::move(encoded), "bundle_hash");
+  } catch (const DecodeFailure& failure) {
+    return failure.error();
+  } catch (const std::exception& exception) {
+    return Error{
+        ErrorCode::kInvalidArgument,
+        "bundle_hash",
+        exception.what(),
+    };
   }
 }
 
