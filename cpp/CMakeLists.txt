@@ -200,6 +200,26 @@ target_link_libraries(
   PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
 
 add_library(
+  lpp_v3_legged
+  src/legged/body_motion_primitive.cpp
+  src/legged/height_interval.cpp
+  src/legged/legged_capability.cpp
+  src/legged/legged_corridor.cpp
+  src/legged/legged_lattice.cpp
+  src/legged/legged_planner.cpp
+  src/legged/legged_search.cpp
+  src/legged/legged_spline_optimizer.cpp
+  src/legged/legged_terrain.cpp
+  src/legged/legged_timing.cpp)
+target_include_directories(
+  lpp_v3_legged
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(
+  lpp_v3_legged
+  PUBLIC lpp_v3_common
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
   lpp_v3_api
   src/api/execution_arbitrator.cpp
   src/api/reference_bundle_builder.cpp)
@@ -398,6 +418,30 @@ if(LPP_V3_BUILD_TESTS)
     TEST_PREFIX "lpp_v3_wheel.")
 
   add_executable(
+    lpp_v3_legged_tests
+    tests/unit/legged/body_motion_primitive_test.cpp
+    tests/unit/legged/height_interval_test.cpp
+    tests/unit/legged/legged_corridor_test.cpp
+    tests/unit/legged/legged_lattice_test.cpp
+    tests/unit/legged/legged_spline_optimizer_test.cpp
+    tests/unit/legged/legged_terrain_test.cpp
+    tests/unit/legged/legged_timing_test.cpp
+    tests/integration/legged/legged_fault_matrix_test.cpp
+    tests/integration/legged/legged_planner_test.cpp
+    tests/integration/legged/legged_search_test.cpp
+    tests/property/legged/legged_reference_property_test.cpp)
+  target_include_directories(
+    lpp_v3_legged_tests
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+  target_link_libraries(
+    lpp_v3_legged_tests
+    PRIVATE lpp_v3_legged GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_legged_tests
+    TEST_PREFIX "lpp_v3_legged.")
+
+  add_executable(
     lpp_v3_api_tests
     tests/unit/api/execution_arbitrator_test.cpp
     tests/unit/api/reference_bundle_builder_test.cpp)
@@ -424,5 +468,12 @@ if(LPP_V3_BUILD_BENCHMARKS)
   target_link_libraries(
     lpp_v3_wheel_benchmark
     PRIVATE benchmark::benchmark lpp_v3_wheel
+            lpp_v3_project_options)
+
+  add_executable(
+    lpp_v3_legged_benchmark benchmarks/legged_planner_benchmark.cpp)
+  target_link_libraries(
+    lpp_v3_legged_benchmark
+    PRIVATE benchmark::benchmark lpp_v3_legged
             lpp_v3_project_options)
 endif()

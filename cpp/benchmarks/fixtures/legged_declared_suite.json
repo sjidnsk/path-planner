@@ -1,0 +1,45 @@
+{
+  "schema_version": "lpp.v3.legged_declared_suite/1",
+  "suite_id": "legged_body_reference_declared",
+  "platform_type": "LEGGED",
+  "reference_contract": {
+    "authoritative_state": ["x_m", "y_m", "z_m", "yaw_rad"],
+    "includes_monotone_timing": true,
+    "feasibility_scope": "body_geometry_and_terrain_thresholds_only",
+    "footstep_feasibility_guaranteed": false,
+    "forbidden_authority": [
+      "footsteps",
+      "gait",
+      "contacts",
+      "contact_forces",
+      "quaternion",
+      "roll_reference",
+      "pitch_reference"
+    ]
+  },
+  "map": {
+    "kind": "flat_known_grid",
+    "width_cells": 7,
+    "height_cells": 5,
+    "resolution_m": 1.0
+  },
+  "route": {
+    "start_cell": [1, 2],
+    "goal_cell": [3, 2],
+    "start_yaw_bin": 0,
+    "goal_requires_zero_speed": true
+  },
+  "resource_caps": {
+    "maximum_expanded_states": 256,
+    "maximum_reopened_states": 256,
+    "maximum_generated_candidates": 16,
+    "maximum_open_states": 256,
+    "maximum_adaptive_timing_samples": 33
+  },
+  "latency_metric": {
+    "statistic": "p95",
+    "experimental_target_ms": 1000,
+    "planner_deadline_enforced": false,
+    "interpretation": "reported experiment metric only"
+  }
+}
