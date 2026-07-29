@@ -259,7 +259,7 @@ TEST(WheelFaultMatrixTest, QpInfeasibleRejectsSpline) {
 
   EXPECT_FALSE(result.spline.has_value());
   EXPECT_EQ(result.termination,
-            OptimizationTermination::kQpInfeasible);
+            WheelOptimizationTermination::kQpInfeasible);
 }
 
 TEST(WheelFaultMatrixTest, QpIterationLimitRejectsSpline) {
@@ -281,7 +281,7 @@ TEST(WheelFaultMatrixTest, QpIterationLimitRejectsSpline) {
 
   EXPECT_FALSE(result.spline.has_value());
   EXPECT_EQ(result.termination,
-            OptimizationTermination::kQpIterationLimit);
+            WheelOptimizationTermination::kQpIterationLimit);
 }
 
 TEST(WheelFaultMatrixTest, TimingSampleLimitFailsClosed) {

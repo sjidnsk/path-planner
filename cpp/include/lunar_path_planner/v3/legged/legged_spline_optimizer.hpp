@@ -9,7 +9,7 @@
 
 namespace lunar::planning::v3 {
 
-struct FrozenControlPoint final {
+struct LeggedFrozenControlPoint final {
   std::size_t control_point_index{};
   PoseXyzYaw pose;
 };
@@ -25,10 +25,10 @@ struct LeggedSplineRequest final {
   const LeggedCorridor& corridor;
   LeggedSplineConfig config;
   double preferred_body_height_m{};
-  std::span<const FrozenControlPoint> committed_points;
+  std::span<const LeggedFrozenControlPoint> committed_points;
 };
 
-enum class OptimizationTermination {
+enum class LeggedOptimizationTermination {
   kSolved,
   kInvalidRequest,
   kQpFailure,
@@ -39,8 +39,8 @@ enum class OptimizationTermination {
 struct LeggedSplineResult final {
   std::optional<ClampedCubicBSplinePath> body_spline;
   DurationNanoseconds estimated_execution_time;
-  OptimizationTermination termination{
-      OptimizationTermination::kInvalidRequest};
+  LeggedOptimizationTermination termination{
+      LeggedOptimizationTermination::kInvalidRequest};
 };
 
 [[nodiscard]] LeggedSplineResult OptimizeLeggedBodySpline(

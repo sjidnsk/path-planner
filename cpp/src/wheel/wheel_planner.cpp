@@ -665,7 +665,7 @@ struct AbsoluteYaw final {
                   algorithm, capability,
                   discrete.edges.size()),
           .committed_points =
-              std::span<const FrozenControlPoint>{},
+              std::span<const WheelFrozenControlPoint>{},
       },
       solver);
   if (!optimized.spline.has_value()) {

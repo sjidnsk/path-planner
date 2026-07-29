@@ -308,7 +308,7 @@ BuildPrimitiveChain(
   return chain;
 }
 
-[[nodiscard]] std::vector<FrozenControlPoint> FrozenEndpoints(
+[[nodiscard]] std::vector<LeggedFrozenControlPoint> FrozenEndpoints(
     const LeggedDiscretePlan& plan,
     const LeggedCapabilityView& capability) {
   const std::size_t control_count =
@@ -324,11 +324,11 @@ BuildPrimitiveChain(
         last.yaw_rad);
   }
   return {
-      FrozenControlPoint{
+      LeggedFrozenControlPoint{
           .control_point_index = 0U,
           .pose = first,
       },
-      FrozenControlPoint{
+      LeggedFrozenControlPoint{
           .control_point_index = control_count - 1U,
           .pose = last,
       },

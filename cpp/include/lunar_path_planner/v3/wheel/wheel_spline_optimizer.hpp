@@ -10,7 +10,7 @@
 
 namespace lunar::planning::v3 {
 
-struct FrozenControlPoint final {
+struct WheelFrozenControlPoint final {
   std::size_t index{};
   PoseXyzYaw value;
 };
@@ -30,7 +30,7 @@ struct WheelSplineConfig final {
   DurationNanoseconds time_equivalence_tolerance;
 };
 
-enum class OptimizationTermination {
+enum class WheelOptimizationTermination {
   kConverged,
   kInvalidRequest,
   kQpInfeasible,
@@ -45,13 +45,13 @@ struct WheelSplineOptimizationRequest final {
   const CorridorResult& corridor;
   const WheelCapabilityView& capability;
   WheelSplineConfig config;
-  std::span<const FrozenControlPoint> committed_points;
+  std::span<const WheelFrozenControlPoint> committed_points;
 };
 
 struct WheelSplineOptimizationResult final {
   std::optional<ClampedCubicBSplinePath> spline;
-  OptimizationTermination termination{
-      OptimizationTermination::kInvalidRequest};
+  WheelOptimizationTermination termination{
+      WheelOptimizationTermination::kInvalidRequest};
   DurationNanoseconds estimated_execution_time;
   std::size_t scp_iterations{};
 };

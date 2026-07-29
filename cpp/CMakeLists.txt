@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.28)
 project(lunar_path_planner_v3 VERSION 0.1.0 LANGUAGES CXX)
 
+include(CMakePackageConfigHelpers)
+include(GNUInstallDirs)
+
 option(LPP_V3_BUILD_TESTS "Build C++ tests" ON)
 option(LPP_V3_BUILD_BENCHMARKS "Build C++ benchmarks" ON)
 option(LPP_V3_ENABLE_OSQP "Build the optional OSQP backend" OFF)
@@ -26,7 +29,9 @@ lpp_v3_set_project_warnings(lpp_v3_project_warnings)
 add_library(lpp_v3_contracts src/contracts/base_types.cpp)
 target_include_directories(
   lpp_v3_contracts
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_contracts
   PRIVATE Eigen3::Eigen lpp_v3_project_options lpp_v3_project_warnings)
@@ -37,7 +42,9 @@ add_library(
   src/crypto/sha256.cpp)
 target_include_directories(
   lpp_v3_wire_primitives
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
   PRIVATE "${LPP_V3_PICOSHA2_INCLUDE_DIR}")
 target_link_libraries(
   lpp_v3_wire_primitives
@@ -50,7 +57,9 @@ add_library(
   src/map/immutable_snapshot.cpp)
 target_include_directories(
   lpp_v3_map_snapshot
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_map_snapshot
   PUBLIC lpp_v3_contracts lpp_v3_wire_primitives
@@ -62,7 +71,9 @@ add_library(
   src/cost/learned_cost_snapshot.cpp)
 target_include_directories(
   lpp_v3_cost
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_cost
   PUBLIC lpp_v3_contracts lpp_v3_map_snapshot
@@ -73,7 +84,9 @@ add_library(
   src/map/safe_projection.cpp)
 target_include_directories(
   lpp_v3_map
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_map
   PUBLIC lpp_v3_contracts lpp_v3_cost lpp_v3_map_snapshot
@@ -84,7 +97,9 @@ add_library(
   src/search/candidate_ranker.cpp)
 target_include_directories(
   lpp_v3_search
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_search
   PUBLIC lpp_v3_contracts
@@ -95,7 +110,9 @@ add_library(
   src/goal/terminal_resolver.cpp)
 target_include_directories(
   lpp_v3_goal
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_goal
   PUBLIC lpp_v3_contracts lpp_v3_map lpp_v3_search
@@ -106,7 +123,9 @@ add_library(
   src/corridor/convex_corridor.cpp)
 target_include_directories(
   lpp_v3_corridor
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_corridor
   PUBLIC lpp_v3_contracts lpp_v3_map
@@ -117,7 +136,9 @@ add_library(
   src/optimization/bounded_qp_solver.cpp)
 target_include_directories(
   lpp_v3_optimization
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_optimization
   PUBLIC Eigen3::Eigen lpp_v3_contracts
@@ -126,7 +147,9 @@ target_link_libraries(
 add_library(lpp_v3_cache INTERFACE)
 target_include_directories(
   lpp_v3_cache
-  INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  INTERFACE
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_cache
   INTERFACE lpp_v3_contracts lpp_v3_project_options)
@@ -145,7 +168,9 @@ if(LPP_V3_ENABLE_OSQP)
     PUBLIC LPP_V3_HAS_OSQP=1)
   target_include_directories(
     lpp_v3_osqp_backend
-    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    PUBLIC
+      "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+      "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
   target_link_libraries(
     lpp_v3_osqp_backend
     PUBLIC lpp_v3_optimization osqp::osqp
@@ -158,7 +183,9 @@ add_library(
   src/codec/semantic_validator.cpp)
 target_include_directories(
   lpp_v3_codec
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_codec
   PUBLIC lpp_v3_contracts lpp_v3_cost lpp_v3_map
@@ -193,7 +220,9 @@ add_library(
   src/wheel/wheel_timing.cpp)
 target_include_directories(
   lpp_v3_wheel
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_wheel
   PUBLIC lpp_v3_common
@@ -213,23 +242,178 @@ add_library(
   src/legged/legged_timing.cpp)
 target_include_directories(
   lpp_v3_legged
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_legged
   PUBLIC lpp_v3_common
   PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
 
 add_library(
+  lpp_v3_hopper
+  src/hopper/aim_point_generator.cpp
+  src/hopper/attitude_certifier.cpp
+  src/hopper/ballistic_kinematics.cpp
+  src/hopper/ballistic_time_solver.cpp
+  src/hopper/flight_tube_certifier.cpp
+  src/hopper/hop_certifier.cpp
+  src/hopper/hopper_commitment_state_machine.cpp
+  src/hopper/hopper_config.cpp
+  src/hopper/hopper_planner.cpp
+  src/hopper/landing_geometry.cpp
+  src/hopper/landing_graph.cpp
+  src/hopper/landing_region.cpp
+  src/hopper/landing_set_propagator.cpp
+  src/hopper/safe_pose_mask.cpp
+  src/hopper/swept_footprint.cpp)
+target_include_directories(
+  lpp_v3_hopper
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
+target_link_libraries(
+  lpp_v3_hopper
+  PUBLIC lpp_v3_common
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
   lpp_v3_api
   src/api/execution_arbitrator.cpp
+  src/api/planner_v3.cpp
   src/api/reference_bundle_builder.cpp)
 target_include_directories(
   lpp_v3_api
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
 target_link_libraries(
   lpp_v3_api
   PUBLIC lpp_v3_common
+  PRIVATE lpp_v3_wheel lpp_v3_legged lpp_v3_hopper
+          lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
+  lpp_v3_python_projection
+  src/bindings/python_projection.cpp)
+target_include_directories(
+  lpp_v3_python_projection
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
+target_link_libraries(
+  lpp_v3_python_projection
+  PUBLIC lpp_v3_common
   PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
+  lpp_v3_benchmark_report
+  benchmarks/benchmark_report.cpp)
+target_include_directories(
+  lpp_v3_benchmark_report
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks")
+target_link_libraries(
+  lpp_v3_benchmark_report
+  PUBLIC lpp_v3_common
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+add_library(
+  lpp_v3_benchmark_runner
+  benchmarks/benchmark_runner.cpp)
+target_include_directories(
+  lpp_v3_benchmark_runner
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks")
+target_link_libraries(
+  lpp_v3_benchmark_runner
+  PUBLIC lpp_v3_api lpp_v3_benchmark_report
+  PRIVATE lpp_v3_project_options lpp_v3_project_warnings)
+
+set_target_properties(
+  lpp_v3_project_options PROPERTIES EXPORT_NAME project_options)
+set_target_properties(
+  lpp_v3_project_warnings PROPERTIES EXPORT_NAME project_warnings)
+set_target_properties(lpp_v3_contracts PROPERTIES EXPORT_NAME contracts)
+set_target_properties(
+  lpp_v3_wire_primitives PROPERTIES EXPORT_NAME wire_primitives)
+set_target_properties(
+  lpp_v3_map_snapshot PROPERTIES EXPORT_NAME map_snapshot)
+set_target_properties(lpp_v3_cost PROPERTIES EXPORT_NAME cost)
+set_target_properties(lpp_v3_map PROPERTIES EXPORT_NAME map)
+set_target_properties(lpp_v3_search PROPERTIES EXPORT_NAME search)
+set_target_properties(lpp_v3_goal PROPERTIES EXPORT_NAME goal)
+set_target_properties(lpp_v3_corridor PROPERTIES EXPORT_NAME corridor)
+set_target_properties(
+  lpp_v3_optimization PROPERTIES EXPORT_NAME optimization)
+set_target_properties(lpp_v3_cache PROPERTIES EXPORT_NAME cache)
+set_target_properties(lpp_v3_codec PROPERTIES EXPORT_NAME codec)
+set_target_properties(lpp_v3_common PROPERTIES EXPORT_NAME common)
+set_target_properties(lpp_v3_wheel PROPERTIES EXPORT_NAME wheel)
+set_target_properties(lpp_v3_legged PROPERTIES EXPORT_NAME legged)
+set_target_properties(lpp_v3_hopper PROPERTIES EXPORT_NAME hopper)
+set_target_properties(lpp_v3_api PROPERTIES EXPORT_NAME api)
+set_target_properties(
+  lpp_v3_python_projection
+  PROPERTIES EXPORT_NAME python_projection)
+
+set(
+  LPP_V3_INSTALL_TARGETS
+  lpp_v3_project_options
+  lpp_v3_project_warnings
+  lpp_v3_contracts
+  lpp_v3_wire_primitives
+  lpp_v3_map_snapshot
+  lpp_v3_cost
+  lpp_v3_map
+  lpp_v3_search
+  lpp_v3_goal
+  lpp_v3_corridor
+  lpp_v3_optimization
+  lpp_v3_cache
+  lpp_v3_codec
+  lpp_v3_common
+  lpp_v3_wheel
+  lpp_v3_legged
+  lpp_v3_hopper
+  lpp_v3_api
+  lpp_v3_python_projection)
+if(TARGET lpp_v3_osqp_backend)
+  set_target_properties(
+    lpp_v3_osqp_backend PROPERTIES EXPORT_NAME osqp_backend)
+  list(APPEND LPP_V3_INSTALL_TARGETS lpp_v3_osqp_backend)
+endif()
+
+install(
+  TARGETS ${LPP_V3_INSTALL_TARGETS}
+  EXPORT LunarPathPlannerV3Targets
+  ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+  LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+  RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+  INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(
+  DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(
+  EXPORT LunarPathPlannerV3Targets
+  FILE LunarPathPlannerV3Targets.cmake
+  NAMESPACE LunarPathPlannerV3::
+  DESTINATION
+    "${CMAKE_INSTALL_LIBDIR}/cmake/LunarPathPlannerV3")
+
+configure_package_config_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PlannerV3Config.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/LunarPathPlannerV3Config.cmake"
+  INSTALL_DESTINATION
+    "${CMAKE_INSTALL_LIBDIR}/cmake/LunarPathPlannerV3")
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/LunarPathPlannerV3ConfigVersion.cmake"
+  VERSION "${PROJECT_VERSION}"
+  COMPATIBILITY SameMajorVersion)
+install(
+  FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/LunarPathPlannerV3Config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/LunarPathPlannerV3ConfigVersion.cmake"
+  DESTINATION
+    "${CMAKE_INSTALL_LIBDIR}/cmake/LunarPathPlannerV3")
 
 if(LPP_V3_BUILD_TESTS)
   enable_testing()
@@ -442,7 +626,35 @@ if(LPP_V3_BUILD_TESTS)
     TEST_PREFIX "lpp_v3_legged.")
 
   add_executable(
+    lpp_v3_hopper_tests
+    tests/hopper/aim_point_generator_test.cpp
+    tests/hopper/attitude_certifier_test.cpp
+    tests/hopper/ballistic_kinematics_test.cpp
+    tests/hopper/ballistic_time_solver_test.cpp
+    tests/hopper/flight_tube_certifier_test.cpp
+    tests/hopper/hop_certifier_test.cpp
+    tests/hopper/hopper_commitment_state_machine_test.cpp
+    tests/hopper/hopper_planner_test.cpp
+    tests/hopper/hopper_test_fixtures.cpp
+    tests/hopper/landing_geometry_test.cpp
+    tests/hopper/landing_graph_test.cpp
+    tests/hopper/landing_region_test.cpp
+    tests/hopper/landing_set_propagator_test.cpp
+    tests/hopper/swept_footprint_test.cpp)
+  target_include_directories(
+    lpp_v3_hopper_tests
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+  target_link_libraries(
+    lpp_v3_hopper_tests
+    PRIVATE lpp_v3_hopper GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_hopper_tests
+    TEST_PREFIX "lpp_v3_hopper.")
+
+  add_executable(
     lpp_v3_api_tests
+    tests/integration/api/planner_dispatch_test.cpp
     tests/unit/api/execution_arbitrator_test.cpp
     tests/unit/api/reference_bundle_builder_test.cpp)
   target_link_libraries(
@@ -452,10 +664,82 @@ if(LPP_V3_BUILD_TESTS)
   gtest_discover_tests(
     lpp_v3_api_tests
     TEST_PREFIX "lpp_v3_api.")
+
+  add_executable(
+    lpp_v3_system_tests
+    tests/fixtures/system/planner_v3_system_fixture.cpp
+    tests/integration/system/planner_v3_fault_matrix_test.cpp
+    tests/integration/system/planner_v3_system_test.cpp
+    tests/property/system/planner_v3_determinism_property_test.cpp)
+  target_include_directories(
+    lpp_v3_system_tests
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+  target_link_libraries(
+    lpp_v3_system_tests
+    PRIVATE lpp_v3_api GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_system_tests
+    TEST_PREFIX "lpp_v3_api.system.")
+
+  add_executable(
+    lpp_v3_schema_codec_tests
+    tests/contract/schema_codec_conformance_test.cpp)
+  target_compile_definitions(
+    lpp_v3_schema_codec_tests
+    PRIVATE
+      LPP_V3_SCHEMA_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../schemas/v3")
+  target_link_libraries(
+    lpp_v3_schema_codec_tests
+    PRIVATE lpp_v3_codec GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_schema_codec_tests
+    TEST_PREFIX "lpp_v3_schema_codec.")
+
+  add_executable(
+    lpp_v3_binding_tests
+    tests/unit/bindings/python_projection_test.cpp)
+  target_link_libraries(
+    lpp_v3_binding_tests
+    PRIVATE lpp_v3_python_projection GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_binding_tests
+    TEST_PREFIX "lpp_v3_python_projection.")
+
+  add_executable(
+    lpp_v3_benchmark_tests
+    tests/unit/benchmark/benchmark_report_test.cpp
+    tests/unit/benchmark/benchmark_runner_test.cpp)
+  target_link_libraries(
+    lpp_v3_benchmark_tests
+    PRIVATE lpp_v3_benchmark_runner GTest::gtest_main
+            lpp_v3_project_options lpp_v3_project_warnings)
+  gtest_discover_tests(
+    lpp_v3_benchmark_tests
+    TEST_PREFIX "lpp_v3_benchmark.")
 endif()
 
 if(LPP_V3_BUILD_BENCHMARKS)
   find_package(benchmark 1.9.5 EXACT CONFIG REQUIRED)
+
+  add_executable(
+    lpp_v3_api_benchmark
+    benchmarks/planner_api_benchmark.cpp
+    tests/fixtures/system/planner_v3_system_fixture.cpp)
+  target_include_directories(
+    lpp_v3_api_benchmark
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+  target_link_libraries(
+    lpp_v3_api_benchmark
+    PRIVATE lpp_v3_benchmark_runner
+            lpp_v3_project_options lpp_v3_project_warnings)
+  set_target_properties(
+    lpp_v3_api_benchmark
+    PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/benchmarks")
+
   add_executable(
     lpp_v3_shared_core_benchmark benchmarks/shared_core_benchmark.cpp)
   target_link_libraries(

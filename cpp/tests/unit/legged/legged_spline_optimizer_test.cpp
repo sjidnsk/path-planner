@@ -149,7 +149,7 @@ TEST(LeggedSplineOptimizerTest,
 TEST(LeggedSplineOptimizerTest, PreservesCommittedControlPoint) {
   const auto plan = LateralPlan();
   const auto corridor = Corridor();
-  const FrozenControlPoint committed{
+  const LeggedFrozenControlPoint committed{
       .control_point_index = 0U,
       .pose =
           PoseXyzYaw{
@@ -166,7 +166,8 @@ TEST(LeggedSplineOptimizerTest, PreservesCommittedControlPoint) {
           .config = Config(),
           .preferred_body_height_m = 0.5,
           .committed_points =
-              std::span<const FrozenControlPoint>{&committed, 1U},
+              std::span<const LeggedFrozenControlPoint>{
+                  &committed, 1U},
       },
       solver);
 
@@ -195,7 +196,7 @@ TEST(LeggedSplineOptimizerTest, RejectsWholeSplineWhenQpFails) {
 
   EXPECT_FALSE(result.body_spline.has_value());
   EXPECT_EQ(result.termination,
-            OptimizationTermination::kQpFailure);
+            LeggedOptimizationTermination::kQpFailure);
 }
 
 }  // namespace

@@ -368,7 +368,7 @@ TEST(LeggedFaultMatrixTest,
 
   EXPECT_FALSE(result.body_spline.has_value());
   EXPECT_EQ(result.termination,
-            OptimizationTermination::kInvalidRequest);
+            LeggedOptimizationTermination::kInvalidRequest);
 }
 
 }  // namespace

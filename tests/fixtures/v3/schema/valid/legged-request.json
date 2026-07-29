@@ -1,0 +1,130 @@
+{
+  "schema_version": "path-planner-v3-planning-request/v1",
+  "request_id": "legged-request-1",
+  "request_time": {
+    "clock_id": "mission-clock",
+    "tick_ns": "200"
+  },
+  "state_time": {
+    "clock_id": "mission-clock",
+    "tick_ns": "199"
+  },
+  "frame_id": "map",
+  "platform_type": "LEGGED",
+  "current_state": {
+    "position_m": [0.0, 0.0, 0.45],
+    "yaw_rad": 0.2,
+    "linear_velocity_mps": [0.0, 0.0, 0.0],
+    "yaw_rate_radps": 0.0,
+    "error_bounds": {
+      "position_bound_m": {
+        "shape": "euclidean_ball",
+        "center": [0.0, 0.0, 0.0],
+        "radius": 0.08
+      },
+      "yaw_bound_rad": {
+        "shape": "symmetric_interval",
+        "center": 0.0,
+        "half_width": 0.02
+      },
+      "linear_velocity_bound_mps": {
+        "shape": "euclidean_ball",
+        "center": [0.0, 0.0, 0.0],
+        "radius": 0.04
+      },
+      "yaw_rate_bound_radps": {
+        "shape": "symmetric_interval",
+        "center": 0.0,
+        "half_width": 0.02
+      }
+    }
+  },
+  "goal": {
+    "goal_id": "legged-goal-1",
+    "target": {
+      "kind": "POINT_WITH_TOLERANCE",
+      "position_m": [3.0, 2.0, 0.45],
+      "position_tolerance_m": 0.2
+    },
+    "task_metadata": []
+  },
+  "map_snapshot": {
+    "snapshot_ref": {
+      "id": "map-snapshot-1",
+      "revision": 1,
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "frame_id": "map",
+    "source_time": {
+      "clock_id": "mission-clock",
+      "tick_ns": "90"
+    },
+    "map_revision": 1,
+    "bounds": {
+      "minimum_m": [-10.0, -10.0, -1.0],
+      "maximum_m": [10.0, 10.0, 2.0]
+    },
+    "resolution_m": 0.25,
+    "layer_manifest": [
+      {
+        "layer_name": "KNOWN_MASK",
+        "content_ref": {
+          "id": "known-mask-1",
+          "revision": 1,
+          "content_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      },
+      {
+        "layer_name": "ELEVATION",
+        "content_ref": {
+          "id": "elevation-1",
+          "revision": 1,
+          "content_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      },
+      {
+        "layer_name": "TERRAIN_NORMAL",
+        "content_ref": {
+          "id": "terrain-normal-1",
+          "revision": 1,
+          "content_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      },
+      {
+        "layer_name": "ROUGHNESS",
+        "content_ref": {
+          "id": "roughness-1",
+          "revision": 1,
+          "content_hash": "4444444444444444444444444444444444444444444444444444444444444444"
+        }
+      },
+      {
+        "layer_name": "HARD_OBSTACLE",
+        "content_ref": {
+          "id": "hard-obstacle-1",
+          "revision": 1,
+          "content_hash": "5555555555555555555555555555555555555555555555555555555555555555"
+        }
+      },
+      {
+        "layer_name": "CONFIDENCE",
+        "content_ref": {
+          "id": "confidence-1",
+          "revision": 1,
+          "content_hash": "6666666666666666666666666666666666666666666666666666666666666666"
+        }
+      }
+    ],
+    "immutable_data_handle": "map-handle-1"
+  },
+  "safety_capability_ref": {
+    "id": "legged-capability-1",
+    "revision": 1,
+    "content_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "algorithm_config_ref": {
+    "id": "planner-config-1",
+    "revision": 1,
+    "content_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  }
+}

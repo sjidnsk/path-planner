@@ -481,7 +481,7 @@ LeggedSplineResult OptimizeLeggedBodySpline(
       .body_spline = std::nullopt,
       .estimated_execution_time =
           request.discrete_plan.estimated_execution_time,
-      .termination = OptimizationTermination::kInvalidRequest,
+      .termination = LeggedOptimizationTermination::kInvalidRequest,
   };
   if (request.discrete_plan.states.empty() ||
       request.discrete_plan.grid.yaw_bin_count == 0U ||
@@ -511,7 +511,7 @@ LeggedSplineResult OptimizeLeggedBodySpline(
     const auto solution =
         solver.Solve(qp->problem, request.config.qp_settings);
     if (!IsOk(solution)) {
-      result.termination = OptimizationTermination::kQpFailure;
+      result.termination = LeggedOptimizationTermination::kQpFailure;
       return result;
     }
     const auto& solved_qp = std::get<QpSolution>(solution);
@@ -519,7 +519,7 @@ LeggedSplineResult OptimizeLeggedBodySpline(
         !QpSolutionSatisfies(
             qp->problem, solved_qp,
             request.config.smoothing.constraint_tolerance)) {
-      result.termination = OptimizationTermination::kQpFailure;
+      result.termination = LeggedOptimizationTermination::kQpFailure;
       return result;
     }
     auto next_controls = Unpack(solved_qp.primal);
@@ -547,7 +547,7 @@ LeggedSplineResult OptimizeLeggedBodySpline(
     break;
   }
   if (!solved) {
-    result.termination = OptimizationTermination::kQpFailure;
+    result.termination = LeggedOptimizationTermination::kQpFailure;
     return result;
   }
 
@@ -557,18 +557,18 @@ LeggedSplineResult OptimizeLeggedBodySpline(
   };
   if (!ValidateSpline(spline, request)) {
     result.termination =
-        OptimizationTermination::kContinuousValidationFailure;
+        LeggedOptimizationTermination::kContinuousValidationFailure;
     return result;
   }
   if (result.estimated_execution_time.value >
       request.discrete_plan.estimated_execution_time.value +
           request.config.smoothing.maximum_time_increase.value) {
     result.termination =
-        OptimizationTermination::kTimeEquivalentViolation;
+        LeggedOptimizationTermination::kTimeEquivalentViolation;
     return result;
   }
   result.body_spline = std::move(spline);
-  result.termination = OptimizationTermination::kSolved;
+  result.termination = LeggedOptimizationTermination::kSolved;
   return result;
 }
 

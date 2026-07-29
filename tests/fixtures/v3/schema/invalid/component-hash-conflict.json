@@ -1,0 +1,57 @@
+{
+  "schema_version": "path-planner-v3-planning-response/v1",
+  "request_id": "wheel-request-1",
+  "response_time": {
+    "clock_id": "mission-clock",
+    "tick_ns": "101"
+  },
+  "planning_outcome": "NEW_REFERENCE_READY",
+  "execution_directive": "ACTIVATE_NEW_BUNDLE",
+  "reason_code": "TARGET_REACHED",
+  "new_reference_bundle": {
+    "schema_version": "path-planner-v3-reference-bundle/v1",
+    "bundle_id": "bundle-with-conflicting-component",
+    "bundle_revision": 1,
+    "bundle_hash": "9999999999999999999999999999999999999999999999999999999999999999",
+    "source_request_id": "wheel-request-1",
+    "source_map_snapshot_ref": {
+      "id": "map-snapshot-1",
+      "revision": 1,
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "source_safety_capability_ref": {
+      "id": "wheel-capability-1",
+      "revision": 1,
+      "content_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "source_algorithm_config_ref": {
+      "id": "planner-config-1",
+      "revision": 1,
+      "content_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "platform_type": "WHEELED",
+    "platform_reference": {},
+    "route_skeleton": {
+      "component_id": "component-1",
+      "component_hash": "not-the-canonical-sha256",
+      "content": {}
+    },
+    "committed_prefix": {
+      "component_id": "component-1",
+      "component_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "content": {}
+    },
+    "preview": {},
+    "validity": {},
+    "validation_summary": {},
+    "generation_evidence": {}
+  },
+  "call_diagnostics": {
+    "api_latency_ns": "1000",
+    "termination_reason": "TARGET_REACHED",
+    "expanded_state_count": 1,
+    "candidate_count": 1,
+    "resource_limit_hit": false,
+    "learned_cost_usage": "DISABLED"
+  }
+}

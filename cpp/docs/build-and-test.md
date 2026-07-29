@@ -99,6 +99,25 @@ OSQP 的 vcpkg port 固定为 1.0.0。其上游生成的 CMake package-version
 文件会报告 `0.0.0`，因此版本固定由 manifest/override 完成，项目使用
 `find_package(osqp CONFIG REQUIRED)`，不要把它改成不可靠的 `EXACT` 查找。
 
+## 安装与 CMake 消费
+
+安装到 D 盘：
+
+```powershell
+cmake --install D:/xunce/build/path-planner-v3/windows-msvc-release `
+  --prefix D:/xunce/install/path-planner-v3/release
+```
+
+消费工程应使用同一份 vcpkg 固定依赖，并配置安装前缀：
+
+```cmake
+find_package(LunarPathPlannerV3 CONFIG REQUIRED)
+target_link_libraries(my_planner PRIVATE LunarPathPlannerV3::api)
+```
+
+公开目标还包括 `contracts`、`common`、`wheel`、`legged` 和 `hopper`，
+完整名称均使用 `LunarPathPlannerV3::` 前缀。
+
 ## 分层测试前缀
 
 可以用 CTest 前缀运行局部门：

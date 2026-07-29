@@ -1,0 +1,76 @@
+{
+  "schema_version": "path-planner-v3-planning-response/v1",
+  "request_id": "hopper-request-1",
+  "response_time": {
+    "clock_id": "mission-clock",
+    "tick_ns": "301"
+  },
+  "planning_outcome": "NEW_REFERENCE_READY",
+  "execution_directive": "ACTIVATE_NEW_BUNDLE",
+  "reason_code": "TARGET_REACHED",
+  "new_reference_bundle": {
+    "schema_version": "path-planner-v3-reference-bundle/v1",
+    "bundle_id": "hopper-bundle-zero-flight-time",
+    "bundle_revision": 1,
+    "bundle_hash": "9999999999999999999999999999999999999999999999999999999999999999",
+    "source_request_id": "hopper-request-1",
+    "source_map_snapshot_ref": {
+      "id": "map-snapshot-1",
+      "revision": 1,
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "source_safety_capability_ref": {
+      "id": "hopper-capability-1",
+      "revision": 1,
+      "content_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "source_algorithm_config_ref": {
+      "id": "planner-config-1",
+      "revision": 1,
+      "content_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "platform_type": "HOPPER",
+    "platform_reference": {
+      "schema_version": "path-planner-v3-hopper-reference/v1",
+      "reference_id": "hopper-reference-zero-flight-time",
+      "reference_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "platform_type": "HOPPER",
+      "reference_time_origin": {
+        "clock_id": "mission-clock",
+        "tick_ns": "300"
+      },
+      "translation_model": "PURE_BALLISTIC_NO_INFLIGHT_TRANSLATION_CONTROL",
+      "ground_hold_anchor": {},
+      "next_landing_region": {},
+      "jump_boundary": {
+        "boundary_id": "jump-boundary-1",
+        "lock_event": "JUMP_BOUNDARY_LOCK",
+        "nominal_launch_state": {},
+        "allowed_launch_state_error_set": {},
+        "gravity_model_ref": {},
+        "ballistic_time_origin": "BALLISTIC_LAUNCH_EVENT",
+        "ballistic_flight_time_ns": "0",
+        "actuator_or_impulse_profile_ref": {}
+      },
+      "predicted_landing_footprint": {},
+      "certified_flight_tube": {},
+      "attitude_boundary": {},
+      "nominal_aim_point": {},
+      "physical_certification_ref": {}
+    },
+    "route_skeleton": {},
+    "committed_prefix": {},
+    "preview": {},
+    "validity": {},
+    "validation_summary": {},
+    "generation_evidence": {}
+  },
+  "call_diagnostics": {
+    "api_latency_ns": "1000",
+    "termination_reason": "TARGET_REACHED",
+    "expanded_state_count": 1,
+    "candidate_count": 1,
+    "resource_limit_hit": false,
+    "learned_cost_usage": "DISABLED"
+  }
+}

@@ -26,7 +26,7 @@ constexpr double kGeometryTolerance = 1.0e-9;
 constexpr double kFiniteBound = 1.0e12;
 
 [[nodiscard]] WheelSplineOptimizationResult Failure(
-    OptimizationTermination termination,
+    WheelOptimizationTermination termination,
     std::size_t iterations = 0U) {
   return {
       .spline = std::nullopt,
@@ -176,7 +176,7 @@ struct QpRows final {
     std::span<const PoseXyzYaw> controls,
     const CorridorResult& corridor,
     const WheelSplineConfig& config,
-    std::span<const FrozenControlPoint> frozen) {
+    std::span<const WheelFrozenControlPoint> frozen) {
   const auto count = static_cast<int>(controls.size());
   const int variables = 2 * count;
   Eigen::MatrixXd dense =
@@ -284,7 +284,7 @@ struct QpRows final {
     rows.Add(y_coefficient, pose.position_m.y,
              pose.position_m.y);
   }
-  for (const FrozenControlPoint& point : frozen) {
+  for (const WheelFrozenControlPoint& point : frozen) {
     const int index = static_cast<int>(point.index);
     const std::array x_coefficient{
         std::pair{2 * index, 1.0}};
@@ -503,19 +503,19 @@ WheelSplineOptimizationResult OptimizeWheelSpline(
       !FinitePositive(config.relative_qp_tolerance) ||
       !FinitePositive(config.maximum_curvature_per_m) ||
       config.time_equivalence_tolerance.value.count() < 0) {
-    return Failure(OptimizationTermination::kInvalidRequest);
+    return Failure(WheelOptimizationTermination::kInvalidRequest);
   }
   auto controls = InitialControlPoints(
       request.discrete_segment, config.maximum_control_points);
   if (controls.size() < 4U ||
       !std::ranges::all_of(controls, FinitePose)) {
-    return Failure(OptimizationTermination::kInvalidRequest);
+    return Failure(WheelOptimizationTermination::kInvalidRequest);
   }
-  for (const FrozenControlPoint& point :
+  for (const WheelFrozenControlPoint& point :
        request.committed_points) {
     if (point.index >= controls.size() ||
         !FinitePose(point.value)) {
-      return Failure(OptimizationTermination::kInvalidRequest);
+      return Failure(WheelOptimizationTermination::kInvalidRequest);
     }
     controls[point.index] = point.value;
   }
@@ -537,25 +537,25 @@ WheelSplineOptimizationResult OptimizeWheelSpline(
             .polish = false,
         });
     if (!IsOk(solution_result)) {
-      return Failure(OptimizationTermination::kNumericalFailure,
+      return Failure(WheelOptimizationTermination::kNumericalFailure,
                      iterations + 1U);
     }
     const auto& solution = std::get<QpSolution>(solution_result);
     if (solution.termination == QpTermination::kPrimalInfeasible ||
         solution.termination == QpTermination::kDualInfeasible) {
-      return Failure(OptimizationTermination::kQpInfeasible,
+      return Failure(WheelOptimizationTermination::kQpInfeasible,
                      iterations + 1U);
     }
     if (solution.termination == QpTermination::kMaxIterations) {
       return Failure(
-          OptimizationTermination::kQpIterationLimit,
+          WheelOptimizationTermination::kQpIterationLimit,
           iterations + 1U);
     }
     if (solution.termination != QpTermination::kSolved ||
         solution.primal.size() !=
             static_cast<Eigen::Index>(2U * controls.size()) ||
         !solution.primal.allFinite()) {
-      return Failure(OptimizationTermination::kNumericalFailure,
+      return Failure(WheelOptimizationTermination::kNumericalFailure,
                      iterations + 1U);
     }
     for (std::size_t point = 0U; point < controls.size();
@@ -569,7 +569,7 @@ WheelSplineOptimizationResult OptimizeWheelSpline(
     }
     controls.front() = fixed_start;
     controls.back() = fixed_finish;
-    for (const FrozenControlPoint& point :
+    for (const WheelFrozenControlPoint& point :
          request.committed_points) {
       controls[point.index] = point.value;
     }
@@ -584,7 +584,7 @@ WheelSplineOptimizationResult OptimizeWheelSpline(
     return {
         .spline = std::nullopt,
         .termination =
-            OptimizationTermination::kTimeToleranceExceeded,
+            WheelOptimizationTermination::kTimeToleranceExceeded,
         .estimated_execution_time = estimated_time,
         .scp_iterations = iterations,
     };
@@ -600,7 +600,7 @@ WheelSplineOptimizationResult OptimizeWheelSpline(
     return {
         .spline = std::nullopt,
         .termination =
-            OptimizationTermination::kConstraintViolation,
+            WheelOptimizationTermination::kConstraintViolation,
         .estimated_execution_time = estimated_time,
         .scp_iterations = iterations,
     };
@@ -612,7 +612,7 @@ WheelSplineOptimizationResult OptimizeWheelSpline(
               .knots = ClampedKnots(controls.size()),
               .control_points = std::move(controls),
           },
-      .termination = OptimizationTermination::kConverged,
+      .termination = WheelOptimizationTermination::kConverged,
       .estimated_execution_time = estimated_time,
       .scp_iterations = iterations,
   };

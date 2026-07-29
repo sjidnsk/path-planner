@@ -186,11 +186,11 @@ TEST(WheelSplineOptimizerTest, NeverMovesCommittedControlPoints) {
   const auto capability = std::get<WheelCapabilityView>(
       WheelCapabilityView::Create(Profile()));
   const std::vector frozen{
-      FrozenControlPoint{
+      WheelFrozenControlPoint{
           .index = 0U,
           .value = {{1.2, 1.1, 0.0}, 0.0},
       },
-      FrozenControlPoint{
+      WheelFrozenControlPoint{
           .index = 1U,
           .value = {{2.0, 1.0, 0.0}, 0.0},
       },
@@ -243,7 +243,7 @@ TEST(WheelSplineOptimizerTest,
 
   EXPECT_FALSE(result.spline.has_value());
   EXPECT_EQ(result.termination,
-            OptimizationTermination::kTimeToleranceExceeded);
+            WheelOptimizationTermination::kTimeToleranceExceeded);
 }
 
 TEST(WheelSplineOptimizerTest,
@@ -266,7 +266,7 @@ TEST(WheelSplineOptimizerTest,
 
   EXPECT_FALSE(result.spline.has_value());
   EXPECT_EQ(result.termination,
-            OptimizationTermination::kQpInfeasible);
+            WheelOptimizationTermination::kQpInfeasible);
 }
 
 }  // namespace

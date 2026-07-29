@@ -2,6 +2,15 @@
 
 Lunar path planner rebuilt from scratch. This package does not copy or depend on `a_gcs_ws-2.0.1`; that project is only a reference for problem framing.
 
+## C++20 多平台规划 v3（opt-in）
+
+独立 C++20 实现位于 `cpp/`，统一支持轮式、足式机体参考和纯弹道飞跃式
+下一着陆参考。它不会替换下文所述的既有 Python 默认 A*，也不连接 executor。
+
+Windows 的已验证 MSVC/CMake/vcpkg 配置、D 盘构建命令和安装方式见
+[`cpp/docs/build-and-test.md`](cpp/docs/build-and-test.md)；接口和安全边界见
+[`cpp/docs/interface-and-safety-boundary.md`](cpp/docs/interface-and-safety-boundary.md)。
+
 ## Scope
 
 Phase 1 provides:

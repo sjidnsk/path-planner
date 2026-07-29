@@ -1,0 +1,106 @@
+{
+  "schema_version": "path-planner-v3-benchmark-profile/v1",
+  "content_ref": {
+    "id": "declared-multiplatform-benchmark-v3",
+    "revision": 1,
+    "content_hash": "3bda82e8eabc3e145ac0ac65d7d0da9d3bfdaa14a5791e67703858fdea6ccc05"
+  },
+  "content": {
+    "hardware": {
+      "cpu_model": "Declared x86_64 benchmark host",
+      "physical_core_count": 8,
+      "logical_core_count": 16,
+      "memory_bytes": 17179869184,
+      "os_name": "Windows",
+      "os_version": "11",
+      "compiler_id": "MSVC",
+      "compiler_version": "19.44",
+      "build_type": "RELEASE"
+    },
+    "algorithm_config_ref": {
+      "id": "system-algorithm-config",
+      "revision": 1,
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "planner_thread_count": 1,
+    "warmup_sample_count": 10,
+    "measured_sample_count_per_platform": 1000,
+    "p95_latency_target_ns": "1000000000",
+    "platform_suites": [
+      {
+        "platform_type": "WHEELED",
+        "safety_capability_ref": {
+          "id": "system-wheel-capability",
+          "revision": 1,
+          "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "scenario_mix": [
+          {
+            "scenario_ref": {
+              "id": "declared-wheel-scenario-v3",
+              "revision": 1,
+              "content_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "weight": 1
+          }
+        ]
+      },
+      {
+        "platform_type": "LEGGED",
+        "safety_capability_ref": {
+          "id": "system-legged-capability",
+          "revision": 1,
+          "content_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "scenario_mix": [
+          {
+            "scenario_ref": {
+              "id": "declared-legged-scenario-v3",
+              "revision": 1,
+              "content_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            },
+            "weight": 1
+          }
+        ]
+      },
+      {
+        "platform_type": "HOPPER",
+        "safety_capability_ref": {
+          "id": "system-hopper-capability",
+          "revision": 1,
+          "content_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "scenario_mix": [
+          {
+            "scenario_ref": {
+              "id": "declared-hopper-scenario-v3",
+              "revision": 1,
+              "content_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+            },
+            "weight": 1
+          }
+        ]
+      }
+    ],
+    "timing_boundary": {
+      "starts_before": "REQUEST_SCHEMA_AND_SNAPSHOT_VALIDATION",
+      "ends_after": "PLANNING_RESPONSE_SERIALIZATION",
+      "included": [
+        "SCHEMA_AND_CONTRACT_VALIDATION",
+        "SAFE_PROJECTION_AND_TERMINAL_RESOLUTION",
+        "PLATFORM_SEARCH",
+        "CONTINUOUS_REFERENCE_GENERATION",
+        "CONTINUOUS_VALIDATION",
+        "BUNDLE_PACKAGING_AND_SERIALIZATION"
+      ],
+      "excluded": [
+        "RAW_SENSOR_MAPPING",
+        "PROCESS_STARTUP",
+        "REMOTE_RPC_OR_DISK_IO"
+      ],
+      "cold_start_reported_separately": true
+    },
+    "record_module_timings": false,
+    "planner_result_must_be_independent_of_latency_target": true
+  }
+}

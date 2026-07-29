@@ -1,0 +1,19 @@
+{
+  "schema_version": "path-planner-v3-planning-response/v1",
+  "request_id": "legged-request-1",
+  "response_time": {
+    "clock_id": "mission-clock",
+    "tick_ns": "201"
+  },
+  "planning_outcome": "GOAL_INFEASIBLE",
+  "execution_directive": "HOLD_STATIONARY",
+  "reason_code": "GOAL_INFEASIBLE",
+  "call_diagnostics": {
+    "api_latency_ns": "2000",
+    "termination_reason": "GOAL_INFEASIBLE",
+    "expanded_state_count": 0,
+    "candidate_count": 0,
+    "resource_limit_hit": false,
+    "learned_cost_usage": "DISABLED"
+  }
+}

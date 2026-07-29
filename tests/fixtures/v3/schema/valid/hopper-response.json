@@ -1,0 +1,19 @@
+{
+  "schema_version": "path-planner-v3-planning-response/v1",
+  "request_id": "hopper-request-1",
+  "response_time": {
+    "clock_id": "mission-clock",
+    "tick_ns": "301"
+  },
+  "planning_outcome": "RESOURCE_LIMIT",
+  "execution_directive": "NO_SAFE_PLANNER_REFERENCE",
+  "reason_code": "RESOURCE_LIMIT",
+  "call_diagnostics": {
+    "api_latency_ns": "3000",
+    "termination_reason": "EXPANSION_LIMIT",
+    "expanded_state_count": 64,
+    "candidate_count": 4,
+    "resource_limit_hit": true,
+    "learned_cost_usage": "DISABLED"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schema_version": "path-planner-v3-planning-response/v1",
+  "request_id": "wheel-request-1",
+  "response_time": {
+    "clock_id": "mission-clock",
+    "tick_ns": "101"
+  },
+  "planning_outcome": "NO_KNOWN_SAFE_ROUTE",
+  "execution_directive": "HOLD_STATIONARY",
+  "reason_code": "SAFE_DEAD_END",
+  "new_reference_bundle": {},
+  "call_diagnostics": {
+    "api_latency_ns": "1000",
+    "termination_reason": "GRAPH_EXHAUSTED",
+    "expanded_state_count": 17,
+    "candidate_count": 0,
+    "resource_limit_hit": false,
+    "learned_cost_usage": "DISABLED"
+  }
+}
