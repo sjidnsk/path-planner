@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,9 @@ DECLARED_BENCHMARK_PROFILE = (
     / "benchmarks"
     / "fixtures"
     / "declared_benchmark_profile.json"
+)
+PLATFORM_CAPABILITY_CONFIG_ROOT = (
+    PROJECT_ROOT.parent / "configs" / "platforms" / "v3"
 )
 
 SCHEMA_PATHS = (
@@ -55,10 +59,26 @@ INVALID_FIXTURES = (
     ),
 )
 
+PLATFORM_CAPABILITY_CONFIGS = (
+    "wheeled_skid_steer_v3_example_v1.json",
+    "legged_body_v3_example_v1.json",
+    "hopper_ballistic_v3_example_v1.json",
+)
+
 
 def _load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as stream:
         return json.load(stream)
+
+
+def _canonical_profile_content_bytes(content: Any) -> bytes:
+    return json.dumps(
+        content,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -107,6 +127,36 @@ def test_declared_benchmark_profile_matches_draft_2020_12_schema(
     assert errors == (), "\n".join(
         f"{list(error.absolute_path)}: {error.message}" for error in errors
     )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    PLATFORM_CAPABILITY_CONFIGS,
+)
+def test_platform_capability_config_matches_v3_schema_and_content_hash(
+    filename: str,
+    schema_store: dict[str, dict[str, Any]],
+    schema_registry: Registry,
+) -> None:
+    document = _load_json(PLATFORM_CAPABILITY_CONFIG_ROOT / filename)
+    validator = Draft202012Validator(
+        schema_store["safety-capability-profile.schema.json"],
+        registry=schema_registry,
+    )
+
+    errors = sorted(
+        validator.iter_errors(document),
+        key=lambda error: list(error.absolute_path),
+    )
+    assert errors == [], "\n".join(
+        f"{filename}:{list(error.absolute_path)}: {error.message}"
+        for error in errors
+    )
+
+    actual_hash = sha256(
+        _canonical_profile_content_bytes(document["content"])
+    ).hexdigest()
+    assert document["content_ref"]["content_hash"] == actual_hash
 
 
 @pytest.mark.parametrize(
